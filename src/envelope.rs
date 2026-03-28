@@ -61,92 +61,211 @@ impl AdsrConfig {
         }
     }
 
-    /// Tick the envelope forward one sample, returning the new level.
-    ///
-    /// Mutates `state`, `level`, and `pos` in place.
+    /// Convert to seconds given a sample rate.
+    #[must_use]
+    pub fn to_seconds(&self, sample_rate: f32) -> (f32, f32, f32, f32) {
+        (
+            self.attack_samples as f32 / sample_rate,
+            self.decay_samples as f32 / sample_rate,
+            self.sustain_level,
+            self.release_samples as f32 / sample_rate,
+        )
+    }
+
+    /// Check if all ADSR values are at their defaults (no explicit envelope).
+    #[must_use]
+    pub fn is_default_sfz(&self, sample_rate: f32) -> bool {
+        self.attack_samples == 0
+            && self.decay_samples == 0
+            && (self.sustain_level - 1.0).abs() < f32::EPSILON
+            && self.release_samples <= (sample_rate * 0.001) as u32 // ~0s
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AmpEnvelope — per-voice envelope state
+// ---------------------------------------------------------------------------
+
+/// Per-voice amplitude envelope.
+///
+/// When the `std` feature is enabled (default), this wraps [`naad::envelope::Adsr`]
+/// for production-quality envelope generation. Under `no_std`, it uses a built-in
+/// linear ADSR implementation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmpEnvelope {
+    #[cfg(feature = "std")]
+    inner: naad::envelope::Adsr,
+
+    #[cfg(not(feature = "std"))]
+    config: AdsrConfig,
+    #[cfg(not(feature = "std"))]
+    state: EnvState,
+    #[cfg(not(feature = "std"))]
+    level: f32,
+    #[cfg(not(feature = "std"))]
+    pos: u32,
+    #[cfg(not(feature = "std"))]
+    release_start_level: f32,
+}
+
+impl AmpEnvelope {
+    /// Create a new envelope from an ADSR config and sample rate.
+    #[must_use]
+    pub fn new(config: &AdsrConfig, sample_rate: f32) -> Self {
+        #[cfg(feature = "std")]
+        {
+            let (a, d, s, r) = config.to_seconds(sample_rate);
+            // naad validates params; clamp to safe ranges to avoid errors.
+            let adsr = naad::envelope::Adsr::with_sample_rate(
+                a.max(0.0),
+                d.max(0.0),
+                s.clamp(0.0, 1.0),
+                r.max(0.0),
+                sample_rate.max(1.0),
+            )
+            .unwrap_or_else(|_| {
+                naad::envelope::Adsr::with_sample_rate(0.0, 0.0, 1.0, 0.01, sample_rate.max(1.0))
+                    .expect("default ADSR params are valid")
+            });
+            Self { inner: adsr }
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = sample_rate;
+            Self {
+                config: *config,
+                state: EnvState::Idle,
+                level: 0.0,
+                pos: 0,
+                release_start_level: 0.0,
+            }
+        }
+    }
+
+    /// Trigger the attack phase (note on).
     #[inline]
-    pub fn tick(&self, state: &mut EnvState, level: &mut f32, pos: &mut u32) -> f32 {
-        match *state {
+    pub fn trigger(&mut self) {
+        #[cfg(feature = "std")]
+        self.inner.gate_on();
+
+        #[cfg(not(feature = "std"))]
+        {
+            self.state = EnvState::Attack;
+            self.level = 0.0;
+            self.pos = 0;
+            self.release_start_level = 0.0;
+        }
+    }
+
+    /// Enter the release phase (note off).
+    #[inline]
+    pub fn release(&mut self) {
+        #[cfg(feature = "std")]
+        self.inner.gate_off();
+
+        #[cfg(not(feature = "std"))]
+        {
+            if self.state != EnvState::Idle {
+                self.release_start_level = self.level;
+                self.state = EnvState::Release;
+                self.pos = 0;
+            }
+        }
+    }
+
+    /// Advance the envelope by one sample, returning the current level (0.0–1.0).
+    #[inline]
+    pub fn tick(&mut self) -> f32 {
+        #[cfg(feature = "std")]
+        {
+            self.inner.next_value()
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            self.tick_no_std()
+        }
+    }
+
+    /// Whether the envelope is still producing output.
+    #[inline]
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        #[cfg(feature = "std")]
+        {
+            self.inner.is_active()
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            self.state != EnvState::Idle
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // no_std fallback implementation
+    // -----------------------------------------------------------------------
+
+    #[cfg(not(feature = "std"))]
+    #[inline]
+    fn tick_no_std(&mut self) -> f32 {
+        match self.state {
             EnvState::Idle => {
-                *level = 0.0;
+                self.level = 0.0;
             }
             EnvState::Attack => {
-                if self.attack_samples == 0 {
-                    *level = 1.0;
-                    *state = EnvState::Decay;
-                    *pos = 0;
+                if self.config.attack_samples == 0 {
+                    self.level = 1.0;
+                    self.state = EnvState::Decay;
+                    self.pos = 0;
                 } else {
-                    *level = (*pos as f32 + 1.0) / self.attack_samples as f32;
-                    *pos += 1;
-                    if *pos >= self.attack_samples {
-                        *level = 1.0;
-                        *state = EnvState::Decay;
-                        *pos = 0;
+                    self.level = (self.pos as f32 + 1.0) / self.config.attack_samples as f32;
+                    self.pos += 1;
+                    if self.pos >= self.config.attack_samples {
+                        self.level = 1.0;
+                        self.state = EnvState::Decay;
+                        self.pos = 0;
                     }
                 }
             }
             EnvState::Decay => {
-                if self.decay_samples == 0 {
-                    *level = self.sustain_level;
-                    *state = EnvState::Sustain;
-                    *pos = 0;
+                if self.config.decay_samples == 0 {
+                    self.level = self.config.sustain_level;
+                    self.state = EnvState::Sustain;
+                    self.pos = 0;
                 } else {
-                    let t = (*pos as f32 + 1.0) / self.decay_samples as f32;
-                    *level = 1.0 + (self.sustain_level - 1.0) * t;
-                    *pos += 1;
-                    if *pos >= self.decay_samples {
-                        *level = self.sustain_level;
-                        *state = EnvState::Sustain;
-                        *pos = 0;
+                    let t = (self.pos as f32 + 1.0) / self.config.decay_samples as f32;
+                    self.level = 1.0 + (self.config.sustain_level - 1.0) * t;
+                    self.pos += 1;
+                    if self.pos >= self.config.decay_samples {
+                        self.level = self.config.sustain_level;
+                        self.state = EnvState::Sustain;
+                        self.pos = 0;
                     }
                 }
             }
             EnvState::Sustain => {
-                *level = self.sustain_level;
+                self.level = self.config.sustain_level;
             }
             EnvState::Release => {
-                if self.release_samples == 0 {
-                    *level = 0.0;
-                    *state = EnvState::Idle;
-                    *pos = 0;
+                if self.config.release_samples == 0 {
+                    self.level = 0.0;
+                    self.state = EnvState::Idle;
+                    self.pos = 0;
                 } else {
-                    // Store the starting level on first tick of release
-                    // We use a linear ramp from current level to 0
-                    let remaining = self.release_samples.saturating_sub(*pos);
-                    if remaining == 0 {
-                        *level = 0.0;
-                        *state = EnvState::Idle;
-                        *pos = 0;
-                    } else {
-                        *level *= (remaining as f32 - 1.0) / remaining as f32;
-                        *pos += 1;
-                        if *pos >= self.release_samples {
-                            *level = 0.0;
-                            *state = EnvState::Idle;
-                            *pos = 0;
-                        }
+                    let progress = (self.pos as f32 + 1.0) / self.config.release_samples as f32;
+                    self.level = self.release_start_level * (1.0 - progress);
+                    self.pos += 1;
+                    if self.level <= 0.0 || self.pos >= self.config.release_samples {
+                        self.level = 0.0;
+                        self.state = EnvState::Idle;
+                        self.pos = 0;
                     }
                 }
             }
         }
-        *level
-    }
-
-    /// Trigger the attack phase.
-    #[inline]
-    pub fn trigger(state: &mut EnvState, level: &mut f32, pos: &mut u32) {
-        *state = EnvState::Attack;
-        *level = 0.0;
-        *pos = 0;
-    }
-
-    /// Enter the release phase.
-    #[inline]
-    pub fn release(state: &mut EnvState, pos: &mut u32) {
-        if *state != EnvState::Idle {
-            *state = EnvState::Release;
-            *pos = 0;
-        }
+        self.level
     }
 }
 
@@ -164,109 +283,126 @@ mod tests {
     }
 
     #[test]
-    fn adsr_attack_ramp() {
-        let cfg = AdsrConfig {
-            attack_samples: 10,
-            decay_samples: 0,
-            sustain_level: 1.0,
-            release_samples: 10,
-        };
-        let mut state = EnvState::Idle;
-        let mut level = 0.0f32;
-        let mut pos = 0u32;
-
-        AdsrConfig::trigger(&mut state, &mut level, &mut pos);
-        assert_eq!(state, EnvState::Attack);
-
-        // Ramp through attack
-        for i in 0..10 {
-            let l = cfg.tick(&mut state, &mut level, &mut pos);
-            if i < 9 {
-                assert!(l > 0.0 && l <= 1.0);
-            }
-        }
-        // After attack completes, state transitions to Decay
-        assert_eq!(state, EnvState::Decay);
-        assert!((level - 1.0).abs() < f32::EPSILON);
-
-        // One more tick: decay=0 so jumps immediately to Sustain
-        cfg.tick(&mut state, &mut level, &mut pos);
-        assert_eq!(state, EnvState::Sustain);
-        assert!((level - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn adsr_full_cycle() {
+    fn amp_envelope_trigger_release_cycle() {
         let cfg = AdsrConfig {
             attack_samples: 4,
             decay_samples: 4,
             sustain_level: 0.5,
             release_samples: 4,
         };
-        let mut state = EnvState::Idle;
-        let mut level = 0.0f32;
-        let mut pos = 0u32;
+        let mut env = AmpEnvelope::new(&cfg, 44100.0);
+        assert!(!env.is_active());
 
-        AdsrConfig::trigger(&mut state, &mut level, &mut pos);
+        env.trigger();
+        assert!(env.is_active());
 
         // Attack
-        for _ in 0..4 {
-            cfg.tick(&mut state, &mut level, &mut pos);
+        for _ in 0..100 {
+            env.tick();
         }
-        assert_eq!(state, EnvState::Decay);
-
-        // Decay
-        for _ in 0..4 {
-            cfg.tick(&mut state, &mut level, &mut pos);
-        }
-        assert_eq!(state, EnvState::Sustain);
-        assert!((level - 0.5).abs() < 0.01);
+        // Should be at sustain
+        let level = env.tick();
+        assert!(
+            (level - 0.5).abs() < 0.05,
+            "expected sustain ~0.5, got {level}"
+        );
 
         // Release
-        AdsrConfig::release(&mut state, &mut pos);
-        assert_eq!(state, EnvState::Release);
-
-        for _ in 0..100 {
-            cfg.tick(&mut state, &mut level, &mut pos);
-            if state == EnvState::Idle {
+        env.release();
+        for _ in 0..10000 {
+            env.tick();
+            if !env.is_active() {
                 break;
             }
         }
-        assert_eq!(state, EnvState::Idle);
-        assert!((level - 0.0).abs() < f32::EPSILON);
+        assert!(!env.is_active());
     }
 
     #[test]
-    fn adsr_idle_stays_zero() {
+    fn amp_envelope_attack_ramp() {
+        let cfg = AdsrConfig {
+            attack_samples: 100,
+            decay_samples: 0,
+            sustain_level: 1.0,
+            release_samples: 100,
+        };
+        let mut env = AmpEnvelope::new(&cfg, 44100.0);
+        env.trigger();
+
+        let first = env.tick();
+        for _ in 0..49 {
+            env.tick();
+        }
+        let mid = env.tick();
+        assert!(
+            mid > first,
+            "should ramp up during attack: first={first}, mid={mid}"
+        );
+    }
+
+    #[test]
+    fn amp_envelope_smooth_release_from_mid_attack() {
+        let cfg = AdsrConfig {
+            attack_samples: 1000,
+            decay_samples: 0,
+            sustain_level: 1.0,
+            release_samples: 1000,
+        };
+        let mut env = AmpEnvelope::new(&cfg, 44100.0);
+        env.trigger();
+
+        // Advance partway through attack
+        for _ in 0..500 {
+            env.tick();
+        }
+        let level_at_release = env.tick();
+        assert!(level_at_release > 0.0 && level_at_release < 1.0);
+
+        // Release should ramp down from current level, not from 1.0
+        env.release();
+        let first_release = env.tick();
+        assert!(
+            first_release <= level_at_release,
+            "release should start at or below {level_at_release}, got {first_release}"
+        );
+
+        for _ in 0..10000 {
+            env.tick();
+            if !env.is_active() {
+                break;
+            }
+        }
+        assert!(!env.is_active());
+    }
+
+    #[test]
+    fn amp_envelope_idle_stays_zero() {
         let cfg = AdsrConfig::default();
-        let mut state = EnvState::Idle;
-        let mut level = 0.0f32;
-        let mut pos = 0u32;
-
-        let l = cfg.tick(&mut state, &mut level, &mut pos);
-        assert_eq!(l, 0.0);
-        assert_eq!(state, EnvState::Idle);
+        let mut env = AmpEnvelope::new(&cfg, 44100.0);
+        let level = env.tick();
+        assert_eq!(level, 0.0);
+        assert!(!env.is_active());
     }
 
     #[test]
-    fn adsr_zero_attack() {
+    fn amp_envelope_zero_attack() {
         let cfg = AdsrConfig {
             attack_samples: 0,
             decay_samples: 0,
             sustain_level: 0.8,
-            release_samples: 10,
+            release_samples: 100,
         };
-        let mut state = EnvState::Idle;
-        let mut level = 0.0f32;
-        let mut pos = 0u32;
+        let mut env = AmpEnvelope::new(&cfg, 44100.0);
+        env.trigger();
 
-        AdsrConfig::trigger(&mut state, &mut level, &mut pos);
-        // First tick: attack=0 → jumps to Decay
-        cfg.tick(&mut state, &mut level, &mut pos);
-        assert_eq!(state, EnvState::Decay);
-        // Second tick: decay=0 → jumps to Sustain
-        cfg.tick(&mut state, &mut level, &mut pos);
-        assert_eq!(state, EnvState::Sustain);
-        assert!((level - 0.8).abs() < f32::EPSILON);
+        // Should quickly reach sustain
+        for _ in 0..10 {
+            env.tick();
+        }
+        let level = env.tick();
+        assert!(
+            (level - 0.8).abs() < 0.05,
+            "should be at sustain ~0.8, got {level}"
+        );
     }
 }

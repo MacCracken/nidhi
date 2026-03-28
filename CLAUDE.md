@@ -11,7 +11,7 @@
 
 ## Consumers
 
-dhvani (audio engine), and any AGNOS component needing sample playback with key/velocity zones, loop modes, or time-stretching.
+dhvani (audio engine), shruti (DAW — nidhi replaces `shruti-instruments::sampler` via dhvani), and any AGNOS component needing sample playback with key/velocity zones, loop modes, or time-stretching.
 
 ## Dependencies
 

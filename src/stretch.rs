@@ -127,10 +127,9 @@ impl TimeStretcher {
 
             // Determine optimal input position via cross-correlation search.
             let optimal_input = if let Some(ref prev) = prev_frame {
-                let search_start =
-                    (expected_input - tolerance as isize).max(0) as usize;
-                let search_end =
-                    ((expected_input + tolerance as isize) as usize).min(input_len.saturating_sub(self.frame_size));
+                let search_start = (expected_input - tolerance as isize).max(0) as usize;
+                let search_end = ((expected_input + tolerance as isize) as usize)
+                    .min(input_len.saturating_sub(self.frame_size));
 
                 if search_start > search_end {
                     expected_input.max(0) as usize

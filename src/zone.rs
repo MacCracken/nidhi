@@ -1,8 +1,78 @@
 //! Zone — key/velocity region mapped to a sample.
 
+use crate::envelope::AdsrConfig;
 use crate::loop_mode::LoopMode;
 use crate::sample::SampleId;
 use serde::{Deserialize, Serialize};
+
+/// Velocity-to-amplitude curve shape.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum VelocityCurve {
+    /// Linear mapping (default). `amp = vel / 127`.
+    #[default]
+    Linear,
+    /// Convex curve — opens faster (quiet velocities louder). `amp = sqrt(vel / 127)`.
+    Convex,
+    /// Concave curve — late bloom (quiet velocities quieter). `amp = (vel / 127)^2`.
+    Concave,
+    /// Switch — full volume above 64, silent below. Binary on/off.
+    Switch,
+}
+
+impl VelocityCurve {
+    /// Map a MIDI velocity (0–127) to amplitude (0.0–1.0).
+    #[inline]
+    #[must_use]
+    pub fn apply(self, velocity: u8) -> f32 {
+        let v = velocity as f32 / 127.0;
+        match self {
+            Self::Linear => v,
+            Self::Convex => {
+                // Fast inverse sqrt approximation for no_std; exact sqrt when std
+                #[cfg(feature = "std")]
+                {
+                    v.sqrt()
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    // Babylonian method: 2 iterations is plenty for 0..1 range
+                    if v <= 0.0 {
+                        0.0
+                    } else {
+                        let mut x = v;
+                        x = 0.5 * (x + v / x);
+                        x = 0.5 * (x + v / x);
+                        x
+                    }
+                }
+            }
+            Self::Concave => v * v,
+            Self::Switch => {
+                if velocity > 64 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
+/// Filter type for per-zone filtering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum FilterMode {
+    /// Low-pass filter (default).
+    #[default]
+    LowPass,
+    /// High-pass filter.
+    HighPass,
+    /// Band-pass filter.
+    BandPass,
+    /// Notch (band-reject) filter.
+    Notch,
+}
 
 /// A key/velocity zone mapping a region of the keyboard to a sample.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,12 +100,29 @@ pub struct Zone {
     pub(crate) loop_start: usize,
     /// Loop end frame (0 = end of sample).
     pub(crate) loop_end: usize,
-    /// Lowpass filter cutoff in Hz (0.0 = disabled).
+    /// Filter cutoff in Hz (0.0 = disabled).
     pub(crate) filter_cutoff: f32,
+    /// Filter resonance / Q (0.707 = Butterworth, higher = more resonant).
+    pub(crate) filter_resonance: f32,
+    /// Filter type.
+    #[serde(default)]
+    pub(crate) filter_type: FilterMode,
     /// How much velocity opens the filter (0.0–1.0).
     pub(crate) filter_vel_track: f32,
     /// Round-robin group (0 = none).
     pub(crate) group: u32,
+    /// Velocity-to-amplitude curve.
+    #[serde(default)]
+    pub(crate) vel_curve: VelocityCurve,
+    /// Per-zone ADSR config (None = use engine default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) adsr: Option<AdsrConfig>,
+    /// Filter envelope ADSR config (None = no filter envelope).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fileg: Option<AdsrConfig>,
+    /// Filter envelope depth in cents (±4800 = ±4 octaves).
+    #[serde(default)]
+    pub(crate) fileg_depth: f32,
 }
 
 impl Zone {
@@ -55,8 +142,14 @@ impl Zone {
             loop_start: 0,
             loop_end: 0,
             filter_cutoff: 0.0,
+            filter_resonance: 0.707,
+            filter_type: FilterMode::LowPass,
             filter_vel_track: 0.0,
             group: 0,
+            vel_curve: VelocityCurve::Linear,
+            adsr: None,
+            fileg: None,
+            fileg_depth: 0.0,
         }
     }
 
@@ -106,10 +199,22 @@ impl Zone {
         self
     }
 
-    /// Set lowpass filter cutoff and velocity tracking.
+    /// Set filter cutoff and velocity tracking.
     pub fn with_filter(mut self, cutoff: f32, vel_track: f32) -> Self {
         self.filter_cutoff = cutoff.max(0.0);
         self.filter_vel_track = vel_track.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set filter resonance (Q factor). 0.707 = Butterworth (no peak).
+    pub fn with_filter_resonance(mut self, q: f32) -> Self {
+        self.filter_resonance = q.max(0.1);
+        self
+    }
+
+    /// Set filter type.
+    pub fn with_filter_type(mut self, mode: FilterMode) -> Self {
+        self.filter_type = mode;
         self
     }
 
@@ -117,6 +222,49 @@ impl Zone {
     pub fn with_group(mut self, group: u32) -> Self {
         self.group = group;
         self
+    }
+
+    /// Set velocity curve.
+    pub fn with_velocity_curve(mut self, curve: VelocityCurve) -> Self {
+        self.vel_curve = curve;
+        self
+    }
+
+    /// Velocity curve for this zone.
+    #[inline]
+    pub fn velocity_curve(&self) -> VelocityCurve {
+        self.vel_curve
+    }
+
+    /// Set per-zone ADSR envelope config.
+    pub fn with_adsr(mut self, config: AdsrConfig) -> Self {
+        self.adsr = Some(config);
+        self
+    }
+
+    /// Per-zone ADSR config (None = use engine default).
+    #[inline]
+    pub fn adsr(&self) -> Option<&AdsrConfig> {
+        self.adsr.as_ref()
+    }
+
+    /// Set filter envelope config and depth in cents.
+    pub fn with_filter_envelope(mut self, config: AdsrConfig, depth_cents: f32) -> Self {
+        self.fileg = Some(config);
+        self.fileg_depth = depth_cents.clamp(-4800.0, 4800.0);
+        self
+    }
+
+    /// Filter envelope config (None = no filter modulation).
+    #[inline]
+    pub fn fileg(&self) -> Option<&AdsrConfig> {
+        self.fileg.as_ref()
+    }
+
+    /// Filter envelope depth in cents.
+    #[inline]
+    pub fn fileg_depth(&self) -> f32 {
+        self.fileg_depth
     }
 
     /// Round-robin group (0 = none).
@@ -129,6 +277,18 @@ impl Zone {
     #[inline]
     pub fn filter_cutoff(&self) -> f32 {
         self.filter_cutoff
+    }
+
+    /// Filter resonance (Q factor).
+    #[inline]
+    pub fn filter_resonance(&self) -> f32 {
+        self.filter_resonance
+    }
+
+    /// Filter type.
+    #[inline]
+    pub fn filter_type(&self) -> FilterMode {
+        self.filter_type
     }
 
     /// Filter velocity tracking amount.
@@ -147,7 +307,10 @@ impl Zone {
     #[inline]
     #[must_use]
     pub fn matches(&self, note: u8, velocity: u8) -> bool {
-        note >= self.key_lo && note <= self.key_hi && velocity >= self.vel_lo && velocity <= self.vel_hi
+        note >= self.key_lo
+            && note <= self.key_hi
+            && velocity >= self.vel_lo
+            && velocity <= self.vel_hi
     }
 
     /// Compute the playback speed ratio for a given MIDI note.
@@ -180,7 +343,9 @@ mod tests {
 
     #[test]
     fn zone_matches() {
-        let z = Zone::new(SampleId(0)).with_key_range(60, 72).with_vel_range(1, 127);
+        let z = Zone::new(SampleId(0))
+            .with_key_range(60, 72)
+            .with_vel_range(1, 127);
         assert!(z.matches(66, 100));
         assert!(!z.matches(59, 100));
         assert!(!z.matches(73, 100));

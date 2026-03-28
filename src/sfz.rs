@@ -65,6 +65,16 @@ pub struct SfzRegion {
     pub cutoff: f32,
     /// Filter velocity tracking in cents (mapped to 0.0–1.0 on export).
     pub fil_veltrack: f32,
+    /// Filter envelope attack time in seconds.
+    pub fileg_attack: f32,
+    /// Filter envelope decay time in seconds.
+    pub fileg_decay: f32,
+    /// Filter envelope sustain level (0–100).
+    pub fileg_sustain: f32,
+    /// Filter envelope release time in seconds.
+    pub fileg_release: f32,
+    /// Filter envelope depth in cents.
+    pub fileg_depth: f32,
 }
 
 impl Default for SfzRegion {
@@ -89,6 +99,11 @@ impl Default for SfzRegion {
             ampeg_release: 0.0,
             cutoff: 0.0,
             fil_veltrack: 0.0,
+            fileg_attack: 0.0,
+            fileg_decay: 0.0,
+            fileg_sustain: 100.0,
+            fileg_release: 0.0,
+            fileg_depth: 0.0,
         }
     }
 }
@@ -194,6 +209,31 @@ impl SfzRegion {
                     self.fil_veltrack = v;
                 }
             }
+            "fileg_attack" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.fileg_attack = v.max(0.0);
+                }
+            }
+            "fileg_decay" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.fileg_decay = v.max(0.0);
+                }
+            }
+            "fileg_sustain" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.fileg_sustain = v.clamp(0.0, 100.0);
+                }
+            }
+            "fileg_release" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.fileg_release = v.max(0.0);
+                }
+            }
+            "fileg_depth" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.fileg_depth = v.clamp(-9600.0, 9600.0);
+                }
+            }
             // Unknown opcodes are silently ignored per SFZ spec convention.
             _ => {}
         }
@@ -262,6 +302,21 @@ impl SfzRegion {
         }
         if self.fil_veltrack == 0.0 && parent.fil_veltrack != 0.0 {
             self.fil_veltrack = parent.fil_veltrack;
+        }
+        if self.fileg_attack == 0.0 && parent.fileg_attack != 0.0 {
+            self.fileg_attack = parent.fileg_attack;
+        }
+        if self.fileg_decay == 0.0 && parent.fileg_decay != 0.0 {
+            self.fileg_decay = parent.fileg_decay;
+        }
+        if self.fileg_sustain == 100.0 && parent.fileg_sustain != 100.0 {
+            self.fileg_sustain = parent.fileg_sustain;
+        }
+        if self.fileg_release == 0.0 && parent.fileg_release != 0.0 {
+            self.fileg_release = parent.fileg_release;
+        }
+        if self.fileg_depth == 0.0 && parent.fileg_depth != 0.0 {
+            self.fileg_depth = parent.fileg_depth;
         }
     }
 }
@@ -365,20 +420,47 @@ impl SfzFile {
                     merged.loop_start,
                     merged.loop_end,
                 )
-                .with_filter(
-                    merged.cutoff,
-                    map_fil_veltrack(merged.fil_veltrack),
-                )
+                .with_filter(merged.cutoff, map_fil_veltrack(merged.fil_veltrack))
                 .with_group(merged.group);
 
-            // Build ADSR hint
-            let _adsr = AdsrConfig::from_seconds(
-                merged.ampeg_attack,
-                merged.ampeg_decay,
-                merged.ampeg_sustain / 100.0,
-                merged.ampeg_release,
-                sample_rate,
-            );
+            // Wire ADSR if any ampeg opcode was explicitly set
+            let has_ampeg = merged.ampeg_attack != 0.0
+                || merged.ampeg_decay != 0.0
+                || merged.ampeg_sustain != 100.0
+                || merged.ampeg_release != 0.0;
+
+            let zone = if has_ampeg {
+                let adsr = AdsrConfig::from_seconds(
+                    merged.ampeg_attack,
+                    merged.ampeg_decay,
+                    merged.ampeg_sustain / 100.0,
+                    merged.ampeg_release,
+                    sample_rate,
+                );
+                zone.with_adsr(adsr)
+            } else {
+                zone
+            };
+
+            // Wire filter envelope if any fileg opcode was set
+            let has_fileg = merged.fileg_depth != 0.0
+                || merged.fileg_attack != 0.0
+                || merged.fileg_decay != 0.0
+                || merged.fileg_sustain != 100.0
+                || merged.fileg_release != 0.0;
+
+            let zone = if has_fileg {
+                let fileg = AdsrConfig::from_seconds(
+                    merged.fileg_attack,
+                    merged.fileg_decay,
+                    merged.fileg_sustain / 100.0,
+                    merged.fileg_release,
+                    sample_rate,
+                );
+                zone.with_filter_envelope(fileg, merged.fileg_depth)
+            } else {
+                zone
+            };
 
             result.push((zone, filename));
         }

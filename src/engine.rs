@@ -3,10 +3,167 @@
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
-use crate::envelope::{AdsrConfig, EnvState};
+use crate::envelope::{AdsrConfig, AmpEnvelope};
 use crate::instrument::Instrument;
 use crate::loop_mode::LoopMode;
 use crate::sample::SampleBank;
+use crate::zone::FilterMode;
+
+// ---------------------------------------------------------------------------
+// VoiceFilter — per-voice stereo filter (SVF when std, one-pole fallback)
+// ---------------------------------------------------------------------------
+
+/// Per-voice stereo filter.
+///
+/// With `std`: two [`naad::filter::StateVariableFilter`] instances (true stereo).
+/// Without `std`: two one-pole lowpass states (lightweight fallback).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VoiceFilter {
+    /// Whether filtering is active (cutoff > 0).
+    active: bool,
+
+    #[cfg(feature = "std")]
+    filter_l: Option<naad::filter::StateVariableFilter>,
+    #[cfg(feature = "std")]
+    filter_r: Option<naad::filter::StateVariableFilter>,
+    #[cfg(feature = "std")]
+    mode: FilterMode,
+
+    #[cfg(not(feature = "std"))]
+    state_l: f32,
+    #[cfg(not(feature = "std"))]
+    state_r: f32,
+    #[cfg(not(feature = "std"))]
+    coeff: f32,
+}
+
+impl VoiceFilter {
+    /// Create a disabled filter (bypass).
+    fn bypass() -> Self {
+        Self {
+            active: false,
+            #[cfg(feature = "std")]
+            filter_l: None,
+            #[cfg(feature = "std")]
+            filter_r: None,
+            #[cfg(feature = "std")]
+            mode: FilterMode::LowPass,
+            #[cfg(not(feature = "std"))]
+            state_l: 0.0,
+            #[cfg(not(feature = "std"))]
+            state_r: 0.0,
+            #[cfg(not(feature = "std"))]
+            coeff: 1.0,
+        }
+    }
+
+    /// Create a filter from zone settings and velocity.
+    fn new(
+        cutoff: f32,
+        resonance: f32,
+        mode: FilterMode,
+        vel_track: f32,
+        velocity: u8,
+        sample_rate: f32,
+    ) -> Self {
+        if cutoff <= 0.0 {
+            return Self::bypass();
+        }
+
+        let vel_norm = velocity as f32 / 127.0;
+        let effective_cutoff = cutoff * (1.0 - vel_track * (1.0 - vel_norm));
+        // Clamp to valid range for SVF
+        let effective_cutoff = effective_cutoff.clamp(20.0, sample_rate * 0.49);
+
+        #[cfg(feature = "std")]
+        {
+            let q = resonance.max(0.1);
+            let fl = naad::filter::StateVariableFilter::new(effective_cutoff, q, sample_rate).ok();
+            let fr = naad::filter::StateVariableFilter::new(effective_cutoff, q, sample_rate).ok();
+            Self {
+                active: fl.is_some(),
+                filter_l: fl,
+                filter_r: fr,
+                mode,
+            }
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = (resonance, mode);
+            let coeff = 1.0 - (-core::f32::consts::TAU * effective_cutoff / sample_rate).exp();
+            Self {
+                active: true,
+                state_l: 0.0,
+                state_r: 0.0,
+                coeff: coeff.clamp(0.0, 1.0),
+            }
+        }
+    }
+
+    /// Update the filter cutoff frequency (for envelope modulation).
+    #[inline]
+    fn set_cutoff(&mut self, cutoff: f32, sample_rate: f32) {
+        if !self.active {
+            return;
+        }
+        let cutoff = cutoff.clamp(20.0, sample_rate * 0.49);
+
+        #[cfg(feature = "std")]
+        {
+            if let Some(f) = self.filter_l.as_mut() {
+                let _ = f.set_params(cutoff, f.q());
+            }
+            if let Some(f) = self.filter_r.as_mut() {
+                let _ = f.set_params(cutoff, f.q());
+            }
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            self.coeff =
+                (1.0 - (-core::f32::consts::TAU * cutoff / sample_rate).exp()).clamp(0.0, 1.0);
+        }
+    }
+
+    /// Process a stereo sample pair through the filter.
+    #[inline]
+    fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
+        if !self.active {
+            return (left, right);
+        }
+
+        #[cfg(feature = "std")]
+        {
+            let l = self.filter_l.as_mut().map_or(left, |f| {
+                let out = f.process_sample(left);
+                match self.mode {
+                    FilterMode::LowPass => out.low_pass,
+                    FilterMode::HighPass => out.high_pass,
+                    FilterMode::BandPass => out.band_pass,
+                    FilterMode::Notch => out.notch,
+                }
+            });
+            let r = self.filter_r.as_mut().map_or(right, |f| {
+                let out = f.process_sample(right);
+                match self.mode {
+                    FilterMode::LowPass => out.low_pass,
+                    FilterMode::HighPass => out.high_pass,
+                    FilterMode::BandPass => out.band_pass,
+                    FilterMode::Notch => out.notch,
+                }
+            });
+            (l, r)
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            self.state_l += self.coeff * (left - self.state_l);
+            self.state_r += self.coeff * (right - self.state_r);
+            (self.state_l, self.state_r)
+        }
+    }
+}
 
 /// A single playback voice — tracks position within a sample.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,20 +184,20 @@ pub struct SamplerVoice {
     age: u64,
     /// Playback direction for ping-pong.
     forward: bool,
-    /// ADSR envelope state.
-    env_state: EnvState,
-    /// Current envelope level (0.0–1.0).
-    env_level: f32,
-    /// Position within current envelope stage.
-    env_pos: u32,
-    /// One-pole lowpass filter state.
-    filter_state: f32,
-    /// Filter coefficient (0.0 = full filter, 1.0 = no filter).
-    filter_coeff: f32,
+    /// Per-voice amplitude envelope.
+    amp_env: AmpEnvelope,
+    /// Per-voice filter envelope (modulates cutoff).
+    filter_env: Option<AmpEnvelope>,
+    /// Filter envelope depth in cents.
+    filter_env_depth: f32,
+    /// Base filter cutoff (before envelope modulation).
+    base_cutoff: f32,
+    /// Per-voice stereo filter.
+    filter: VoiceFilter,
 }
 
 impl SamplerVoice {
-    fn new() -> Self {
+    fn new(sample_rate: f32) -> Self {
         Self {
             active: false,
             zone_index: 0,
@@ -50,11 +207,11 @@ impl SamplerVoice {
             note: 0,
             age: 0,
             forward: true,
-            env_state: EnvState::Idle,
-            env_level: 0.0,
-            env_pos: 0,
-            filter_state: 0.0,
-            filter_coeff: 1.0,
+            amp_env: AmpEnvelope::new(&AdsrConfig::default(), sample_rate),
+            filter_env: None,
+            filter_env_depth: 0.0,
+            base_cutoff: 0.0,
+            filter: VoiceFilter::bypass(),
         }
     }
 
@@ -69,27 +226,6 @@ impl SamplerVoice {
     pub fn note(&self) -> u8 {
         self.note
     }
-
-    /// Apply one-pole lowpass filter to stereo.
-    /// Uses a single filter state (mono filter on both channels).
-    /// For true stereo filtering we'd need two states, but this is
-    /// lightweight and adequate for brightness control.
-    #[inline]
-    fn apply_filter_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
-        if self.filter_coeff >= 1.0 {
-            return (left, right);
-        }
-        // Simple: filter the mid signal, reconstruct
-        // Actually, for per-voice brightness, filtering both the same way is fine
-        let mono_in = (left + right) * 0.5;
-        self.filter_state += self.filter_coeff * (mono_in - self.filter_state);
-        let ratio = if mono_in.abs() > 1e-10 {
-            self.filter_state / mono_in
-        } else {
-            self.filter_coeff
-        };
-        (left * ratio, right * ratio)
-    }
 }
 
 /// Polyphonic sampler engine with voice stealing.
@@ -100,19 +236,21 @@ pub struct SamplerEngine {
     instrument: Option<Instrument>,
     bank: SampleBank,
     sample_rate: f32,
-    /// ADSR envelope configuration.
-    adsr: AdsrConfig,
+    /// Default ADSR envelope configuration (used when zone has no per-zone ADSR).
+    default_adsr: AdsrConfig,
 }
 
 impl SamplerEngine {
     /// Create a new sampler engine with the given voice count.
     pub fn new(max_voices: usize, sample_rate: f32) -> Self {
         Self {
-            voices: (0..max_voices).map(|_| SamplerVoice::new()).collect(),
+            voices: (0..max_voices)
+                .map(|_| SamplerVoice::new(sample_rate))
+                .collect(),
             instrument: None,
             bank: SampleBank::new(),
             sample_rate,
-            adsr: AdsrConfig {
+            default_adsr: AdsrConfig {
                 attack_samples: 0,
                 decay_samples: 0,
                 sustain_level: 1.0,
@@ -141,29 +279,14 @@ impl SamplerEngine {
         &mut self.bank
     }
 
-    /// Set the ADSR envelope configuration.
+    /// Set the default ADSR envelope configuration.
     pub fn set_adsr(&mut self, adsr: AdsrConfig) {
-        self.adsr = adsr;
+        self.default_adsr = adsr;
     }
 
-    /// Set release time in milliseconds (convenience — updates ADSR release only).
+    /// Set release time in milliseconds (convenience — updates default ADSR release only).
     pub fn set_release_ms(&mut self, ms: f32) {
-        self.adsr.release_samples = (self.sample_rate * ms / 1000.0).max(1.0) as u32;
-    }
-
-    /// Compute the one-pole filter coefficient from zone settings and velocity.
-    #[inline]
-    fn compute_filter_coeff(cutoff: f32, vel_track: f32, velocity: u8, sample_rate: f32) -> f32 {
-        if cutoff <= 0.0 {
-            return 1.0; // disabled
-        }
-        let vel_norm = velocity as f32 / 127.0;
-        // Velocity opens the filter: at max velocity with full tracking, cutoff is used as-is.
-        // At zero velocity with full tracking, cutoff is halved.
-        let effective_cutoff = cutoff * (1.0 - vel_track * (1.0 - vel_norm));
-        // One-pole coefficient: coeff = 1 - e^(-2π * fc / fs)
-        let coeff = 1.0 - (-core::f32::consts::TAU * effective_cutoff / sample_rate).exp();
-        coeff.clamp(0.0, 1.0)
+        self.default_adsr.release_samples = (self.sample_rate * ms / 1000.0).max(1.0) as u32;
     }
 
     /// Trigger a note. Returns the voice index, or None if no voice available.
@@ -182,27 +305,29 @@ impl SamplerEngine {
 
         let zone = &instrument.zones()[zone_idx];
         let speed = zone.playback_ratio(note);
-        let amp = velocity as f32 / 127.0;
+        let amp = zone.velocity_curve().apply(velocity);
 
-        let filter_coeff = Self::compute_filter_coeff(
+        // Build filter from zone settings
+        let voice_filter = VoiceFilter::new(
             zone.filter_cutoff(),
+            zone.filter_resonance(),
+            zone.filter_type(),
             zone.filter_vel_track(),
             velocity,
             self.sample_rate,
         );
 
+        // Resolve ADSR: per-zone overrides engine default
+        let adsr_config = zone.adsr().copied().unwrap_or(self.default_adsr);
+
         // Find a free voice, or steal the oldest
-        let voice_idx = self
-            .voices
-            .iter()
-            .position(|v| !v.active)
-            .or_else(|| {
-                self.voices
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|(_, v)| v.age)
-                    .map(|(i, _)| i)
-            })?;
+        let voice_idx = self.voices.iter().position(|v| !v.active).or_else(|| {
+            self.voices
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, v)| v.age)
+                .map(|(i, _)| i)
+        })?;
 
         let voice = &mut self.voices[voice_idx];
         voice.active = true;
@@ -213,11 +338,23 @@ impl SamplerEngine {
         voice.note = note;
         voice.age = 0;
         voice.forward = true;
-        voice.filter_state = 0.0;
-        voice.filter_coeff = filter_coeff;
+        voice.filter = voice_filter;
+        voice.base_cutoff = zone.filter_cutoff();
 
-        // Trigger ADSR
-        AdsrConfig::trigger(&mut voice.env_state, &mut voice.env_level, &mut voice.env_pos);
+        // Setup filter envelope if zone has one
+        if let Some(fileg_config) = zone.fileg() {
+            let mut fenv = AmpEnvelope::new(fileg_config, self.sample_rate);
+            fenv.trigger();
+            voice.filter_env = Some(fenv);
+            voice.filter_env_depth = zone.fileg_depth();
+        } else {
+            voice.filter_env = None;
+            voice.filter_env_depth = 0.0;
+        }
+
+        // Create and trigger amplitude envelope
+        voice.amp_env = AmpEnvelope::new(&adsr_config, self.sample_rate);
+        voice.amp_env.trigger();
 
         Some(voice_idx)
     }
@@ -225,8 +362,11 @@ impl SamplerEngine {
     /// Release a note.
     pub fn note_off(&mut self, note: u8) {
         for voice in &mut self.voices {
-            if voice.active && voice.note == note && voice.env_state != EnvState::Release {
-                AdsrConfig::release(&mut voice.env_state, &mut voice.env_pos);
+            if voice.active && voice.note == note && voice.amp_env.is_active() {
+                voice.amp_env.release();
+                if let Some(ref mut fenv) = voice.filter_env {
+                    fenv.release();
+                }
             }
         }
     }
@@ -234,15 +374,24 @@ impl SamplerEngine {
     /// Release all notes.
     pub fn all_notes_off(&mut self) {
         for voice in &mut self.voices {
-            if voice.active && voice.env_state != EnvState::Release && voice.env_state != EnvState::Idle {
-                AdsrConfig::release(&mut voice.env_state, &mut voice.env_pos);
+            if voice.active && voice.amp_env.is_active() {
+                voice.amp_env.release();
+                if let Some(ref mut fenv) = voice.filter_env {
+                    fenv.release();
+                }
             }
         }
     }
 
     /// Advance a voice's position according to its loop mode. Returns false if voice should deactivate.
     #[inline]
-    fn advance_position(voice: &mut SamplerVoice, loop_mode: LoopMode, loop_start: usize, loop_end: usize, frames: usize) -> bool {
+    fn advance_position(
+        voice: &mut SamplerVoice,
+        loop_mode: LoopMode,
+        loop_start: usize,
+        loop_end: usize,
+        frames: usize,
+    ) -> bool {
         match loop_mode {
             LoopMode::OneShot => {
                 voice.position += voice.speed;
@@ -321,15 +470,26 @@ impl SamplerEngine {
             // Read stereo interpolated sample
             let (mut sl, mut sr) = sample.read_stereo_interpolated(voice.position);
 
+            // Modulate filter cutoff via filter envelope
+            if let Some(ref mut fenv) = voice.filter_env {
+                let env_val = fenv.tick();
+                if voice.base_cutoff > 0.0 {
+                    let mod_cents = voice.filter_env_depth * env_val;
+                    let mod_ratio = 2.0_f32.powf(mod_cents / 1200.0);
+                    let modulated = voice.base_cutoff * mod_ratio;
+                    voice.filter.set_cutoff(modulated, self.sample_rate);
+                }
+            }
+
             // Apply filter
-            let (fl, fr) = voice.apply_filter_stereo(sl, sr);
+            let (fl, fr) = voice.filter.process_stereo(sl, sr);
             sl = fl;
             sr = fr;
 
             // Tick ADSR
-            let env = self.adsr.tick(&mut voice.env_state, &mut voice.env_level, &mut voice.env_pos);
+            let env = voice.amp_env.tick();
 
-            if voice.env_state == EnvState::Idle {
+            if !voice.amp_env.is_active() {
                 voice.active = false;
                 continue;
             }
@@ -345,7 +505,13 @@ impl SamplerEngine {
             out_r += sr * amp * pan_r;
 
             // Advance position
-            if !Self::advance_position(voice, zone.loop_mode(), zone.loop_start, zone.loop_end, sample.frames()) {
+            if !Self::advance_position(
+                voice,
+                zone.loop_mode(),
+                zone.loop_start,
+                zone.loop_end,
+                sample.frames(),
+            ) {
                 voice.active = false;
             }
         }
@@ -508,15 +674,23 @@ mod tests {
             sum_r += r.abs();
         }
         // Hard right: left should be near zero, right should have signal
-        assert!(sum_l < 0.01, "Left should be near-silent for hard-right pan, got {sum_l}");
-        assert!(sum_r > 1.0, "Right should have signal for hard-right pan, got {sum_r}");
+        assert!(
+            sum_l < 0.01,
+            "Left should be near-silent for hard-right pan, got {sum_l}"
+        );
+        assert!(
+            sum_r > 1.0,
+            "Right should have signal for hard-right pan, got {sum_r}"
+        );
     }
 
     #[test]
     fn filter_reduces_brightness() {
         let mut bank = SampleBank::new();
         // White-ish noise: alternating +1, -1
-        let noise: Vec<f32> = (0..44100).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let noise: Vec<f32> = (0..44100)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let id = bank.add(Sample::from_mono(noise, 44100));
 
         // No filter
@@ -581,5 +755,48 @@ mod tests {
             engine.next_sample();
         }
         assert_eq!(engine.active_voice_count(), 0);
+    }
+
+    #[test]
+    fn per_zone_adsr_overrides_engine_default() {
+        let mut bank = SampleBank::new();
+        let sine: Vec<f32> = (0..44100)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let id = bank.add(Sample::from_mono(sine, 44100));
+
+        // Zone with slow attack (500 samples)
+        let slow_adsr = AdsrConfig {
+            attack_samples: 500,
+            decay_samples: 0,
+            sustain_level: 1.0,
+            release_samples: 100,
+        };
+
+        let mut inst = Instrument::new("test");
+        inst.add_zone(
+            Zone::new(id)
+                .with_key_range(0, 127)
+                .with_root_note(69)
+                .with_adsr(slow_adsr),
+        );
+
+        // Engine default has zero attack
+        let mut engine = SamplerEngine::new(8, 44100.0);
+        engine.set_bank(bank);
+        engine.set_instrument(inst);
+
+        engine.note_on(69, 127);
+
+        // First few samples should be quiet due to slow attack
+        let first = engine.next_sample().abs();
+        for _ in 0..249 {
+            engine.next_sample();
+        }
+        let mid = engine.next_sample().abs();
+        assert!(
+            mid > first,
+            "Per-zone slow attack: mid={mid} should be louder than first={first}"
+        );
     }
 }

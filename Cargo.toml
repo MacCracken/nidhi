@@ -15,6 +15,7 @@ exclude = [".claude/", ".github/", "docs/", "scripts/"]
 
 [dependencies]
 hisab = { version = "1.2", default-features = false, features = ["num"] }
+naad = { version = "1", optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false }
@@ -24,7 +25,7 @@ serde_json = "1"
 
 [features]
 default = ["std"]
-std = ["serde/std", "thiserror/std", "tracing/std"]
+std = ["dep:naad", "serde/std", "thiserror/std", "tracing/std"]
 logging = ["dep:tracing-subscriber"]
 full = ["std", "logging"]
 

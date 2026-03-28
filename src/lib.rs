@@ -62,13 +62,13 @@ pub mod zone;
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::engine::SamplerEngine;
-    pub use crate::envelope::{AdsrConfig, EnvState};
+    pub use crate::envelope::{AdsrConfig, AmpEnvelope, EnvState};
     pub use crate::error::{NidhiError, Result};
     pub use crate::instrument::Instrument;
     pub use crate::loop_mode::LoopMode;
     pub use crate::sample::{Sample, SampleBank, SampleId};
     pub use crate::sfz::SfzFile;
-    pub use crate::zone::Zone;
+    pub use crate::zone::{FilterMode, VelocityCurve, Zone};
 }
 
 #[cfg(test)]
@@ -80,10 +80,13 @@ mod assert_traits {
         _assert_send_sync::<crate::error::NidhiError>();
         _assert_send_sync::<crate::sample::Sample>();
         _assert_send_sync::<crate::sample::SampleBank>();
+        _assert_send_sync::<crate::zone::FilterMode>();
+        _assert_send_sync::<crate::zone::VelocityCurve>();
         _assert_send_sync::<crate::zone::Zone>();
         _assert_send_sync::<crate::instrument::Instrument>();
         _assert_send_sync::<crate::engine::SamplerEngine>();
         _assert_send_sync::<crate::envelope::AdsrConfig>();
+        _assert_send_sync::<crate::envelope::AmpEnvelope>();
         _assert_send_sync::<crate::envelope::EnvState>();
     }
 }

@@ -83,6 +83,7 @@ let (instrument, sample_paths) = sfz_file.to_instrument("piano", 44100);
 ## Consumers
 
 - [dhvani](https://github.com/MacCracken/dhvani) — Audio engine
+- [shruti](https://github.com/MacCracken/shruti) — DAW (replaces `shruti-instruments::sampler` via dhvani)
 
 ## License
 

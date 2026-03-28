@@ -44,7 +44,10 @@ impl Instrument {
     /// Find all zones matching a MIDI note and velocity.
     #[must_use]
     pub fn find_zones(&self, note: u8, velocity: u8) -> Vec<&Zone> {
-        self.zones.iter().filter(|z| z.matches(note, velocity)).collect()
+        self.zones
+            .iter()
+            .filter(|z| z.matches(note, velocity))
+            .collect()
     }
 
     /// Find a single zone using round-robin selection.
@@ -140,21 +143,9 @@ mod tests {
     #[test]
     fn round_robin_cycles() {
         let mut inst = Instrument::new("rr_test");
-        inst.add_zone(
-            Zone::new(SampleId(0))
-                .with_key_range(60, 72)
-                .with_group(1),
-        );
-        inst.add_zone(
-            Zone::new(SampleId(1))
-                .with_key_range(60, 72)
-                .with_group(1),
-        );
-        inst.add_zone(
-            Zone::new(SampleId(2))
-                .with_key_range(60, 72)
-                .with_group(1),
-        );
+        inst.add_zone(Zone::new(SampleId(0)).with_key_range(60, 72).with_group(1));
+        inst.add_zone(Zone::new(SampleId(1)).with_key_range(60, 72).with_group(1));
+        inst.add_zone(Zone::new(SampleId(2)).with_key_range(60, 72).with_group(1));
 
         // Should cycle through 0, 1, 2, 0, 1, 2...
         let (idx0, z0) = inst.find_zone_rr(66, 100).unwrap();
