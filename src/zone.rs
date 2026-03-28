@@ -120,6 +120,9 @@ pub struct Zone {
     pub(crate) filter_vel_track: f32,
     /// Round-robin group (0 = none).
     pub(crate) group: u32,
+    /// Choke group — voices in the same choke group silence each other (0 = none).
+    #[serde(default)]
+    pub(crate) choke_group: u32,
     /// Velocity-to-amplitude curve.
     #[serde(default)]
     pub(crate) vel_curve: VelocityCurve,
@@ -158,6 +161,7 @@ impl Zone {
             filter_type: FilterMode::LowPass,
             filter_vel_track: 0.0,
             group: 0,
+            choke_group: 0,
             vel_curve: VelocityCurve::Linear,
             adsr: None,
             fileg: None,
@@ -273,6 +277,19 @@ impl Zone {
     pub fn with_group(mut self, group: u32) -> Self {
         self.group = group;
         self
+    }
+
+    /// Set choke group — voices in the same group silence each other.
+    pub fn with_choke_group(mut self, group: u32) -> Self {
+        self.choke_group = group;
+        self
+    }
+
+    /// Choke group (0 = none).
+    #[inline]
+    #[must_use]
+    pub fn choke_group(&self) -> u32 {
+        self.choke_group
     }
 
     /// Set velocity curve.

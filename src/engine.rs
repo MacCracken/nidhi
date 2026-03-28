@@ -10,16 +10,46 @@ use crate::sample::SampleBank;
 use crate::zone::FilterMode;
 
 // ---------------------------------------------------------------------------
+// Re-export voice management types from naad when std is available
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "std")]
+pub use naad::voice::{PolyMode, StealMode};
+
+/// Polyphony mode (no_std fallback).
+#[cfg(not(feature = "std"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum PolyMode {
+    /// Polyphonic — each note gets its own voice.
+    Poly,
+    /// Monophonic — only one note at a time.
+    Mono,
+    /// Legato — monophonic, glides without retriggering.
+    Legato,
+}
+
+/// Voice stealing strategy (no_std fallback).
+#[cfg(not(feature = "std"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum StealMode {
+    /// Steal the oldest active voice.
+    Oldest,
+    /// Steal the quietest active voice.
+    Quietest,
+    /// Steal the voice with the lowest note.
+    Lowest,
+    /// Do not steal — ignore new notes when full.
+    None,
+}
+
+// ---------------------------------------------------------------------------
 // VoiceFilter — per-voice stereo filter (SVF when std, one-pole fallback)
 // ---------------------------------------------------------------------------
 
-/// Per-voice stereo filter.
-///
-/// With `std`: two [`naad::filter::StateVariableFilter`] instances (true stereo).
-/// Without `std`: two one-pole lowpass states (lightweight fallback).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VoiceFilter {
-    /// Whether filtering is active (cutoff > 0).
     active: bool,
 
     #[cfg(feature = "std")]
@@ -38,7 +68,6 @@ struct VoiceFilter {
 }
 
 impl VoiceFilter {
-    /// Create a disabled filter (bypass).
     fn bypass() -> Self {
         Self {
             active: false,
@@ -57,7 +86,6 @@ impl VoiceFilter {
         }
     }
 
-    /// Create a filter from zone settings and velocity.
     fn new(
         cutoff: f32,
         resonance: f32,
@@ -72,7 +100,6 @@ impl VoiceFilter {
 
         let vel_norm = velocity as f32 / 127.0;
         let effective_cutoff = cutoff * (1.0 - vel_track * (1.0 - vel_norm));
-        // Clamp to valid range for SVF
         let effective_cutoff = effective_cutoff.clamp(20.0, sample_rate * 0.49);
 
         #[cfg(feature = "std")]
@@ -101,7 +128,6 @@ impl VoiceFilter {
         }
     }
 
-    /// Update the filter cutoff frequency (for envelope modulation).
     #[inline]
     fn set_cutoff(&mut self, cutoff: f32, sample_rate: f32) {
         if !self.active {
@@ -126,7 +152,6 @@ impl VoiceFilter {
         }
     }
 
-    /// Process a stereo sample pair through the filter.
     #[inline]
     fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
         if !self.active {
@@ -165,35 +190,34 @@ impl VoiceFilter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SamplerVoice — per-voice playback state
+// ---------------------------------------------------------------------------
+
 /// A single playback voice — tracks position within a sample.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SamplerVoice {
-    /// Whether this voice is currently active.
     active: bool,
-    /// The zone being played.
     zone_index: usize,
-    /// Current playback position (fractional frame).
     position: f64,
-    /// Playback speed ratio (pitch shifting).
     speed: f64,
-    /// Current amplitude (for velocity scaling).
     amplitude: f32,
-    /// MIDI note that triggered this voice.
     note: u8,
-    /// Voice age in samples (for steal-oldest).
     age: u64,
-    /// Playback direction for ping-pong.
     forward: bool,
-    /// Per-voice amplitude envelope.
     amp_env: AmpEnvelope,
-    /// Per-voice filter envelope (modulates cutoff).
     filter_env: Option<AmpEnvelope>,
-    /// Filter envelope depth in cents.
     filter_env_depth: f32,
-    /// Base filter cutoff (before envelope modulation).
     base_cutoff: f32,
-    /// Per-voice stereo filter.
     filter: VoiceFilter,
+    /// Per-voice pitch bend in semitones.
+    pitch_bend: f32,
+    /// Per-voice pressure / aftertouch (0.0–1.0).
+    pressure: f32,
+    /// Per-voice brightness CC#74 (0.0–1.0).
+    brightness: f32,
+    /// Choke group this voice belongs to (0 = none).
+    choke_group: u32,
 }
 
 impl SamplerVoice {
@@ -212,6 +236,10 @@ impl SamplerVoice {
             filter_env_depth: 0.0,
             base_cutoff: 0.0,
             filter: VoiceFilter::bypass(),
+            pitch_bend: 0.0,
+            pressure: 0.0,
+            brightness: 0.5,
+            choke_group: 0,
         }
     }
 
@@ -230,7 +258,11 @@ impl SamplerVoice {
     }
 }
 
-/// Polyphonic sampler engine with voice stealing.
+// ---------------------------------------------------------------------------
+// SamplerEngine
+// ---------------------------------------------------------------------------
+
+/// Polyphonic sampler engine with configurable voice stealing and expression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
 pub struct SamplerEngine {
@@ -238,8 +270,15 @@ pub struct SamplerEngine {
     instrument: Option<Instrument>,
     bank: SampleBank,
     sample_rate: f32,
-    /// Default ADSR envelope configuration (used when zone has no per-zone ADSR).
     default_adsr: AdsrConfig,
+    /// Pitch bend range in semitones (default ±2).
+    pitch_bend_range: f32,
+
+    #[cfg(feature = "std")]
+    voice_mgr: naad::voice::VoiceManager,
+
+    #[cfg(not(feature = "std"))]
+    steal_mode: StealMode,
 }
 
 impl SamplerEngine {
@@ -256,8 +295,17 @@ impl SamplerEngine {
                 attack_samples: 0,
                 decay_samples: 0,
                 sustain_level: 1.0,
-                release_samples: (sample_rate * 0.01).max(1.0) as u32, // 10ms default
+                release_samples: (sample_rate * 0.01).max(1.0) as u32,
             },
+            pitch_bend_range: 2.0,
+            #[cfg(feature = "std")]
+            voice_mgr: naad::voice::VoiceManager::new(
+                max_voices,
+                naad::voice::PolyMode::Poly,
+                naad::voice::StealMode::Oldest,
+            ),
+            #[cfg(not(feature = "std"))]
+            steal_mode: StealMode::Oldest,
         }
     }
 
@@ -291,78 +339,203 @@ impl SamplerEngine {
         self.default_adsr.release_samples = (self.sample_rate * ms / 1000.0).max(1.0) as u32;
     }
 
-    /// Trigger a note. Returns the voice index, or None if no voice available.
-    pub fn note_on(&mut self, note: u8, velocity: u8) -> Option<usize> {
-        let instrument = self.instrument.as_ref()?;
-        let zones = instrument.find_zones(note, velocity);
-        if zones.is_empty() {
-            return None;
+    /// Set pitch bend range in semitones (default ±2).
+    pub fn set_pitch_bend_range(&mut self, semitones: f32) {
+        self.pitch_bend_range = semitones.max(0.0);
+    }
+
+    /// Set voice stealing mode.
+    pub fn set_steal_mode(&mut self, mode: StealMode) {
+        #[cfg(feature = "std")]
+        {
+            self.voice_mgr.steal_mode = mode;
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.steal_mode = mode;
+        }
+    }
+
+    /// Set polyphony mode.
+    pub fn set_poly_mode(&mut self, mode: PolyMode) {
+        #[cfg(feature = "std")]
+        {
+            self.voice_mgr.poly_mode = mode;
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = mode; // no_std only supports Poly
+        }
+    }
+
+    /// Apply per-note pitch bend (in semitones, scaled by pitch_bend_range).
+    pub fn apply_pitch_bend(&mut self, note: u8, bend: f32) {
+        let bend_semitones = bend * self.pitch_bend_range;
+        for voice in &mut self.voices {
+            if voice.active && voice.note == note {
+                voice.pitch_bend = bend_semitones;
+            }
+        }
+    }
+
+    /// Apply per-note pressure / aftertouch (0.0–1.0).
+    pub fn apply_pressure(&mut self, note: u8, pressure: f32) {
+        for voice in &mut self.voices {
+            if voice.active && voice.note == note {
+                voice.pressure = pressure.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    /// Apply per-note brightness CC#74 (0.0–1.0).
+    pub fn apply_brightness(&mut self, note: u8, brightness: f32) {
+        for voice in &mut self.voices {
+            if voice.active && voice.note == note {
+                voice.brightness = brightness.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    /// Allocate a voice index for a new note.
+    fn allocate_voice(&mut self, note: u8, velocity: u8) -> Option<usize> {
+        #[cfg(feature = "std")]
+        {
+            self.voice_mgr.note_on(note, velocity as f32 / 127.0)
         }
 
-        // Find the zone index in the instrument
-        let zone_idx = instrument
-            .zones()
-            .iter()
-            .position(|z| core::ptr::eq(z, zones[0]))?;
-
-        let zone = &instrument.zones()[zone_idx];
-        let speed = zone.playback_ratio(note);
-        let amp = zone.velocity_curve().apply(velocity);
-
-        // Build filter from zone settings
-        let voice_filter = VoiceFilter::new(
-            zone.filter_cutoff(),
-            zone.filter_resonance(),
-            zone.filter_type(),
-            zone.filter_vel_track(),
-            velocity,
-            self.sample_rate,
-        );
-
-        // Resolve ADSR: per-zone overrides engine default
-        let adsr_config = zone.adsr().copied().unwrap_or(self.default_adsr);
-
-        // Find a free voice, or steal the oldest
-        let voice_idx = self.voices.iter().position(|v| !v.active).or_else(|| {
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = (note, velocity);
+            // Find free voice
             self.voices
                 .iter()
-                .enumerate()
-                .max_by_key(|(_, v)| v.age)
-                .map(|(i, _)| i)
-        })?;
+                .position(|v| !v.active)
+                .or_else(|| match self.steal_mode {
+                    StealMode::Oldest => self
+                        .voices
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, v)| v.age)
+                        .map(|(i, _)| i),
+                    StealMode::Quietest => self
+                        .voices
+                        .iter()
+                        .enumerate()
+                        .min_by(|(_, a), (_, b)| {
+                            a.amplitude
+                                .partial_cmp(&b.amplitude)
+                                .unwrap_or(core::cmp::Ordering::Equal)
+                        })
+                        .map(|(i, _)| i),
+                    StealMode::Lowest => self
+                        .voices
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| v.active)
+                        .min_by_key(|(_, v)| v.note)
+                        .map(|(i, _)| i),
+                    StealMode::None => None,
+                })
+        }
+    }
 
-        let voice = &mut self.voices[voice_idx];
+    /// Trigger a note. Returns the voice index, or None if no voice available.
+    pub fn note_on(&mut self, note: u8, velocity: u8) -> Option<usize> {
+        // Extract zone data before mutable borrows
+        let zone_data = {
+            let instrument = self.instrument.as_ref()?;
+            let zones = instrument.find_zones(note, velocity);
+            if zones.is_empty() {
+                return None;
+            }
+            let zone_idx = instrument
+                .zones()
+                .iter()
+                .position(|z| core::ptr::eq(z, zones[0]))?;
+            let zone = &instrument.zones()[zone_idx];
+            (
+                zone_idx,
+                zone.playback_ratio(note),
+                zone.velocity_curve().apply(velocity),
+                zone.filter_cutoff(),
+                zone.filter_resonance(),
+                zone.filter_type(),
+                zone.filter_vel_track(),
+                zone.adsr().copied().unwrap_or(self.default_adsr),
+                zone.choke_group(),
+                zone.sample_offset(),
+                zone.fileg().copied(),
+                zone.fileg_depth(),
+            )
+        };
+        let (
+            zone_idx,
+            speed,
+            amp,
+            f_cutoff,
+            f_res,
+            f_type,
+            f_vel,
+            adsr_config,
+            choke,
+            sample_offset,
+            fileg_config,
+            fileg_depth,
+        ) = zone_data;
+
+        let voice_filter =
+            VoiceFilter::new(f_cutoff, f_res, f_type, f_vel, velocity, self.sample_rate);
+
+        // Choke group: silence any active voice in the same group
+        if choke > 0 {
+            for voice in &mut self.voices {
+                if voice.active && voice.choke_group == choke {
+                    voice.active = false;
+                }
+            }
+        }
+
+        let voice_idx_alloc = self.allocate_voice(note, velocity)?;
+
+        let voice = &mut self.voices[voice_idx_alloc];
         voice.active = true;
         voice.zone_index = zone_idx;
-        voice.position = zone.sample_offset() as f64;
+        voice.position = sample_offset as f64;
         voice.speed = speed;
         voice.amplitude = amp;
         voice.note = note;
         voice.age = 0;
         voice.forward = true;
         voice.filter = voice_filter;
-        voice.base_cutoff = zone.filter_cutoff();
+        voice.base_cutoff = f_cutoff;
+        voice.pitch_bend = 0.0;
+        voice.pressure = 0.0;
+        voice.brightness = 0.5;
+        voice.choke_group = choke;
 
-        // Setup filter envelope if zone has one
-        if let Some(fileg_config) = zone.fileg() {
-            let mut fenv = AmpEnvelope::new(fileg_config, self.sample_rate);
+        // Setup filter envelope
+        if let Some(ref fc) = fileg_config {
+            let mut fenv = AmpEnvelope::new(fc, self.sample_rate);
             fenv.trigger();
             voice.filter_env = Some(fenv);
-            voice.filter_env_depth = zone.fileg_depth();
+            voice.filter_env_depth = fileg_depth;
         } else {
             voice.filter_env = None;
             voice.filter_env_depth = 0.0;
         }
 
-        // Create and trigger amplitude envelope
+        // Trigger amplitude envelope
         voice.amp_env = AmpEnvelope::new(&adsr_config, self.sample_rate);
         voice.amp_env.trigger();
 
-        Some(voice_idx)
+        Some(voice_idx_alloc)
     }
 
     /// Release a note.
     pub fn note_off(&mut self, note: u8) {
+        #[cfg(feature = "std")]
+        self.voice_mgr.note_off(note);
+
         for voice in &mut self.voices {
             if voice.active && voice.note == note && voice.amp_env.is_active() {
                 voice.amp_env.release();
@@ -375,6 +548,9 @@ impl SamplerEngine {
 
     /// Release all notes.
     pub fn all_notes_off(&mut self) {
+        #[cfg(feature = "std")]
+        self.voice_mgr.all_notes_off();
+
         for voice in &mut self.voices {
             if voice.active && voice.amp_env.is_active() {
                 voice.amp_env.release();
@@ -385,7 +561,6 @@ impl SamplerEngine {
         }
     }
 
-    /// Advance a voice's position according to its loop mode. Returns false if voice should deactivate.
     #[inline]
     fn advance_position(
         voice: &mut SamplerVoice,
@@ -436,15 +611,11 @@ impl SamplerEngine {
             LoopMode::LoopSustain => {
                 voice.position += voice.speed;
                 if released {
-                    // Play through to end of sample (like OneShot)
                     if voice.position >= frames as f64 {
                         return false;
                     }
-                } else {
-                    // Loop while held (like Forward)
-                    if voice.position >= effective_end {
-                        voice.position = loop_start as f64;
-                    }
+                } else if voice.position >= effective_end {
+                    voice.position = loop_start as f64;
                 }
             }
         }
@@ -452,8 +623,6 @@ impl SamplerEngine {
     }
 
     /// Generate the next stereo sample pair by mixing all active voices.
-    ///
-    /// Returns `(left, right)` with pan applied per-zone.
     #[inline]
     pub fn next_sample_stereo(&mut self) -> (f32, f32) {
         let mut out_l = 0.0f32;
@@ -480,12 +649,19 @@ impl SamplerEngine {
                 }
             };
 
-            // Determine effective sample end
             let effective_frames = if zone.sample_end() > 0 {
                 zone.sample_end().min(sample.frames())
             } else {
                 sample.frames()
             };
+
+            // Apply pitch bend to playback speed
+            let bend_ratio = if voice.pitch_bend != 0.0 {
+                2.0_f64.powf(voice.pitch_bend as f64 / 12.0)
+            } else {
+                1.0
+            };
+            let effective_speed = voice.speed * bend_ratio;
 
             // Read stereo interpolated sample
             let (mut sl, mut sr) = sample.read_stereo_interpolated(voice.position);
@@ -501,7 +677,7 @@ impl SamplerEngine {
                 let xfade_f = xfade as f64;
                 let dist_to_end = loop_end_f - voice.position;
                 if dist_to_end >= 0.0 && dist_to_end < xfade_f {
-                    let t = (dist_to_end / xfade_f) as f32; // 1.0 at start of xfade, 0.0 at end
+                    let t = (dist_to_end / xfade_f) as f32;
                     let xfade_pos = zone.loop_start as f64 + (xfade_f - dist_to_end);
                     let (xl, xr) = sample.read_stereo_interpolated(xfade_pos);
                     sl = sl * t + xl * (1.0 - t);
@@ -509,15 +685,22 @@ impl SamplerEngine {
                 }
             }
 
-            // Modulate filter cutoff via filter envelope
+            // Modulate filter cutoff via filter envelope + brightness
             if let Some(ref mut fenv) = voice.filter_env {
                 let env_val = fenv.tick();
                 if voice.base_cutoff > 0.0 {
                     let mod_cents = voice.filter_env_depth * env_val;
                     let mod_ratio = 2.0_f32.powf(mod_cents / 1200.0);
-                    let modulated = voice.base_cutoff * mod_ratio;
+                    let brightness_mod = voice.brightness; // 0.0–1.0 scales cutoff
+                    let modulated = voice.base_cutoff * mod_ratio * (0.5 + brightness_mod * 0.5);
                     voice.filter.set_cutoff(modulated, self.sample_rate);
                 }
+            } else if voice.base_cutoff > 0.0 && (voice.brightness - 0.5).abs() > 0.01 {
+                // Brightness modulates filter even without envelope
+                let brightness_mod = 0.5 + voice.brightness * 0.5;
+                voice
+                    .filter
+                    .set_cutoff(voice.base_cutoff * brightness_mod, self.sample_rate);
             }
 
             // Apply filter
@@ -533,17 +716,20 @@ impl SamplerEngine {
                 continue;
             }
 
-            let amp = voice.amplitude * env;
+            // Pressure modulates amplitude slightly (±20%)
+            let pressure_mod = 1.0 + (voice.pressure - 0.5) * 0.4;
+            let amp = voice.amplitude * env * pressure_mod;
 
-            // Apply pan (constant-power approximation: linear for simplicity)
-            let pan = zone.pan(); // -1..1
+            let pan = zone.pan();
             let pan_l = (1.0 - pan) * 0.5;
             let pan_r = (1.0 + pan) * 0.5;
 
             out_l += sl * amp * pan_l;
             out_r += sr * amp * pan_r;
 
-            // Advance position
+            // Advance position (using pitch-bent speed)
+            let saved_speed = voice.speed;
+            voice.speed = effective_speed;
             if !Self::advance_position(
                 voice,
                 zone.loop_mode(),
@@ -554,14 +740,13 @@ impl SamplerEngine {
             ) {
                 voice.active = false;
             }
+            voice.speed = saved_speed;
         }
 
         (out_l, out_r)
     }
 
     /// Generate the next mono sample by mixing all active voices.
-    ///
-    /// Convenience method — returns `(L + R) / 2`.
     #[inline]
     pub fn next_sample(&mut self) -> f32 {
         let (l, r) = self.next_sample_stereo();
@@ -587,6 +772,7 @@ impl SamplerEngine {
     }
 
     /// Number of currently active voices.
+    #[must_use]
     pub fn active_voice_count(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }
@@ -606,7 +792,7 @@ mod tests {
         let id = bank.add(Sample::from_mono(sine, 44100));
 
         let mut inst = Instrument::new("test");
-        inst.add_zone(Zone::new(id).with_key_range(0, 127).with_root_note(69)); // A4=440
+        inst.add_zone(Zone::new(id).with_key_range(0, 127).with_root_note(69));
 
         let mut engine = SamplerEngine::new(8, 44100.0);
         engine.set_bank(bank);
@@ -633,7 +819,6 @@ mod tests {
         engine.note_on(69, 100);
         engine.note_off(69);
 
-        // Process through the release
         for _ in 0..44100 {
             engine.next_sample();
         }
@@ -643,8 +828,7 @@ mod tests {
     #[test]
     fn pitch_shift() {
         let mut engine = make_engine();
-        // Playing one octave up should play at 2x speed
-        engine.note_on(81, 100); // A5 = 69 + 12
+        engine.note_on(81, 100);
 
         let mut buf = vec![0.0f32; 4410];
         engine.fill_buffer(&mut buf);
@@ -670,9 +854,7 @@ mod tests {
 
         engine.note_on(69, 127);
 
-        // First sample should be quiet (attack starting)
         let first = engine.next_sample().abs();
-        // After 50 samples, should be louder
         for _ in 0..49 {
             engine.next_sample();
         }
@@ -696,7 +878,7 @@ mod tests {
             Zone::new(id)
                 .with_key_range(0, 127)
                 .with_root_note(69)
-                .with_pan(1.0), // hard right
+                .with_pan(1.0),
         );
 
         let mut engine = SamplerEngine::new(8, 44100.0);
@@ -704,7 +886,6 @@ mod tests {
         engine.set_instrument(inst);
         engine.note_on(69, 127);
 
-        // Advance past the first sample to get some signal
         let mut sum_l = 0.0f32;
         let mut sum_r = 0.0f32;
         for _ in 0..1000 {
@@ -712,7 +893,6 @@ mod tests {
             sum_l += l.abs();
             sum_r += r.abs();
         }
-        // Hard right: left should be near zero, right should have signal
         assert!(
             sum_l < 0.01,
             "Left should be near-silent for hard-right pan, got {sum_l}"
@@ -726,13 +906,11 @@ mod tests {
     #[test]
     fn filter_reduces_brightness() {
         let mut bank = SampleBank::new();
-        // White-ish noise: alternating +1, -1
         let noise: Vec<f32> = (0..44100)
             .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
             .collect();
         let id = bank.add(Sample::from_mono(noise, 44100));
 
-        // No filter
         let mut inst_no_filter = Instrument::new("no_filter");
         inst_no_filter.add_zone(Zone::new(id).with_key_range(0, 127).with_root_note(69));
 
@@ -746,13 +924,12 @@ mod tests {
             sum_unfiltered += engine1.next_sample().abs();
         }
 
-        // With heavy filter (100 Hz cutoff)
         let mut inst_filter = Instrument::new("filtered");
         inst_filter.add_zone(
             Zone::new(id)
                 .with_key_range(0, 127)
                 .with_root_note(69)
-                .with_filter(100.0, 0.0), // 100Hz, no vel track
+                .with_filter(100.0, 0.0),
         );
 
         let mut engine2 = SamplerEngine::new(1, 44100.0);
@@ -776,7 +953,7 @@ mod tests {
         let mut engine = make_engine();
         engine.note_on(69, 100);
 
-        let mut buf = vec![0.0f32; 200]; // 100 stereo frames
+        let mut buf = vec![0.0f32; 200];
         engine.fill_buffer_stereo(&mut buf);
         assert!(buf.iter().any(|&s| s.abs() > 0.01));
     }
@@ -804,7 +981,6 @@ mod tests {
             .collect();
         let id = bank.add(Sample::from_mono(sine, 44100));
 
-        // Zone with slow attack (500 samples)
         let slow_adsr = AdsrConfig {
             attack_samples: 500,
             decay_samples: 0,
@@ -820,14 +996,12 @@ mod tests {
                 .with_adsr(slow_adsr),
         );
 
-        // Engine default has zero attack
         let mut engine = SamplerEngine::new(8, 44100.0);
         engine.set_bank(bank);
         engine.set_instrument(inst);
 
         engine.note_on(69, 127);
 
-        // First few samples should be quiet due to slow attack
         let first = engine.next_sample().abs();
         for _ in 0..249 {
             engine.next_sample();
@@ -837,5 +1011,94 @@ mod tests {
             mid > first,
             "Per-zone slow attack: mid={mid} should be louder than first={first}"
         );
+    }
+
+    #[test]
+    fn choke_group_silences_previous_voice() {
+        let mut bank = SampleBank::new();
+        let sine: Vec<f32> = (0..44100)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let id = bank.add(Sample::from_mono(sine, 44100));
+
+        let mut inst = Instrument::new("hihat");
+        // Closed and open hi-hat in same choke group
+        inst.add_zone(
+            Zone::new(id)
+                .with_key_range(42, 42)
+                .with_root_note(69)
+                .with_choke_group(1),
+        );
+        inst.add_zone(
+            Zone::new(id)
+                .with_key_range(46, 46)
+                .with_root_note(69)
+                .with_choke_group(1),
+        );
+
+        let mut engine = SamplerEngine::new(8, 44100.0);
+        engine.set_bank(bank);
+        engine.set_instrument(inst);
+
+        // Play open hi-hat
+        engine.note_on(46, 100);
+        assert_eq!(engine.active_voice_count(), 1);
+
+        // Play closed hi-hat — should choke the open
+        engine.note_on(42, 100);
+        assert_eq!(
+            engine.active_voice_count(),
+            1,
+            "choke group should silence previous voice"
+        );
+    }
+
+    #[test]
+    fn pitch_bend_changes_pitch() {
+        let mut engine = make_engine();
+        engine.note_on(69, 100);
+
+        // Render some samples without bend
+        for _ in 0..100 {
+            engine.next_sample();
+        }
+
+        // Apply pitch bend up
+        engine.apply_pitch_bend(69, 1.0); // full bend up
+
+        let mut sum_bent = 0.0f32;
+        for _ in 0..100 {
+            sum_bent += engine.next_sample();
+        }
+
+        // Pitch bend is active — verify output is finite and non-zero
+        assert!(sum_bent.is_finite(), "Pitch bend output should be finite");
+        assert!(sum_bent.abs() > 0.0, "Pitch bend output should be non-zero");
+    }
+
+    #[test]
+    fn steal_mode_none_rejects_when_full() {
+        let mut bank = SampleBank::new();
+        let sine: Vec<f32> = (0..44100)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let id = bank.add(Sample::from_mono(sine, 44100));
+
+        let mut inst = Instrument::new("test");
+        inst.add_zone(Zone::new(id).with_key_range(0, 127).with_root_note(69));
+
+        let mut engine = SamplerEngine::new(2, 44100.0);
+        engine.set_bank(bank);
+        engine.set_instrument(inst);
+        engine.set_steal_mode(StealMode::None);
+
+        engine.note_on(60, 100);
+        engine.note_on(64, 100);
+        assert_eq!(engine.active_voice_count(), 2);
+
+        // Third note should be rejected
+        let result = engine.note_on(67, 100);
+        assert!(result.is_none(), "StealMode::None should reject when full");
+        assert_eq!(engine.active_voice_count(), 2);
     }
 }

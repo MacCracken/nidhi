@@ -62,7 +62,7 @@ pub mod zone;
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
-    pub use crate::engine::SamplerEngine;
+    pub use crate::engine::{PolyMode, SamplerEngine, StealMode};
     pub use crate::envelope::{AdsrConfig, AmpEnvelope, EnvState};
     pub use crate::error::{NidhiError, Result};
     pub use crate::instrument::Instrument;
