@@ -922,7 +922,7 @@ fn split_opcode(token: &str) -> Option<(&str, &str)> {
     Some((key, value))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

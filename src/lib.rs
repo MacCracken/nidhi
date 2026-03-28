@@ -112,7 +112,7 @@ mod assert_traits {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod serde_roundtrip {
     fn roundtrip<T: serde::Serialize + serde::de::DeserializeOwned + core::fmt::Debug>(val: &T) {
         let json = serde_json::to_string(val).expect("serialize");

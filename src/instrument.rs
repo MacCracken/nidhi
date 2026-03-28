@@ -122,7 +122,7 @@ impl Instrument {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use crate::sample::SampleId;

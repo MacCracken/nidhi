@@ -227,7 +227,7 @@ pub fn detect_loop_points(sample: &Sample, min_loop_frames: usize) -> Vec<(usize
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

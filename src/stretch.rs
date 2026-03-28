@@ -362,7 +362,7 @@ fn normalize_by_window_sum(output: &mut [f32], window_sum: &[f32]) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use alloc::vec;

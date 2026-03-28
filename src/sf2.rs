@@ -554,7 +554,7 @@ pub fn parse(data: &[u8]) -> Result<(Vec<Sf2Preset>, Vec<Instrument>, SampleBank
 
 // ── Test helpers ────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test_helpers {
     use alloc::vec::Vec;
 
@@ -776,7 +776,7 @@ mod test_helpers {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use crate::sample::SampleId;
