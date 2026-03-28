@@ -378,7 +378,7 @@ mod tests {
         // Onset should be somewhere in the vicinity of the burst
         let first = s.slices()[0];
         assert!(
-            first >= 3500 && first <= 5000,
+            (3500..=5000).contains(&first),
             "slice at {first} should be near burst at 4000"
         );
     }
