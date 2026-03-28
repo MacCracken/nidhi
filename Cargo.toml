@@ -1,0 +1,34 @@
+[package]
+name = "nidhi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0-only"
+description = "nidhi — Sample playback engine: key/velocity zones, loop modes, time-stretching, SFZ/SF2 import"
+homepage = "https://github.com/MacCracken/nidhi"
+repository = "https://github.com/MacCracken/nidhi"
+readme = "README.md"
+documentation = "https://docs.rs/nidhi"
+keywords = ["sampler", "audio", "sfz", "sample", "playback"]
+categories = ["multimedia::audio"]
+exclude = [".claude/", ".github/", "docs/", "scripts/"]
+
+[dependencies]
+hisab = { version = "1.2", default-features = false, features = ["num"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+thiserror = { version = "2", default-features = false }
+tracing = { version = "0.1", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"
+
+[features]
+default = ["std"]
+std = ["serde/std", "thiserror/std", "tracing/std"]
+logging = ["dep:tracing-subscriber"]
+full = ["std", "logging"]
+
+[dependencies.tracing-subscriber]
+version = "0.3"
+features = ["env-filter", "fmt"]
+optional = true
