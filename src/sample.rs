@@ -364,4 +364,42 @@ mod tests {
         assert!(bank.get(id).is_some());
         assert_eq!(bank.len(), 1);
     }
+
+    #[test]
+    fn detect_onsets_finds_transients() {
+        // Long silence then loud burst — onset should be detected
+        let mut data = vec![0.0f32; 8000];
+        for s in data.iter_mut().take(4500).skip(4000) {
+            *s = 0.9;
+        }
+        let mut s = Sample::from_mono(data, 44100);
+        s.detect_onsets(0.1, 256);
+        assert!(!s.slices().is_empty(), "should detect at least one onset");
+        // Onset should be somewhere in the vicinity of the burst
+        let first = s.slices()[0];
+        assert!(
+            first >= 3500 && first <= 5000,
+            "slice at {first} should be near burst at 4000"
+        );
+    }
+
+    #[test]
+    fn detect_onsets_empty_sample() {
+        let mut s = Sample::from_mono(vec![], 44100);
+        s.detect_onsets(0.1, 100);
+        assert!(s.slices().is_empty());
+    }
+
+    #[test]
+    fn detect_onsets_silence() {
+        let mut s = Sample::from_mono(vec![0.0; 4000], 44100);
+        s.detect_onsets(0.1, 100);
+        assert!(s.slices().is_empty(), "silence should produce no onsets");
+    }
+
+    #[test]
+    fn manual_slices() {
+        let s = Sample::from_mono(vec![0.0; 1000], 44100).with_slices(vec![100, 500, 800]);
+        assert_eq!(s.slices(), &[100, 500, 800]);
+    }
 }

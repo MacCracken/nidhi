@@ -1327,4 +1327,34 @@ lokey=73 hikey=84
         let zones = sfz.to_zones(44100.0);
         assert_eq!(zones[0].0.loop_mode(), LoopMode::LoopSustain);
     }
+
+    #[test]
+    fn pitchlfo_opcodes_wired_to_zone() {
+        let input = "<region>\nsample=test.wav\npitchlfo_freq=5.0 pitchlfo_depth=50\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        let (z, _) = &zones[0];
+        assert!((z.pitchlfo_rate() - 5.0).abs() < f32::EPSILON);
+        assert!((z.pitchlfo_depth() - 50.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fillfo_opcodes_wired_to_zone() {
+        let input = "<region>\nsample=test.wav\ncutoff=2000\nfillfo_freq=3.0 fillfo_depth=600\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        let (z, _) = &zones[0];
+        assert!((z.fillfo_rate() - 3.0).abs() < f32::EPSILON);
+        assert!((z.fillfo_depth() - 600.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fil_keytrack_opcode() {
+        let input = "<region>\nsample=test.wav\ncutoff=2000\nfil_keytrack=600\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        let (z, _) = &zones[0];
+        // 600 / 1200 = 0.5
+        assert!((z.fil_keytrack() - 0.5).abs() < f32::EPSILON);
+    }
 }

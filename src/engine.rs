@@ -1180,4 +1180,78 @@ mod tests {
         assert!(result.is_none(), "StealMode::None should reject when full");
         assert_eq!(engine.active_voice_count(), 2);
     }
+
+    #[test]
+    fn steal_mode_oldest_steals_oldest_voice() {
+        let mut bank = SampleBank::new();
+        let sine: Vec<f32> = (0..44100)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let id = bank.add(Sample::from_mono(sine, 44100));
+
+        let mut inst = Instrument::new("test");
+        inst.add_zone(Zone::new(id).with_key_range(0, 127).with_root_note(69));
+
+        let mut engine = SamplerEngine::new(2, 44100.0);
+        engine.set_bank(bank);
+        engine.set_instrument(inst);
+        engine.set_steal_mode(StealMode::Oldest);
+
+        engine.note_on(60, 100);
+        // Age the first voice
+        for _ in 0..100 {
+            engine.next_sample();
+        }
+        engine.note_on(64, 100);
+        assert_eq!(engine.active_voice_count(), 2);
+
+        // Third note should steal the oldest (note 60)
+        engine.note_on(67, 100);
+        assert_eq!(engine.active_voice_count(), 2);
+        // Voice playing note 60 should be gone, replaced by 67
+        let notes: Vec<u8> = engine
+            .voices
+            .iter()
+            .filter(|v| v.active)
+            .map(|v| v.note)
+            .collect();
+        assert!(notes.contains(&67), "should have stolen oldest for note 67");
+    }
+
+    #[test]
+    fn steal_mode_lowest_steals_lowest_note() {
+        let mut bank = SampleBank::new();
+        let sine: Vec<f32> = (0..44100)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin())
+            .collect();
+        let id = bank.add(Sample::from_mono(sine, 44100));
+
+        let mut inst = Instrument::new("test");
+        inst.add_zone(Zone::new(id).with_key_range(0, 127).with_root_note(69));
+
+        let mut engine = SamplerEngine::new(2, 44100.0);
+        engine.set_bank(bank);
+        engine.set_instrument(inst);
+        engine.set_steal_mode(StealMode::Lowest);
+
+        engine.note_on(60, 100);
+        engine.note_on(72, 100);
+        assert_eq!(engine.active_voice_count(), 2);
+
+        // Third note should steal lowest (60)
+        engine.note_on(66, 100);
+        assert_eq!(engine.active_voice_count(), 2);
+        let notes: Vec<u8> = engine
+            .voices
+            .iter()
+            .filter(|v| v.active)
+            .map(|v| v.note)
+            .collect();
+        assert!(
+            !notes.contains(&60),
+            "lowest note 60 should have been stolen"
+        );
+        assert!(notes.contains(&66), "new note 66 should be playing");
+        assert!(notes.contains(&72), "note 72 should remain");
+    }
 }

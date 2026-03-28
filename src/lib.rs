@@ -88,6 +88,8 @@ mod assert_traits {
         _assert_send_sync::<crate::zone::Zone>();
         _assert_send_sync::<crate::instrument::Instrument>();
         _assert_send_sync::<crate::engine::SamplerEngine>();
+        _assert_send_sync::<crate::engine::PolyMode>();
+        _assert_send_sync::<crate::engine::StealMode>();
         _assert_send_sync::<crate::engine::SamplerVoice>();
         _assert_send_sync::<crate::envelope::AdsrConfig>();
         _assert_send_sync::<crate::envelope::AmpEnvelope>();

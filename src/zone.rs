@@ -363,21 +363,22 @@ impl Zone {
         self.fileg_depth
     }
 
-    /// Set pitch LFO rate and depth.
+    /// Set pitch LFO rate (Hz) and depth (cents). Modulates playback speed.
     pub fn with_pitch_lfo(mut self, rate_hz: f32, depth_cents: f32) -> Self {
         self.pitchlfo_rate = rate_hz.max(0.0);
         self.pitchlfo_depth = depth_cents;
         self
     }
 
-    /// Set filter LFO rate and depth.
+    /// Set filter LFO rate (Hz) and depth (cents). Modulates filter cutoff.
     pub fn with_filter_lfo(mut self, rate_hz: f32, depth_cents: f32) -> Self {
         self.fillfo_rate = rate_hz.max(0.0);
         self.fillfo_depth = depth_cents;
         self
     }
 
-    /// Set filter key tracking (0.0 = none, 1.0 = full).
+    /// Set filter key tracking (0.0 = none, 1.0 = full tracking from C4/note 60).
+    /// At 1.0, each semitone above C4 raises cutoff by 100 cents.
     pub fn with_key_tracking(mut self, amount: f32) -> Self {
         self.fil_keytrack = amount.clamp(0.0, 1.0);
         self
