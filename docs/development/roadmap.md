@@ -40,11 +40,6 @@ Real-time granular playback and FFT-based stretching.
 
 ## Backlog
 
-Items that can land in any future release when needed:
-
-- [ ] Fuzz testing for SFZ and SF2 parsers
+- [ ] Incorporate shravan 1.1.0 (not yet published)
 - [ ] dhvani integration tested end-to-end (shruti consuming nidhi via dhvani)
-- [ ] SFZ v2 opcode subset (CC modulation, curves, #include)
-- [ ] Multi-output routing (per-zone bus assignment)
-- [ ] Sample streaming from disk (for very large instruments)
-- [ ] WAV/FLAC file loading helpers (behind optional `io` feature)
+- [ ] FLAC/OGG loading helpers in `io` module
