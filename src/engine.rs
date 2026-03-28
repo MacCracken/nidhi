@@ -217,12 +217,14 @@ impl SamplerVoice {
 
     /// Whether this voice is actively producing audio.
     #[inline]
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.active
     }
 
     /// The MIDI note playing.
     #[inline]
+    #[must_use]
     pub fn note(&self) -> u8 {
         self.note
     }
@@ -585,7 +587,6 @@ impl SamplerEngine {
     }
 
     /// Number of currently active voices.
-    #[must_use]
     pub fn active_voice_count(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }

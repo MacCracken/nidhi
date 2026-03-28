@@ -88,8 +88,15 @@ mod assert_traits {
         _assert_send_sync::<crate::zone::Zone>();
         _assert_send_sync::<crate::instrument::Instrument>();
         _assert_send_sync::<crate::engine::SamplerEngine>();
+        _assert_send_sync::<crate::engine::SamplerVoice>();
         _assert_send_sync::<crate::envelope::AdsrConfig>();
         _assert_send_sync::<crate::envelope::AmpEnvelope>();
         _assert_send_sync::<crate::envelope::EnvState>();
+        _assert_send_sync::<crate::loop_mode::LoopMode>();
+        _assert_send_sync::<crate::sample::SampleId>();
+        _assert_send_sync::<crate::sfz::SfzFile>();
+        _assert_send_sync::<crate::sfz::SfzRegion>();
+        _assert_send_sync::<crate::stretch::StretchMode>();
+        _assert_send_sync::<crate::stretch::TimeStretcher>();
     }
 }

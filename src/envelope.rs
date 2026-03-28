@@ -73,7 +73,6 @@ impl AdsrConfig {
     }
 
     /// Check if all ADSR values are at their defaults (no explicit envelope).
-    #[must_use]
     pub fn is_default_sfz(&self, sample_rate: f32) -> bool {
         self.attack_samples == 0
             && self.decay_samples == 0
@@ -190,7 +189,6 @@ impl AmpEnvelope {
 
     /// Whether the envelope is still producing output.
     #[inline]
-    #[must_use]
     pub fn is_active(&self) -> bool {
         #[cfg(feature = "std")]
         {
@@ -205,7 +203,6 @@ impl AmpEnvelope {
 
     /// Whether the envelope is in the release phase.
     #[inline]
-    #[must_use]
     pub fn is_releasing(&self) -> bool {
         #[cfg(feature = "std")]
         {
