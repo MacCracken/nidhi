@@ -55,6 +55,8 @@ pub mod engine;
 pub mod envelope;
 pub mod error;
 pub mod instrument;
+#[cfg(feature = "io")]
+pub mod io;
 pub mod loop_mode;
 pub mod sample;
 pub mod sf2;

@@ -1,0 +1,22 @@
+[package]
+name = "nidhi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nidhi = { path = "..", features = ["std"] }
+
+[[bin]]
+name = "fuzz_sfz"
+path = "fuzz_targets/fuzz_sfz.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_sf2"
+path = "fuzz_targets/fuzz_sf2.rs"
+doc = false

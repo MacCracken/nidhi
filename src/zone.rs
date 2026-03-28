@@ -153,6 +153,9 @@ pub struct Zone {
     /// Time-stretch ratio (1.0 = normal, >1.0 = slower, <1.0 = faster, 0.0 = disabled).
     #[serde(default)]
     pub(crate) time_stretch: f32,
+    /// Output bus index (0 = main, 1+ = aux buses).
+    #[serde(default)]
+    pub(crate) output_bus: u8,
 }
 
 impl Zone {
@@ -190,6 +193,7 @@ impl Zone {
             fillfo_depth: 0.0,
             fil_keytrack: 0.0,
             time_stretch: 0.0,
+            output_bus: 0,
         }
     }
 
@@ -430,6 +434,19 @@ impl Zone {
     #[must_use]
     pub fn time_stretch(&self) -> f32 {
         self.time_stretch
+    }
+
+    /// Set output bus index (0 = main, 1+ = aux buses).
+    pub fn with_output_bus(mut self, bus: u8) -> Self {
+        self.output_bus = bus;
+        self
+    }
+
+    /// Output bus index.
+    #[inline]
+    #[must_use]
+    pub fn output_bus(&self) -> u8 {
+        self.output_bus
     }
 
     /// Round-robin group (0 = none).

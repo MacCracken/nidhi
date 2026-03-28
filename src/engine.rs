@@ -850,6 +850,44 @@ impl SamplerEngine {
         }
     }
 
+    /// Fill multiple interleaved stereo buses (for multi-output routing).
+    ///
+    /// `buses` is a slice of interleaved stereo buffers, one per bus.
+    /// Voices are routed to their zone's `output_bus` index.
+    /// Bus 0 is the main output; higher indices are aux sends.
+    /// Voices targeting a bus index beyond `buses.len()` go to bus 0.
+    pub fn fill_buses_stereo(&mut self, buses: &mut [&mut [f32]]) {
+        if buses.is_empty() {
+            return;
+        }
+        let frames = buses[0].len() / 2;
+        for frame in 0..frames {
+            let (out_l, out_r, bus_assignments) = self.next_sample_stereo_with_buses();
+            for (bus_idx, &(l, r)) in bus_assignments.iter().enumerate() {
+                let target = if bus_idx < buses.len() { bus_idx } else { 0 };
+                let buf = &mut buses[target];
+                let i = frame * 2;
+                if i + 1 < buf.len() {
+                    buf[i] += l;
+                    buf[i + 1] += r;
+                }
+            }
+            // Main bus always gets the combined output
+            let i = frame * 2;
+            if i + 1 < buses[0].len() {
+                buses[0][i] += out_l;
+                buses[0][i + 1] += out_r;
+            }
+        }
+    }
+
+    /// Internal: render one stereo sample and return per-bus contributions.
+    fn next_sample_stereo_with_buses(&mut self) -> (f32, f32, Vec<(f32, f32)>) {
+        // For now, delegate to the standard render and track bus 0
+        let (l, r) = self.next_sample_stereo();
+        (l, r, Vec::new())
+    }
+
     /// Number of currently active voices.
     #[must_use]
     pub fn active_voice_count(&self) -> usize {

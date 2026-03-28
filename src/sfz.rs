@@ -155,6 +155,11 @@ pub struct SfzRegion {
     pub fillfo_depth: f32,
     /// Filter key tracking in cents (0–1200).
     pub fil_keytrack: f32,
+    /// Output bus index.
+    pub output: u8,
+    /// CC modulation entries: `(param_name, cc_number, depth)`.
+    /// Parsed from SFZ v2 `param_onccN=depth` opcodes.
+    pub cc_modulations: Vec<(String, u8, f32)>,
 }
 
 impl Default for SfzRegion {
@@ -195,6 +200,8 @@ impl Default for SfzRegion {
             fillfo_freq: 0.0,
             fillfo_depth: 0.0,
             fil_keytrack: 0.0,
+            output: 0,
+            cc_modulations: Vec::new(),
         }
     }
 }
@@ -378,6 +385,21 @@ impl SfzRegion {
                     self.fil_keytrack = v.clamp(0.0, 1200.0);
                 }
             }
+            "output" => {
+                if let Ok(v) = value.parse::<u8>() {
+                    self.output = v;
+                }
+            }
+            // SFZ v2 CC modulation: param_onccN=depth
+            _ if key.contains("_oncc") => {
+                if let Some(pos) = key.find("_oncc") {
+                    let param = &key[..pos];
+                    let cc_str = &key[pos + 5..];
+                    if let (Ok(cc), Ok(depth)) = (cc_str.parse::<u8>(), value.parse::<f32>()) {
+                        self.cc_modulations.push((String::from(param), cc, depth));
+                    }
+                }
+            }
             // Unknown opcodes are silently ignored per SFZ spec convention.
             _ => {}
         }
@@ -495,6 +517,12 @@ impl SfzRegion {
         if self.fil_keytrack == 0.0 && parent.fil_keytrack != 0.0 {
             self.fil_keytrack = parent.fil_keytrack;
         }
+        if self.output == 0 && parent.output != 0 {
+            self.output = parent.output;
+        }
+        if self.cc_modulations.is_empty() && !parent.cc_modulations.is_empty() {
+            self.cc_modulations.clone_from(&parent.cc_modulations);
+        }
     }
 }
 
@@ -523,6 +551,8 @@ pub struct SfzFile {
     group_indices: Vec<Option<usize>>,
     /// Default path prefix for sample filenames (from `<control> default_path`).
     pub default_path: Option<String>,
+    /// `#include` directives encountered during parsing (paths, in order).
+    pub includes: Vec<String>,
 }
 
 impl SfzFile {
@@ -702,6 +732,13 @@ impl SfzFile {
                 zone
             };
 
+            // Wire output bus
+            let zone = if merged.output > 0 {
+                zone.with_output_bus(merged.output)
+            } else {
+                zone
+            };
+
             result.push((zone, filename));
         }
 
@@ -763,12 +800,22 @@ pub fn parse(input: &str) -> Result<SfzFile> {
     let mut current_header = HeaderKind::None;
     let mut current_group_idx: Option<usize> = None;
     let mut default_path: Option<String> = None;
+    let mut includes: Vec<String> = Vec::new();
 
     for line in input.lines() {
         let line = line.trim();
 
         // Skip empty lines and comments
         if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+
+        // Handle #include directives (SFZ v2)
+        if line.starts_with("#include") {
+            let path = line.trim_start_matches("#include").trim().trim_matches('"');
+            if !path.is_empty() {
+                includes.push(String::from(path));
+            }
             continue;
         }
 
@@ -842,6 +889,7 @@ pub fn parse(input: &str) -> Result<SfzFile> {
         regions,
         group_indices,
         default_path,
+        includes,
     })
 }
 
@@ -1356,5 +1404,34 @@ lokey=73 hikey=84
         let (z, _) = &zones[0];
         // 600 / 1200 = 0.5
         assert!((z.fil_keytrack() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn include_directives_collected() {
+        let input =
+            "#include \"common.sfz\"\n<region>\nsample=test.wav\n#include \"velocities.sfz\"\n";
+        let sfz = parse(input).expect("should parse with includes");
+        assert_eq!(sfz.includes.len(), 2);
+        assert_eq!(sfz.includes[0], "common.sfz");
+        assert_eq!(sfz.includes[1], "velocities.sfz");
+    }
+
+    #[test]
+    fn cc_modulation_opcodes_parsed() {
+        let input = "<region>\nsample=test.wav\nvolume_oncc1=6 cutoff_oncc74=2400\n";
+        let sfz = parse(input).expect("should parse");
+        assert_eq!(sfz.regions[0].cc_modulations.len(), 2);
+        let (param, cc, depth) = &sfz.regions[0].cc_modulations[0];
+        assert_eq!(param, "volume");
+        assert_eq!(*cc, 1);
+        assert!((depth - 6.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn output_opcode_wired_to_bus() {
+        let input = "<region>\nsample=test.wav\noutput=2\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        assert_eq!(zones[0].0.output_bus(), 2);
     }
 }
