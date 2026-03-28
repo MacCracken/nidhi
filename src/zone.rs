@@ -100,6 +100,15 @@ pub struct Zone {
     pub(crate) loop_start: usize,
     /// Loop end frame (0 = end of sample).
     pub(crate) loop_end: usize,
+    /// Crossfade length in frames at loop boundary (0 = no crossfade).
+    #[serde(default)]
+    pub(crate) crossfade_length: usize,
+    /// Sample playback start offset in frames (0 = beginning).
+    #[serde(default)]
+    pub(crate) sample_offset: usize,
+    /// Sample playback end frame (0 = end of sample).
+    #[serde(default)]
+    pub(crate) sample_end: usize,
     /// Filter cutoff in Hz (0.0 = disabled).
     pub(crate) filter_cutoff: f32,
     /// Filter resonance / Q (0.707 = Butterworth, higher = more resonant).
@@ -141,6 +150,9 @@ impl Zone {
             loop_mode: LoopMode::OneShot,
             loop_start: 0,
             loop_end: 0,
+            crossfade_length: 0,
+            sample_offset: 0,
+            sample_end: 0,
             filter_cutoff: 0.0,
             filter_resonance: 0.707,
             filter_type: FilterMode::LowPass,
@@ -197,6 +209,42 @@ impl Zone {
         self.loop_start = start;
         self.loop_end = end;
         self
+    }
+
+    /// Set crossfade length in frames at loop boundary.
+    pub fn with_crossfade(mut self, length: usize) -> Self {
+        self.crossfade_length = length;
+        self
+    }
+
+    /// Set sample playback start offset.
+    pub fn with_sample_offset(mut self, offset: usize) -> Self {
+        self.sample_offset = offset;
+        self
+    }
+
+    /// Set sample playback end frame (0 = use full sample).
+    pub fn with_sample_end(mut self, end: usize) -> Self {
+        self.sample_end = end;
+        self
+    }
+
+    /// Crossfade length in frames (0 = disabled).
+    #[inline]
+    pub fn crossfade_length(&self) -> usize {
+        self.crossfade_length
+    }
+
+    /// Sample playback start offset.
+    #[inline]
+    pub fn sample_offset(&self) -> usize {
+        self.sample_offset
+    }
+
+    /// Sample playback end frame (0 = end of sample).
+    #[inline]
+    pub fn sample_end(&self) -> usize {
+        self.sample_end
     }
 
     /// Set filter cutoff and velocity tracking.

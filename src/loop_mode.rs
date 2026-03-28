@@ -15,4 +15,6 @@ pub enum LoopMode {
     PingPong,
     /// Reverse: play the sample backwards.
     Reverse,
+    /// Loop sustain: loop while note is held, play through to end on release.
+    LoopSustain,
 }

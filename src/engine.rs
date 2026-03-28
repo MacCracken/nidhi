@@ -332,7 +332,7 @@ impl SamplerEngine {
         let voice = &mut self.voices[voice_idx];
         voice.active = true;
         voice.zone_index = zone_idx;
-        voice.position = 0.0;
+        voice.position = zone.sample_offset() as f64;
         voice.speed = speed;
         voice.amplitude = amp;
         voice.note = note;
@@ -391,7 +391,14 @@ impl SamplerEngine {
         loop_start: usize,
         loop_end: usize,
         frames: usize,
+        released: bool,
     ) -> bool {
+        let effective_end = if loop_end > 0 {
+            loop_end as f64
+        } else {
+            frames as f64
+        };
+
         match loop_mode {
             LoopMode::OneShot => {
                 voice.position += voice.speed;
@@ -401,24 +408,14 @@ impl SamplerEngine {
             }
             LoopMode::Forward => {
                 voice.position += voice.speed;
-                let end = if loop_end > 0 {
-                    loop_end as f64
-                } else {
-                    frames as f64
-                };
-                if voice.position >= end {
+                if voice.position >= effective_end {
                     voice.position = loop_start as f64;
                 }
             }
             LoopMode::PingPong => {
                 if voice.forward {
                     voice.position += voice.speed;
-                    let end = if loop_end > 0 {
-                        loop_end as f64
-                    } else {
-                        frames as f64
-                    };
-                    if voice.position >= end {
+                    if voice.position >= effective_end {
                         voice.forward = false;
                     }
                 } else {
@@ -432,6 +429,20 @@ impl SamplerEngine {
                 voice.position -= voice.speed;
                 if voice.position < 0.0 {
                     return false;
+                }
+            }
+            LoopMode::LoopSustain => {
+                voice.position += voice.speed;
+                if released {
+                    // Play through to end of sample (like OneShot)
+                    if voice.position >= frames as f64 {
+                        return false;
+                    }
+                } else {
+                    // Loop while held (like Forward)
+                    if voice.position >= effective_end {
+                        voice.position = loop_start as f64;
+                    }
                 }
             }
         }
@@ -467,8 +478,34 @@ impl SamplerEngine {
                 }
             };
 
+            // Determine effective sample end
+            let effective_frames = if zone.sample_end() > 0 {
+                zone.sample_end().min(sample.frames())
+            } else {
+                sample.frames()
+            };
+
             // Read stereo interpolated sample
             let (mut sl, mut sr) = sample.read_stereo_interpolated(voice.position);
+
+            // Crossfade at loop boundary
+            let xfade = zone.crossfade_length();
+            if xfade > 0 && matches!(zone.loop_mode(), LoopMode::Forward | LoopMode::LoopSustain) {
+                let loop_end_f = if zone.loop_end > 0 {
+                    zone.loop_end as f64
+                } else {
+                    effective_frames as f64
+                };
+                let xfade_f = xfade as f64;
+                let dist_to_end = loop_end_f - voice.position;
+                if dist_to_end >= 0.0 && dist_to_end < xfade_f {
+                    let t = (dist_to_end / xfade_f) as f32; // 1.0 at start of xfade, 0.0 at end
+                    let xfade_pos = zone.loop_start as f64 + (xfade_f - dist_to_end);
+                    let (xl, xr) = sample.read_stereo_interpolated(xfade_pos);
+                    sl = sl * t + xl * (1.0 - t);
+                    sr = sr * t + xr * (1.0 - t);
+                }
+            }
 
             // Modulate filter cutoff via filter envelope
             if let Some(ref mut fenv) = voice.filter_env {
@@ -510,7 +547,8 @@ impl SamplerEngine {
                 zone.loop_mode(),
                 zone.loop_start,
                 zone.loop_end,
-                sample.frames(),
+                effective_frames,
+                voice.amp_env.is_releasing(),
             ) {
                 voice.active = false;
             }

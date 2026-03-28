@@ -203,6 +203,21 @@ impl AmpEnvelope {
         }
     }
 
+    /// Whether the envelope is in the release phase.
+    #[inline]
+    #[must_use]
+    pub fn is_releasing(&self) -> bool {
+        #[cfg(feature = "std")]
+        {
+            self.inner.state() == naad::envelope::EnvelopeState::Release
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            self.state == EnvState::Release
+        }
+    }
+
     // -----------------------------------------------------------------------
     // no_std fallback implementation
     // -----------------------------------------------------------------------

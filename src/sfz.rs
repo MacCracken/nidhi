@@ -17,7 +17,65 @@ use crate::error::Result;
 use crate::instrument::Instrument;
 use crate::loop_mode::LoopMode;
 use crate::sample::SampleId;
-use crate::zone::Zone;
+use crate::zone::{FilterMode, Zone};
+
+/// Parse a note name (e.g., `c4`, `f#3`, `eb5`) or numeric MIDI value to a MIDI note number.
+///
+/// Supports C-1 through G9 (MIDI 0–127). Accidentals: `#` or `s` for sharp, `b` for flat.
+#[must_use]
+pub fn parse_note_or_number(s: &str) -> Option<u8> {
+    // Try numeric first
+    if let Ok(v) = s.parse::<u8>() {
+        return Some(v);
+    }
+
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+
+    // Note base: c=0, d=2, e=4, f=5, g=7, a=9, b=11
+    let note_base = match bytes[0].to_ascii_lowercase() {
+        b'c' => 0i32,
+        b'd' => 2,
+        b'e' => 4,
+        b'f' => 5,
+        b'g' => 7,
+        b'a' => 9,
+        b'b' => 11,
+        _ => return None,
+    };
+
+    let mut idx = 1;
+    let mut accidental = 0i32;
+
+    // Check for accidental
+    if idx < bytes.len() {
+        match bytes[idx] {
+            b'#' | b's' => {
+                accidental = 1;
+                idx += 1;
+            }
+            b'b' if idx + 1 < bytes.len() && bytes[idx + 1].is_ascii_digit() => {
+                // Only treat 'b' as flat if followed by digit (else it's note B)
+                accidental = -1;
+                idx += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Parse octave (may be negative, e.g. "c-1")
+    let octave_str = &s[idx..];
+    let octave: i32 = octave_str.parse().ok()?;
+
+    let midi = (octave + 1) * 12 + note_base + accidental;
+    if (0..=127).contains(&midi) {
+        Some(midi as u8)
+    } else {
+        None
+    }
+}
 
 /// Intermediate representation of one SFZ section's opcodes.
 ///
@@ -75,6 +133,18 @@ pub struct SfzRegion {
     pub fileg_release: f32,
     /// Filter envelope depth in cents.
     pub fileg_depth: f32,
+    /// Transpose in semitones.
+    pub transpose: i32,
+    /// Sample start offset in frames.
+    pub offset: usize,
+    /// Sample end position in frames (0 = full sample).
+    pub end: usize,
+    /// Filter resonance (Q factor).
+    pub resonance: f32,
+    /// Filter type string.
+    pub fil_type: Option<String>,
+    /// `key` shorthand (sets lokey=hikey=pitch_keycenter).
+    pub key: Option<u8>,
 }
 
 impl Default for SfzRegion {
@@ -104,6 +174,12 @@ impl Default for SfzRegion {
             fileg_sustain: 100.0,
             fileg_release: 0.0,
             fileg_depth: 0.0,
+            transpose: 0,
+            offset: 0,
+            end: 0,
+            resonance: 0.0,
+            fil_type: None,
+            key: None,
         }
     }
 }
@@ -119,13 +195,18 @@ impl SfzRegion {
         match key {
             "sample" => self.sample = Some(String::from(value)),
             "lokey" => {
-                if let Ok(v) = value.parse::<u8>() {
+                if let Some(v) = parse_note_or_number(value) {
                     self.lokey = v;
                 }
             }
             "hikey" => {
-                if let Ok(v) = value.parse::<u8>() {
+                if let Some(v) = parse_note_or_number(value) {
                     self.hikey = v;
+                }
+            }
+            "key" => {
+                if let Some(v) = parse_note_or_number(value) {
+                    self.key = Some(v);
                 }
             }
             "lovel" => {
@@ -139,7 +220,7 @@ impl SfzRegion {
                 }
             }
             "pitch_keycenter" => {
-                if let Ok(v) = value.parse::<u8>() {
+                if let Some(v) = parse_note_or_number(value) {
                     self.pitch_keycenter = v;
                 }
             }
@@ -234,6 +315,29 @@ impl SfzRegion {
                     self.fileg_depth = v.clamp(-9600.0, 9600.0);
                 }
             }
+            "transpose" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    self.transpose = v;
+                }
+            }
+            "offset" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    self.offset = v;
+                }
+            }
+            "end" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    self.end = v;
+                }
+            }
+            "resonance" | "fil_resonance" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.resonance = v.max(0.0);
+                }
+            }
+            "fil_type" | "filtype" => {
+                self.fil_type = Some(String::from(value));
+            }
             // Unknown opcodes are silently ignored per SFZ spec convention.
             _ => {}
         }
@@ -318,6 +422,24 @@ impl SfzRegion {
         if self.fileg_depth == 0.0 && parent.fileg_depth != 0.0 {
             self.fileg_depth = parent.fileg_depth;
         }
+        if self.transpose == 0 && parent.transpose != 0 {
+            self.transpose = parent.transpose;
+        }
+        if self.offset == 0 && parent.offset != 0 {
+            self.offset = parent.offset;
+        }
+        if self.end == 0 && parent.end != 0 {
+            self.end = parent.end;
+        }
+        if self.resonance == 0.0 && parent.resonance != 0.0 {
+            self.resonance = parent.resonance;
+        }
+        if self.fil_type.is_none() {
+            self.fil_type.clone_from(&parent.fil_type);
+        }
+        if self.key.is_none() {
+            self.key = parent.key;
+        }
     }
 }
 
@@ -325,9 +447,11 @@ impl SfzRegion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeaderKind {
     None,
+    Control,
     Global,
     Group,
     Region,
+    Curve,
 }
 
 /// A fully parsed SFZ file.
@@ -342,6 +466,8 @@ pub struct SfzFile {
     pub regions: Vec<SfzRegion>,
     /// Which group index each region belongs to (`None` if no group was active).
     group_indices: Vec<Option<usize>>,
+    /// Default path prefix for sample filenames (from `<control> default_path`).
+    pub default_path: Option<String>,
 }
 
 impl SfzFile {
@@ -401,18 +527,45 @@ impl SfzFile {
             // Apply global defaults
             merged.inherit_from(&self.global);
 
+            // Apply `key` shorthand: sets lokey=hikey=pitch_keycenter
+            if let Some(k) = merged.key {
+                if merged.lokey == 0 && merged.hikey == 127 {
+                    merged.lokey = k;
+                    merged.hikey = k;
+                }
+                if merged.pitch_keycenter == 60 {
+                    merged.pitch_keycenter = k;
+                }
+            }
+
             // Skip regions without a sample
-            let filename = match merged.sample {
+            let mut filename = match merged.sample {
                 Some(ref f) => f.clone(),
                 None => continue,
             };
 
+            // Prepend default_path if set
+            if let Some(ref prefix) = self.default_path
+                && !filename.starts_with(prefix.as_str())
+            {
+                let mut full = String::with_capacity(prefix.len() + filename.len());
+                full.push_str(prefix);
+                full.push_str(&filename);
+                filename = full;
+            }
+
+            // Apply transpose to tune
+            let tune_cents = merged.tune as f32 + merged.transpose as f32 * 100.0;
+
+            // Map filter type
+            let filter_type = map_fil_type(merged.fil_type.as_deref());
+
             // Placeholder sample ID — caller remaps after loading samples
-            let zone = Zone::new(SampleId(i as u32))
+            let mut zone = Zone::new(SampleId(i as u32))
                 .with_key_range(merged.lokey, merged.hikey)
                 .with_vel_range(merged.lovel, merged.hivel)
                 .with_root_note(merged.pitch_keycenter)
-                .with_tune(merged.tune as f32)
+                .with_tune(tune_cents)
                 .with_volume(merged.volume)
                 .with_pan(merged.pan / 100.0)
                 .with_loop(
@@ -421,7 +574,18 @@ impl SfzFile {
                     merged.loop_end,
                 )
                 .with_filter(merged.cutoff, map_fil_veltrack(merged.fil_veltrack))
+                .with_filter_type(filter_type)
                 .with_group(merged.group);
+
+            if merged.resonance > 0.0 {
+                zone = zone.with_filter_resonance(merged.resonance);
+            }
+            if merged.offset > 0 {
+                zone = zone.with_sample_offset(merged.offset);
+            }
+            if merged.end > 0 {
+                zone = zone.with_sample_end(merged.end);
+            }
 
             // Wire ADSR if any ampeg opcode was explicitly set
             let has_ampeg = merged.ampeg_attack != 0.0
@@ -474,10 +638,24 @@ impl SfzFile {
 #[inline]
 fn map_loop_mode(mode: Option<&str>) -> LoopMode {
     match mode {
-        Some("loop_continuous") | Some("loop_sustain") => LoopMode::Forward,
+        Some("loop_continuous") => LoopMode::Forward,
+        Some("loop_sustain") => LoopMode::LoopSustain,
         Some("one_shot") => LoopMode::OneShot,
         Some("no_loop") | None => LoopMode::OneShot,
         Some(_) => LoopMode::OneShot,
+    }
+}
+
+/// Map SFZ `fil_type` string to a nidhi [`FilterMode`].
+#[must_use]
+#[inline]
+fn map_fil_type(fil_type: Option<&str>) -> FilterMode {
+    match fil_type {
+        Some("hpf_1p") | Some("hpf_2p") => FilterMode::HighPass,
+        Some("bpf_2p") => FilterMode::BandPass,
+        Some("brf_2p") => FilterMode::Notch,
+        // lpf_1p, lpf_2p, or unknown → LowPass (default)
+        _ => FilterMode::LowPass,
     }
 }
 
@@ -508,6 +686,7 @@ pub fn parse(input: &str) -> Result<SfzFile> {
 
     let mut current_header = HeaderKind::None;
     let mut current_group_idx: Option<usize> = None;
+    let mut default_path: Option<String> = None;
 
     for line in input.lines() {
         let line = line.trim();
@@ -524,6 +703,9 @@ pub fn parse(input: &str) -> Result<SfzFile> {
             // Check for headers
             if let Some(header) = parse_header(token) {
                 match header {
+                    HeaderKind::Control => {
+                        current_header = HeaderKind::Control;
+                    }
                     HeaderKind::Global => {
                         current_header = HeaderKind::Global;
                     }
@@ -537,6 +719,10 @@ pub fn parse(input: &str) -> Result<SfzFile> {
                         regions.push(SfzRegion::new());
                         group_indices.push(current_group_idx);
                     }
+                    HeaderKind::Curve => {
+                        current_header = HeaderKind::Curve;
+                        // Curve opcodes are stored but not yet used
+                    }
                     HeaderKind::None => {}
                 }
                 continue;
@@ -545,6 +731,12 @@ pub fn parse(input: &str) -> Result<SfzFile> {
             // Parse opcode key=value
             if let Some((key, value)) = split_opcode(token) {
                 match current_header {
+                    HeaderKind::Control => {
+                        if key == "default_path" {
+                            default_path = Some(String::from(value));
+                        }
+                        // Other control opcodes ignored for now
+                    }
                     HeaderKind::Global => global.apply_opcode(key, value),
                     HeaderKind::Group => {
                         if let Some(g) = groups.last_mut() {
@@ -555,6 +747,9 @@ pub fn parse(input: &str) -> Result<SfzFile> {
                         if let Some(r) = regions.last_mut() {
                             r.apply_opcode(key, value);
                         }
+                    }
+                    HeaderKind::Curve => {
+                        // Curve opcodes stored for future use
                     }
                     HeaderKind::None => {
                         // Opcodes before any header are treated as global
@@ -570,6 +765,7 @@ pub fn parse(input: &str) -> Result<SfzFile> {
         groups,
         regions,
         group_indices,
+        default_path,
     })
 }
 
@@ -579,10 +775,11 @@ fn parse_header(token: &str) -> Option<HeaderKind> {
     if trimmed.starts_with('<') && trimmed.ends_with('>') {
         let name = &trimmed[1..trimmed.len() - 1];
         match name {
+            "control" => Some(HeaderKind::Control),
             "global" => Some(HeaderKind::Global),
             "group" => Some(HeaderKind::Group),
             "region" => Some(HeaderKind::Region),
-            // Other headers (e.g., <control>, <curve>) are ignored
+            "curve" => Some(HeaderKind::Curve),
             _ => None,
         }
     } else {
@@ -737,7 +934,7 @@ pan=50
         assert_eq!(map_loop_mode(Some("no_loop")), LoopMode::OneShot);
         assert_eq!(map_loop_mode(Some("one_shot")), LoopMode::OneShot);
         assert_eq!(map_loop_mode(Some("loop_continuous")), LoopMode::Forward);
-        assert_eq!(map_loop_mode(Some("loop_sustain")), LoopMode::Forward);
+        assert_eq!(map_loop_mode(Some("loop_sustain")), LoopMode::LoopSustain);
         assert_eq!(map_loop_mode(Some("unknown_mode")), LoopMode::OneShot);
     }
 

@@ -55,6 +55,7 @@ pub mod error;
 pub mod instrument;
 pub mod loop_mode;
 pub mod sample;
+pub mod sf2;
 pub mod sfz;
 pub mod stretch;
 pub mod zone;
@@ -67,6 +68,7 @@ pub mod prelude {
     pub use crate::instrument::Instrument;
     pub use crate::loop_mode::LoopMode;
     pub use crate::sample::{Sample, SampleBank, SampleId};
+    pub use crate::sf2::Sf2Preset;
     pub use crate::sfz::SfzFile;
     pub use crate::zone::{FilterMode, VelocityCurve, Zone};
 }
@@ -80,6 +82,7 @@ mod assert_traits {
         _assert_send_sync::<crate::error::NidhiError>();
         _assert_send_sync::<crate::sample::Sample>();
         _assert_send_sync::<crate::sample::SampleBank>();
+        _assert_send_sync::<crate::sf2::Sf2Preset>();
         _assert_send_sync::<crate::zone::FilterMode>();
         _assert_send_sync::<crate::zone::VelocityCurve>();
         _assert_send_sync::<crate::zone::Zone>();
