@@ -47,7 +47,6 @@ impl SampleRecorder {
     }
 
     /// Current length in frames.
-    #[must_use]
     pub fn frames(&self) -> usize {
         self.buffer.len() / self.channels as usize
     }

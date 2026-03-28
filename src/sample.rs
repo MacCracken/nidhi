@@ -68,7 +68,6 @@ impl Sample {
 
     /// Get slice points.
     #[inline]
-    #[must_use]
     pub fn slices(&self) -> &[usize] {
         &self.slices
     }
@@ -131,30 +130,35 @@ impl Sample {
 
     /// Sample data.
     #[inline]
+    #[must_use]
     pub fn data(&self) -> &[f32] {
         &self.data
     }
 
     /// Number of channels.
     #[inline]
+    #[must_use]
     pub fn channels(&self) -> u32 {
         self.channels
     }
 
     /// Sample rate in Hz.
     #[inline]
+    #[must_use]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
     /// Number of frames.
     #[inline]
+    #[must_use]
     pub fn frames(&self) -> usize {
         self.frames
     }
 
     /// Sample name.
     #[inline]
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -291,12 +295,14 @@ impl SampleBank {
 
     /// Number of samples in the bank.
     #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.samples.len()
     }
 
     /// Whether the bank is empty.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }

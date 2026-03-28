@@ -104,12 +104,14 @@ impl Instrument {
 
     /// Instrument name.
     #[inline]
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Number of zones.
     #[inline]
+    #[must_use]
     pub fn zone_count(&self) -> usize {
         self.zones.len()
     }

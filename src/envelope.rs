@@ -73,6 +73,7 @@ impl AdsrConfig {
     }
 
     /// Check if all ADSR values are at their defaults (no explicit envelope).
+    #[must_use]
     pub fn is_default_sfz(&self, sample_rate: f32) -> bool {
         self.attack_samples == 0
             && self.decay_samples == 0
@@ -122,10 +123,12 @@ impl AmpEnvelope {
                 r.max(0.0),
                 sample_rate.max(1.0),
             )
-            .unwrap_or_else(|_| {
-                naad::envelope::Adsr::with_sample_rate(0.0, 0.0, 1.0, 0.01, sample_rate.max(1.0))
-                    .expect("default ADSR params are valid")
-            });
+            .or_else(|_| {
+                // Fallback with hardcoded known-valid params
+                naad::envelope::Adsr::with_sample_rate(0.0, 0.0, 1.0, 0.01, 44100.0)
+            })
+            // Infallible: the fallback params (0, 0, 1.0, 0.01, 44100) always pass validation.
+            .expect("hardcoded ADSR fallback params are valid");
             Self { inner: adsr }
         }
 

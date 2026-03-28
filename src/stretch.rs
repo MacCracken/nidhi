@@ -61,6 +61,7 @@ impl TimeStretcher {
 
     /// Sample rate accessor.
     #[inline]
+    #[must_use]
     pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }

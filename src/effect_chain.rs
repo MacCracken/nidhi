@@ -136,13 +136,11 @@ impl EffectChain {
     }
 
     /// Number of active slots.
-    #[must_use]
     pub fn len(&self) -> usize {
         self.slots.len()
     }
 
     /// Whether the chain is empty.
-    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }

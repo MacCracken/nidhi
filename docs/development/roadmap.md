@@ -3,29 +3,48 @@
 nidhi is the standalone sampler crate in the AGNOS ecosystem, replacing
 `shruti-instruments::sampler`. Published to crates.io at 1.0.0.
 
-## v1.1.0 — Performance
+## v1.1.0 — Performance + real-time safety
 
-- [ ] SIMD-accelerated mixing and interpolation
+Zero-allocation render path, SIMD, and caching optimizations.
+
 - [ ] Pre-allocated voice buffers (zero allocation in render path)
-- [ ] Filter coefficient caching
-- [ ] Denormal flushing in filter feedback
-- [ ] Per-voice buffer accumulation (5–10% perf)
-- [ ] Parameter smoothing via `naad::smoothing::ParamSmoother`
+- [ ] Per-voice buffer accumulation (batch render, 5–10% perf)
+- [ ] Filter coefficient caching (skip recompute when params unchanged)
+- [ ] Envelope stage duration caching
+- [ ] Denormal flushing in filter feedback paths (no_std path)
+- [ ] Parameter smoothing via `naad::smoothing::ParamSmoother` (click-free param changes)
+- [ ] SIMD-accelerated stereo mixing (accumulate L/R buffers)
+- [ ] SIMD-accelerated cubic Hermite interpolation
+- [ ] Benchmark suite: voice count scaling, buffer fill throughput, interpolation cost
 
-## v1.2.0 — Advanced modulation
+## v1.2.0 — Advanced modulation + expression
 
-- [ ] Modulation matrix exposure on engine (naad `ModMatrix`)
-- [ ] Per-voice pitch envelope
+Full modulation matrix and richer voice expression.
+
+- [ ] Modulation matrix via `naad::mod_matrix::ModMatrix` (8x8 source→destination routing)
+- [ ] Feed LFO/envelope/velocity/mod wheel/aftertouch/pitch bend as mod sources
+- [ ] Per-voice pitch envelope (separate from amp ADSR)
+- [ ] Amplitude LFO (tremolo) via zone config
 - [ ] Random/sequence round-robin modes
+- [ ] Portamento (glide between notes in mono/legato mode)
 
-## v1.3.0 — Advanced time-stretching
+## v1.3.0 — Advanced time-stretching + grain
 
-- [ ] Real-time grain mode in engine (TimeStretcher integration, 0.25x–4.0x)
+Real-time granular playback and FFT-based stretching.
+
+- [ ] Integrate TimeStretcher into engine (real-time grain mode)
+- [ ] Grain size configuration (10–100ms, configurable overlap)
 - [ ] Phase vocoder time-stretching (FFT-based, replace WSOLA fallback)
-- [ ] Grain size configuration (10–100ms)
+- [ ] Pitch-independent time-stretch in render loop (0.25x–4.0x)
+- [ ] Granular freeze mode (sustain a single grain position)
 
 ## Backlog
 
-- [ ] Comprehensive benchmarks (voice count, buffer fill, interpolation)
+Items that can land in any future release when needed:
+
 - [ ] Fuzz testing for SFZ and SF2 parsers
-- [ ] dhvani integration tested (shruti consuming nidhi via dhvani)
+- [ ] dhvani integration tested end-to-end (shruti consuming nidhi via dhvani)
+- [ ] SFZ v2 opcode subset (CC modulation, curves, #include)
+- [ ] Multi-output routing (per-zone bus assignment)
+- [ ] Sample streaming from disk (for very large instruments)
+- [ ] WAV/FLAC file loading helpers (behind optional `io` feature)
