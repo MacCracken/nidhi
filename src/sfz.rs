@@ -1134,4 +1134,121 @@ lokey=73 hikey=84
         assert_eq!(zones[1].sample_id(), SampleId(0));
         assert_eq!(zones[2].sample_id(), SampleId(1));
     }
+
+    #[test]
+    fn note_name_parsing() {
+        assert_eq!(parse_note_or_number("60"), Some(60));
+        assert_eq!(parse_note_or_number("c4"), Some(60));
+        assert_eq!(parse_note_or_number("C4"), Some(60));
+        assert_eq!(parse_note_or_number("f#3"), Some(54));
+        assert_eq!(parse_note_or_number("eb4"), Some(63));
+        assert_eq!(parse_note_or_number("b4"), Some(71));
+        assert_eq!(parse_note_or_number("c-1"), Some(0));
+        assert_eq!(parse_note_or_number("g9"), Some(127));
+        assert_eq!(parse_note_or_number(""), None);
+        assert_eq!(parse_note_or_number("xyz"), None);
+    }
+
+    #[test]
+    fn note_names_in_opcodes() {
+        let input = "<region>\nsample=test.wav\nlokey=c4 hikey=c5 pitch_keycenter=f#4\n";
+        let sfz = parse(input).expect("should parse note names");
+        assert_eq!(sfz.regions[0].lokey, 60);
+        assert_eq!(sfz.regions[0].hikey, 72);
+        assert_eq!(sfz.regions[0].pitch_keycenter, 66);
+    }
+
+    #[test]
+    fn key_shorthand_opcode() {
+        let input = "<region>\nsample=test.wav\nkey=60\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        assert_eq!(zones.len(), 1);
+        let (z, _) = &zones[0];
+        assert_eq!(z.key_lo, 60);
+        assert_eq!(z.key_hi, 60);
+        assert_eq!(z.root_note, 60);
+    }
+
+    #[test]
+    fn control_header_default_path() {
+        let input = "<control>\ndefault_path=samples/piano/\n<region>\nsample=c4.wav\n";
+        let sfz = parse(input).expect("should parse");
+        assert_eq!(sfz.default_path.as_deref(), Some("samples/piano/"));
+        let zones = sfz.to_zones(44100.0);
+        assert_eq!(zones[0].1, "samples/piano/c4.wav");
+    }
+
+    #[test]
+    fn curve_header_does_not_break_parsing() {
+        let input = "<curve>\ncurve_index=1\nv000=0 v127=1\n<region>\nsample=test.wav\n";
+        let sfz = parse(input).expect("should parse with curve header");
+        assert_eq!(sfz.regions.len(), 1);
+    }
+
+    #[test]
+    fn transpose_adds_to_tune() {
+        let input = "<region>\nsample=test.wav\ntune=10 transpose=2\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        // tune=10 cents + transpose=2 semitones (200 cents) = 210 cents
+        assert!((zones[0].0.tune_cents - 210.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fil_type_maps_to_filter_mode() {
+        use crate::zone::FilterMode;
+        let input = "<region>\nsample=test.wav\nfil_type=hpf_2p\ncutoff=1000\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        assert_eq!(zones[0].0.filter_type(), FilterMode::HighPass);
+    }
+
+    #[test]
+    fn offset_and_end_opcodes() {
+        let input = "<region>\nsample=test.wav\noffset=100 end=5000\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        assert_eq!(zones[0].0.sample_offset(), 100);
+        assert_eq!(zones[0].0.sample_end(), 5000);
+    }
+
+    #[test]
+    fn resonance_opcode() {
+        let input = "<region>\nsample=test.wav\ncutoff=2000 resonance=6.0\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        assert!((zones[0].0.filter_resonance() - 6.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fileg_opcodes_wired_to_zone() {
+        let input = "<region>\nsample=test.wav\ncutoff=2000\nfileg_attack=0.1 fileg_decay=0.2 fileg_sustain=50 fileg_release=0.3 fileg_depth=2400\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        let (z, _) = &zones[0];
+        assert!(z.fileg().is_some());
+        assert!((z.fileg_depth() - 2400.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn ampeg_wired_to_zone_adsr() {
+        let input = "<region>\nsample=test.wav\nampeg_attack=0.05 ampeg_release=0.3\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        let (z, _) = &zones[0];
+        assert!(z.adsr().is_some());
+        let adsr = z.adsr().unwrap();
+        assert!(adsr.attack_samples > 0);
+        assert!(adsr.release_samples > 0);
+    }
+
+    #[test]
+    fn loop_sustain_mode_in_sfz() {
+        let input =
+            "<region>\nsample=test.wav\nloop_mode=loop_sustain\nloop_start=100 loop_end=500\n";
+        let sfz = parse(input).expect("should parse");
+        let zones = sfz.to_zones(44100.0);
+        assert_eq!(zones[0].0.loop_mode(), LoopMode::LoopSustain);
+    }
 }

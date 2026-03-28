@@ -185,9 +185,9 @@ impl Zone {
         self
     }
 
-    /// Set fine tuning in cents.
+    /// Set tuning offset in cents. Includes both fine tuning and transpose.
     pub fn with_tune(mut self, cents: f32) -> Self {
-        self.tune_cents = cents.clamp(-100.0, 100.0);
+        self.tune_cents = cents.clamp(-12800.0, 12800.0);
         self
     }
 
@@ -231,18 +231,21 @@ impl Zone {
 
     /// Crossfade length in frames (0 = disabled).
     #[inline]
+    #[must_use]
     pub fn crossfade_length(&self) -> usize {
         self.crossfade_length
     }
 
     /// Sample playback start offset.
     #[inline]
+    #[must_use]
     pub fn sample_offset(&self) -> usize {
         self.sample_offset
     }
 
     /// Sample playback end frame (0 = end of sample).
     #[inline]
+    #[must_use]
     pub fn sample_end(&self) -> usize {
         self.sample_end
     }
@@ -280,6 +283,7 @@ impl Zone {
 
     /// Velocity curve for this zone.
     #[inline]
+    #[must_use]
     pub fn velocity_curve(&self) -> VelocityCurve {
         self.vel_curve
     }
@@ -292,6 +296,7 @@ impl Zone {
 
     /// Per-zone ADSR config (None = use engine default).
     #[inline]
+    #[must_use]
     pub fn adsr(&self) -> Option<&AdsrConfig> {
         self.adsr.as_ref()
     }
@@ -305,48 +310,56 @@ impl Zone {
 
     /// Filter envelope config (None = no filter modulation).
     #[inline]
+    #[must_use]
     pub fn fileg(&self) -> Option<&AdsrConfig> {
         self.fileg.as_ref()
     }
 
     /// Filter envelope depth in cents.
     #[inline]
+    #[must_use]
     pub fn fileg_depth(&self) -> f32 {
         self.fileg_depth
     }
 
     /// Round-robin group (0 = none).
     #[inline]
+    #[must_use]
     pub fn group(&self) -> u32 {
         self.group
     }
 
     /// Filter cutoff in Hz (0.0 = disabled).
     #[inline]
+    #[must_use]
     pub fn filter_cutoff(&self) -> f32 {
         self.filter_cutoff
     }
 
     /// Filter resonance (Q factor).
     #[inline]
+    #[must_use]
     pub fn filter_resonance(&self) -> f32 {
         self.filter_resonance
     }
 
     /// Filter type.
     #[inline]
+    #[must_use]
     pub fn filter_type(&self) -> FilterMode {
         self.filter_type
     }
 
     /// Filter velocity tracking amount.
     #[inline]
+    #[must_use]
     pub fn filter_vel_track(&self) -> f32 {
         self.filter_vel_track
     }
 
     /// Pan position (-1.0 left, 0.0 center, 1.0 right).
     #[inline]
+    #[must_use]
     pub fn pan(&self) -> f32 {
         self.pan
     }
@@ -380,6 +393,7 @@ impl Zone {
 
     /// Loop mode.
     #[inline]
+    #[must_use]
     pub fn loop_mode(&self) -> LoopMode {
         self.loop_mode
     }
