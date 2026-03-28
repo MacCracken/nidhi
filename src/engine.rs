@@ -218,6 +218,18 @@ pub struct SamplerVoice {
     brightness: f32,
     /// Choke group this voice belongs to (0 = none).
     choke_group: u32,
+    /// Per-voice pitch LFO (std only).
+    #[cfg(feature = "std")]
+    pitch_lfo: Option<naad::modulation::Lfo>,
+    /// Pitch LFO depth in cents.
+    pitch_lfo_depth: f32,
+    /// Per-voice filter LFO (std only).
+    #[cfg(feature = "std")]
+    filter_lfo: Option<naad::modulation::Lfo>,
+    /// Filter LFO depth in cents.
+    filter_lfo_depth: f32,
+    /// Filter key tracking amount (0.0–1.0).
+    fil_keytrack: f32,
 }
 
 impl SamplerVoice {
@@ -240,6 +252,13 @@ impl SamplerVoice {
             pressure: 0.0,
             brightness: 0.5,
             choke_group: 0,
+            #[cfg(feature = "std")]
+            pitch_lfo: None,
+            pitch_lfo_depth: 0.0,
+            #[cfg(feature = "std")]
+            filter_lfo: None,
+            filter_lfo_depth: 0.0,
+            fil_keytrack: 0.0,
         }
     }
 
@@ -466,8 +485,14 @@ impl SamplerEngine {
                 zone.sample_offset(),
                 zone.fileg().copied(),
                 zone.fileg_depth(),
+                zone.pitchlfo_rate(),
+                zone.pitchlfo_depth(),
+                zone.fillfo_rate(),
+                zone.fillfo_depth(),
+                zone.fil_keytrack(),
             )
         };
+        #[allow(clippy::type_complexity)]
         let (
             zone_idx,
             speed,
@@ -481,6 +506,11 @@ impl SamplerEngine {
             sample_offset,
             fileg_config,
             fileg_depth,
+            _plfo_rate,
+            plfo_depth,
+            _flfo_rate,
+            flfo_depth,
+            keytrack,
         ) = zone_data;
 
         let voice_filter =
@@ -523,6 +553,34 @@ impl SamplerEngine {
             voice.filter_env = None;
             voice.filter_env_depth = 0.0;
         }
+
+        // Setup pitch LFO
+        #[cfg(feature = "std")]
+        {
+            voice.pitch_lfo = if _plfo_rate > 0.0 && plfo_depth != 0.0 {
+                naad::modulation::Lfo::new(
+                    naad::modulation::LfoShape::Sine,
+                    _plfo_rate,
+                    self.sample_rate,
+                )
+                .ok()
+            } else {
+                None
+            };
+            voice.filter_lfo = if _flfo_rate > 0.0 && flfo_depth != 0.0 {
+                naad::modulation::Lfo::new(
+                    naad::modulation::LfoShape::Sine,
+                    _flfo_rate,
+                    self.sample_rate,
+                )
+                .ok()
+            } else {
+                None
+            };
+        }
+        voice.pitch_lfo_depth = plfo_depth;
+        voice.filter_lfo_depth = flfo_depth;
+        voice.fil_keytrack = keytrack;
 
         // Trigger amplitude envelope
         voice.amp_env = AmpEnvelope::new(&adsr_config, self.sample_rate);
@@ -655,13 +713,21 @@ impl SamplerEngine {
                 sample.frames()
             };
 
-            // Apply pitch bend to playback speed
-            let bend_ratio = if voice.pitch_bend != 0.0 {
-                2.0_f64.powf(voice.pitch_bend as f64 / 12.0)
-            } else {
-                1.0
+            // Apply pitch bend + pitch LFO to playback speed
+            let pitch_mod_cents = {
+                #[allow(unused_mut)]
+                let mut cents = voice.pitch_bend as f64 * 100.0; // semitones to cents
+                #[cfg(feature = "std")]
+                if let Some(ref mut lfo) = voice.pitch_lfo {
+                    cents += lfo.next_value() as f64 * voice.pitch_lfo_depth as f64;
+                }
+                cents
             };
-            let effective_speed = voice.speed * bend_ratio;
+            let effective_speed = if pitch_mod_cents != 0.0 {
+                voice.speed * 2.0_f64.powf(pitch_mod_cents / 1200.0)
+            } else {
+                voice.speed
+            };
 
             // Read stereo interpolated sample
             let (mut sl, mut sr) = sample.read_stereo_interpolated(voice.position);
@@ -685,22 +751,35 @@ impl SamplerEngine {
                 }
             }
 
-            // Modulate filter cutoff via filter envelope + brightness
-            if let Some(ref mut fenv) = voice.filter_env {
-                let env_val = fenv.tick();
-                if voice.base_cutoff > 0.0 {
-                    let mod_cents = voice.filter_env_depth * env_val;
-                    let mod_ratio = 2.0_f32.powf(mod_cents / 1200.0);
-                    let brightness_mod = voice.brightness; // 0.0–1.0 scales cutoff
-                    let modulated = voice.base_cutoff * mod_ratio * (0.5 + brightness_mod * 0.5);
-                    voice.filter.set_cutoff(modulated, self.sample_rate);
+            // Modulate filter cutoff via envelope + LFO + key tracking + brightness
+            if voice.base_cutoff > 0.0 {
+                let mut cutoff = voice.base_cutoff;
+
+                // Key tracking: scale cutoff by distance from C4 (note 60)
+                if voice.fil_keytrack > 0.0 {
+                    let semitones_from_c4 = voice.note as f32 - 60.0;
+                    let keytrack_cents = semitones_from_c4 * 100.0 * voice.fil_keytrack;
+                    cutoff *= 2.0_f32.powf(keytrack_cents / 1200.0);
                 }
-            } else if voice.base_cutoff > 0.0 && (voice.brightness - 0.5).abs() > 0.01 {
-                // Brightness modulates filter even without envelope
-                let brightness_mod = 0.5 + voice.brightness * 0.5;
-                voice
-                    .filter
-                    .set_cutoff(voice.base_cutoff * brightness_mod, self.sample_rate);
+
+                // Filter envelope
+                if let Some(ref mut fenv) = voice.filter_env {
+                    let env_val = fenv.tick();
+                    let mod_cents = voice.filter_env_depth * env_val;
+                    cutoff *= 2.0_f32.powf(mod_cents / 1200.0);
+                }
+
+                // Filter LFO
+                #[cfg(feature = "std")]
+                if let Some(ref mut lfo) = voice.filter_lfo {
+                    let lfo_cents = lfo.next_value() * voice.filter_lfo_depth;
+                    cutoff *= 2.0_f32.powf(lfo_cents / 1200.0);
+                }
+
+                // Brightness
+                cutoff *= 0.5 + voice.brightness * 0.5;
+
+                voice.filter.set_cutoff(cutoff, self.sample_rate);
             }
 
             // Apply filter

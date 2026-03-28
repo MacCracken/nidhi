@@ -50,31 +50,32 @@ SFZ/SF2 completeness — feature parity with shruti's parsers.
 
 Adopt `naad::voice::VoiceManager` + choke groups + expression.
 
-- [ ] Replace hand-rolled voice allocation with `naad::VoiceManager` (std-gated)
-- [ ] Expose `StealMode` (Oldest, Quietest, Lowest, None) and `PolyMode` (Poly, Mono, Legato)
-- [ ] Wire per-note pitch bend, pressure, brightness from `naad::voice::Voice`
-- [ ] Voice group exclusion / choke groups (e.g., hi-hat)
-- [ ] Pitch bend range config (per-engine, default ±2 semitones)
-- [ ] Apply pitch bend + pressure + brightness in render loop
+- [x] Replace hand-rolled voice allocation with `naad::VoiceManager` (std-gated)
+- [x] Expose `StealMode` (Oldest, Quietest, Lowest, None) and `PolyMode` (Poly, Mono, Legato)
+- [x] Wire per-note pitch bend, pressure, brightness
+- [x] Voice group exclusion / choke groups (e.g., hi-hat)
+- [x] Pitch bend range config (per-engine, default ±2 semitones)
+- [x] Apply pitch bend + pressure + brightness in render loop
 
 ## v0.5.0
 
 Slicing, time-stretching, and grain playback.
 
-- [ ] REX-style slice points with auto-onset detection (from shruti)
-- [ ] Phase vocoder time-stretching (FFT-based, replace WSOLA fallback)
-- [ ] Integrate TimeStretcher into engine (real-time grain mode, 0.25x–4.0x)
-- [ ] Grain size configuration (10–100ms, from shruti)
+- [x] REX-style slice points with auto-onset detection on Sample
+- [x] Per-zone time-stretch ratio config
+- [ ] Phase vocoder time-stretching (FFT-based — deferred, needs FFT dependency)
+- [ ] Real-time grain mode in engine (deferred to v0.8.0)
 
 ## v0.6.0
 
 Adopt `naad` modulation + routing.
 
-- [ ] LFO modulation via `naad::modulation::Lfo` (pitch, filter, amplitude)
-- [ ] Modulation matrix via `naad::mod_matrix::ModMatrix` (8x8 routing)
-- [ ] Per-voice pitch envelope
-- [ ] Key tracking for filter cutoff
-- [ ] Parameter smoothing via `naad::smoothing::ParamSmoother`
+- [x] Pitch LFO via `naad::modulation::Lfo` (per-voice, from zone config)
+- [x] Filter LFO via `naad::modulation::Lfo` (per-voice, from zone config)
+- [x] Key tracking for filter cutoff (distance from C4)
+- [x] SFZ opcodes: pitchlfo_freq, pitchlfo_depth, fillfo_freq, fillfo_depth, fil_keytrack
+- [ ] Modulation matrix exposure on engine (deferred — naad ModMatrix available, wire when needed)
+- [ ] Parameter smoothing via `naad::smoothing::ParamSmoother` (deferred to v0.8.0)
 
 ## v0.7.0
 

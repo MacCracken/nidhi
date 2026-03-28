@@ -135,6 +135,24 @@ pub struct Zone {
     /// Filter envelope depth in cents (±4800 = ±4 octaves).
     #[serde(default)]
     pub(crate) fileg_depth: f32,
+    /// Pitch LFO rate in Hz (0.0 = disabled).
+    #[serde(default)]
+    pub(crate) pitchlfo_rate: f32,
+    /// Pitch LFO depth in cents.
+    #[serde(default)]
+    pub(crate) pitchlfo_depth: f32,
+    /// Filter LFO rate in Hz (0.0 = disabled).
+    #[serde(default)]
+    pub(crate) fillfo_rate: f32,
+    /// Filter LFO depth in cents.
+    #[serde(default)]
+    pub(crate) fillfo_depth: f32,
+    /// Filter key tracking (0.0 = none, 1.0 = full tracking from C4).
+    #[serde(default)]
+    pub(crate) fil_keytrack: f32,
+    /// Time-stretch ratio (1.0 = normal, >1.0 = slower, <1.0 = faster, 0.0 = disabled).
+    #[serde(default)]
+    pub(crate) time_stretch: f32,
 }
 
 impl Zone {
@@ -166,6 +184,12 @@ impl Zone {
             adsr: None,
             fileg: None,
             fileg_depth: 0.0,
+            pitchlfo_rate: 0.0,
+            pitchlfo_depth: 0.0,
+            fillfo_rate: 0.0,
+            fillfo_depth: 0.0,
+            fil_keytrack: 0.0,
+            time_stretch: 0.0,
         }
     }
 
@@ -337,6 +361,74 @@ impl Zone {
     #[must_use]
     pub fn fileg_depth(&self) -> f32 {
         self.fileg_depth
+    }
+
+    /// Set pitch LFO rate and depth.
+    pub fn with_pitch_lfo(mut self, rate_hz: f32, depth_cents: f32) -> Self {
+        self.pitchlfo_rate = rate_hz.max(0.0);
+        self.pitchlfo_depth = depth_cents;
+        self
+    }
+
+    /// Set filter LFO rate and depth.
+    pub fn with_filter_lfo(mut self, rate_hz: f32, depth_cents: f32) -> Self {
+        self.fillfo_rate = rate_hz.max(0.0);
+        self.fillfo_depth = depth_cents;
+        self
+    }
+
+    /// Set filter key tracking (0.0 = none, 1.0 = full).
+    pub fn with_key_tracking(mut self, amount: f32) -> Self {
+        self.fil_keytrack = amount.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Pitch LFO rate in Hz.
+    #[inline]
+    #[must_use]
+    pub fn pitchlfo_rate(&self) -> f32 {
+        self.pitchlfo_rate
+    }
+
+    /// Pitch LFO depth in cents.
+    #[inline]
+    #[must_use]
+    pub fn pitchlfo_depth(&self) -> f32 {
+        self.pitchlfo_depth
+    }
+
+    /// Filter LFO rate in Hz.
+    #[inline]
+    #[must_use]
+    pub fn fillfo_rate(&self) -> f32 {
+        self.fillfo_rate
+    }
+
+    /// Filter LFO depth in cents.
+    #[inline]
+    #[must_use]
+    pub fn fillfo_depth(&self) -> f32 {
+        self.fillfo_depth
+    }
+
+    /// Filter key tracking amount.
+    #[inline]
+    #[must_use]
+    pub fn fil_keytrack(&self) -> f32 {
+        self.fil_keytrack
+    }
+
+    /// Set time-stretch ratio (1.0 = normal, >1.0 = slower, <1.0 = faster).
+    pub fn with_time_stretch(mut self, ratio: f32) -> Self {
+        self.time_stretch = ratio.clamp(0.0, 4.0);
+        self
+    }
+
+    /// Time-stretch ratio (0.0 = disabled).
+    #[inline]
+    #[must_use]
+    pub fn time_stretch(&self) -> f32 {
+        self.time_stretch
     }
 
     /// Round-robin group (0 = none).

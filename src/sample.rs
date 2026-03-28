@@ -23,6 +23,8 @@ pub struct Sample {
     pub(crate) frames: usize,
     /// Optional name/label.
     pub(crate) name: String,
+    /// REX-style slice points (frame indices).
+    pub(crate) slices: Vec<usize>,
 }
 
 impl Sample {
@@ -35,6 +37,7 @@ impl Sample {
             sample_rate,
             frames,
             name: String::new(),
+            slices: Vec::new(),
         }
     }
 
@@ -47,6 +50,7 @@ impl Sample {
             sample_rate,
             frames,
             name: String::new(),
+            slices: Vec::new(),
         }
     }
 
@@ -54,6 +58,75 @@ impl Sample {
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
+    }
+
+    /// Set slice points manually.
+    pub fn with_slices(mut self, slices: Vec<usize>) -> Self {
+        self.slices = slices;
+        self
+    }
+
+    /// Get slice points.
+    #[inline]
+    #[must_use]
+    pub fn slices(&self) -> &[usize] {
+        &self.slices
+    }
+
+    /// Auto-detect slice points via onset detection (energy-based transient detection).
+    ///
+    /// `threshold` controls sensitivity (0.0–1.0, lower = more slices).
+    /// `min_slice_frames` is the minimum distance between slices.
+    pub fn detect_onsets(&mut self, threshold: f32, min_slice_frames: usize) {
+        self.slices.clear();
+        if self.frames < 2 {
+            return;
+        }
+
+        let window = 512.min(self.frames / 2).max(1);
+        let hop = window / 2;
+        let threshold = threshold.clamp(0.01, 1.0);
+
+        // Compute energy per window
+        let mut energies = Vec::new();
+        let mut pos = 0;
+        while pos + window <= self.frames {
+            let mut energy = 0.0f32;
+            for i in pos..pos + window {
+                let s = if self.channels == 1 {
+                    self.data[i]
+                } else {
+                    (self.data[i * 2] + self.data[i * 2 + 1]) * 0.5
+                };
+                energy += s * s;
+            }
+            energies.push((pos, energy / window as f32));
+            pos += hop;
+        }
+
+        if energies.len() < 2 {
+            return;
+        }
+
+        // Find peak energy for normalization
+        let max_energy = energies.iter().map(|(_, e)| *e).fold(0.0f32, f32::max);
+
+        if max_energy < 1e-10 {
+            return;
+        }
+
+        // Detect onsets: significant energy increase between consecutive windows
+        let mut last_slice = 0usize;
+        for i in 1..energies.len() {
+            let (frame, energy) = energies[i];
+            let prev_energy = energies[i - 1].1;
+            let diff = (energy - prev_energy) / max_energy;
+
+            if diff > threshold && frame.saturating_sub(last_slice) >= min_slice_frames {
+                self.slices.push(frame);
+                last_slice = frame;
+            }
+        }
     }
 
     /// Sample data.

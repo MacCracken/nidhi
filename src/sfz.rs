@@ -145,6 +145,16 @@ pub struct SfzRegion {
     pub fil_type: Option<String>,
     /// `key` shorthand (sets lokey=hikey=pitch_keycenter).
     pub key: Option<u8>,
+    /// Pitch LFO rate in Hz.
+    pub pitchlfo_freq: f32,
+    /// Pitch LFO depth in cents.
+    pub pitchlfo_depth: f32,
+    /// Filter LFO rate in Hz.
+    pub fillfo_freq: f32,
+    /// Filter LFO depth in cents.
+    pub fillfo_depth: f32,
+    /// Filter key tracking in cents (0–1200).
+    pub fil_keytrack: f32,
 }
 
 impl Default for SfzRegion {
@@ -180,6 +190,11 @@ impl Default for SfzRegion {
             resonance: 0.0,
             fil_type: None,
             key: None,
+            pitchlfo_freq: 0.0,
+            pitchlfo_depth: 0.0,
+            fillfo_freq: 0.0,
+            fillfo_depth: 0.0,
+            fil_keytrack: 0.0,
         }
     }
 }
@@ -338,6 +353,31 @@ impl SfzRegion {
             "fil_type" | "filtype" => {
                 self.fil_type = Some(String::from(value));
             }
+            "pitchlfo_freq" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.pitchlfo_freq = v.max(0.0);
+                }
+            }
+            "pitchlfo_depth" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.pitchlfo_depth = v;
+                }
+            }
+            "fillfo_freq" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.fillfo_freq = v.max(0.0);
+                }
+            }
+            "fillfo_depth" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.fillfo_depth = v;
+                }
+            }
+            "fil_keytrack" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    self.fil_keytrack = v.clamp(0.0, 1200.0);
+                }
+            }
             // Unknown opcodes are silently ignored per SFZ spec convention.
             _ => {}
         }
@@ -439,6 +479,21 @@ impl SfzRegion {
         }
         if self.key.is_none() {
             self.key = parent.key;
+        }
+        if self.pitchlfo_freq == 0.0 && parent.pitchlfo_freq != 0.0 {
+            self.pitchlfo_freq = parent.pitchlfo_freq;
+        }
+        if self.pitchlfo_depth == 0.0 && parent.pitchlfo_depth != 0.0 {
+            self.pitchlfo_depth = parent.pitchlfo_depth;
+        }
+        if self.fillfo_freq == 0.0 && parent.fillfo_freq != 0.0 {
+            self.fillfo_freq = parent.fillfo_freq;
+        }
+        if self.fillfo_depth == 0.0 && parent.fillfo_depth != 0.0 {
+            self.fillfo_depth = parent.fillfo_depth;
+        }
+        if self.fil_keytrack == 0.0 && parent.fil_keytrack != 0.0 {
+            self.fil_keytrack = parent.fil_keytrack;
         }
     }
 }
@@ -622,6 +677,27 @@ impl SfzFile {
                     sample_rate,
                 );
                 zone.with_filter_envelope(fileg, merged.fileg_depth)
+            } else {
+                zone
+            };
+
+            // Wire pitch LFO
+            let zone = if merged.pitchlfo_freq > 0.0 && merged.pitchlfo_depth != 0.0 {
+                zone.with_pitch_lfo(merged.pitchlfo_freq, merged.pitchlfo_depth)
+            } else {
+                zone
+            };
+
+            // Wire filter LFO
+            let zone = if merged.fillfo_freq > 0.0 && merged.fillfo_depth != 0.0 {
+                zone.with_filter_lfo(merged.fillfo_freq, merged.fillfo_depth)
+            } else {
+                zone
+            };
+
+            // Wire key tracking
+            let zone = if merged.fil_keytrack > 0.0 {
+                zone.with_key_tracking(merged.fil_keytrack / 1200.0)
             } else {
                 zone
             };
