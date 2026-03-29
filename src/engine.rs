@@ -1,7 +1,63 @@
 //! Sampler engine — polyphonic sample playback with voice management.
 
+use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
+
+/// SIMD-accelerated buffer accumulation: `dst[i] += src[i]`.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline]
+fn accumulate_buffers(dst: &mut [f32], src: &[f32]) {
+    use core::arch::x86_64::*;
+    let len = dst.len().min(src.len());
+    let chunks = len / 4;
+    let remainder = chunks * 4;
+
+    // SAFETY: SSE2 is baseline on x86_64. Pointers are valid for len elements.
+    unsafe {
+        for i in 0..chunks {
+            let offset = i * 4;
+            let a = _mm_loadu_ps(dst.as_ptr().add(offset));
+            let b = _mm_loadu_ps(src.as_ptr().add(offset));
+            _mm_storeu_ps(dst.as_mut_ptr().add(offset), _mm_add_ps(a, b));
+        }
+    }
+    for i in remainder..len {
+        dst[i] += src[i];
+    }
+}
+
+/// SIMD-accelerated buffer accumulation: `dst[i] += src[i]`.
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[inline]
+fn accumulate_buffers(dst: &mut [f32], src: &[f32]) {
+    use core::arch::aarch64::*;
+    let len = dst.len().min(src.len());
+    let chunks = len / 4;
+    let remainder = chunks * 4;
+
+    // SAFETY: NEON is baseline on aarch64. Pointers are valid for len elements.
+    unsafe {
+        for i in 0..chunks {
+            let offset = i * 4;
+            let a = vld1q_f32(dst.as_ptr().add(offset));
+            let b = vld1q_f32(src.as_ptr().add(offset));
+            vst1q_f32(dst.as_mut_ptr().add(offset), vaddq_f32(a, b));
+        }
+    }
+    for i in remainder..len {
+        dst[i] += src[i];
+    }
+}
+
+/// Scalar fallback for buffer accumulation.
+#[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[inline]
+fn accumulate_buffers(dst: &mut [f32], src: &[f32]) {
+    for (d, &s) in dst.iter_mut().zip(src.iter()) {
+        *d += s;
+    }
+}
 
 use crate::envelope::{AdsrConfig, AmpEnvelope};
 use crate::instrument::Instrument;
@@ -309,6 +365,8 @@ pub struct SamplerEngine {
     default_adsr: AdsrConfig,
     /// Pitch bend range in semitones (default ±2).
     pitch_bend_range: f32,
+    /// Pre-allocated scratch buffer for block-based rendering (interleaved stereo).
+    scratch_buf: Vec<f32>,
 
     #[cfg(feature = "std")]
     voice_mgr: naad::voice::VoiceManager,
@@ -334,6 +392,7 @@ impl SamplerEngine {
                 release_samples: (sample_rate * 0.01).max(1.0) as u32,
             },
             pitch_bend_range: 2.0,
+            scratch_buf: vec![0.0f32; 2048], // 1024 stereo frames
             #[cfg(feature = "std")]
             voice_mgr: naad::voice::VoiceManager::new(
                 max_voices,
@@ -865,15 +924,172 @@ impl SamplerEngine {
         }
     }
 
-    /// Fill interleaved stereo buffer.
+    /// Fill interleaved stereo buffer using block-based voice rendering.
+    ///
+    /// Each active voice is rendered for the entire block into a pre-allocated
+    /// scratch buffer, then accumulated into the output. This gives better cache
+    /// locality than the per-sample `next_sample_stereo` approach.
     #[inline]
     pub fn fill_buffer_stereo(&mut self, buffer: &mut [f32]) {
-        let mut i = 0;
-        while i + 1 < buffer.len() {
-            let (l, r) = self.next_sample_stereo();
-            buffer[i] = l;
-            buffer[i + 1] = r;
-            i += 2;
+        let frames = buffer.len() / 2;
+        if frames == 0 {
+            return;
+        }
+
+        let instrument = match &self.instrument {
+            Some(i) => i,
+            None => {
+                buffer.fill(0.0);
+                return;
+            }
+        };
+        let zones = instrument.zones();
+
+        // Ensure scratch buffer is large enough
+        let needed = frames * 2;
+        if self.scratch_buf.len() < needed {
+            self.scratch_buf.resize(needed, 0.0);
+        }
+
+        // Zero output
+        buffer[..needed].fill(0.0);
+
+        for vi in 0..self.voices.len() {
+            if !self.voices[vi].active {
+                continue;
+            }
+
+            // Zero scratch buffer for this voice
+            self.scratch_buf[..needed].fill(0.0);
+
+            let zone = &zones[self.voices[vi].zone_index];
+            let sample = match self.bank.get(zone.sample_id()) {
+                Some(s) => s,
+                None => {
+                    self.voices[vi].active = false;
+                    continue;
+                }
+            };
+
+            let effective_frames = if zone.sample_end() > 0 {
+                zone.sample_end().min(sample.frames())
+            } else {
+                sample.frames()
+            };
+
+            let pan = zone.pan();
+            let pan_l = (1.0 - pan) * 0.5;
+            let pan_r = (1.0 + pan) * 0.5;
+            let xfade = zone.crossfade_length();
+
+            // Render this voice for the entire block
+            for f in 0..frames {
+                let voice = &mut self.voices[vi];
+                if !voice.active {
+                    break;
+                }
+                voice.age += 1;
+
+                // Pitch modulation
+                let pitch_mod_cents = {
+                    #[allow(unused_mut)]
+                    let mut cents = voice.pitch_bend as f64 * 100.0;
+                    #[cfg(feature = "std")]
+                    if let Some(ref mut lfo) = voice.pitch_lfo {
+                        cents += lfo.next_value() as f64 * voice.pitch_lfo_depth as f64;
+                    }
+                    cents
+                };
+                let effective_speed = if pitch_mod_cents != 0.0 {
+                    voice.speed * 2.0_f64.powf(pitch_mod_cents / 1200.0)
+                } else {
+                    voice.speed
+                };
+
+                // Read stereo interpolated sample
+                let (mut sl, mut sr) = sample.read_stereo_interpolated(voice.position);
+
+                // Crossfade at loop boundary
+                if xfade > 0
+                    && matches!(zone.loop_mode(), LoopMode::Forward | LoopMode::LoopSustain)
+                {
+                    let loop_end_f = if zone.loop_end > 0 {
+                        zone.loop_end as f64
+                    } else {
+                        effective_frames as f64
+                    };
+                    let xfade_f = xfade as f64;
+                    let dist_to_end = loop_end_f - voice.position;
+                    if dist_to_end >= 0.0 && dist_to_end < xfade_f {
+                        let t = (dist_to_end / xfade_f) as f32;
+                        let xfade_pos = zone.loop_start as f64 + (xfade_f - dist_to_end);
+                        let (xl, xr) = sample.read_stereo_interpolated(xfade_pos);
+                        sl = sl * t + xl * (1.0 - t);
+                        sr = sr * t + xr * (1.0 - t);
+                    }
+                }
+
+                // Filter cutoff modulation
+                if voice.base_cutoff > 0.0 {
+                    let mut cutoff = voice.base_cutoff;
+                    if voice.fil_keytrack > 0.0 {
+                        let semitones_from_c4 = voice.note as f32 - 60.0;
+                        let keytrack_cents = semitones_from_c4 * 100.0 * voice.fil_keytrack;
+                        cutoff *= 2.0_f32.powf(keytrack_cents / 1200.0);
+                    }
+                    if let Some(ref mut fenv) = voice.filter_env {
+                        let env_val = fenv.tick();
+                        let mod_cents = voice.filter_env_depth * env_val;
+                        cutoff *= 2.0_f32.powf(mod_cents / 1200.0);
+                    }
+                    #[cfg(feature = "std")]
+                    if let Some(ref mut lfo) = voice.filter_lfo {
+                        let lfo_cents = lfo.next_value() * voice.filter_lfo_depth;
+                        cutoff *= 2.0_f32.powf(lfo_cents / 1200.0);
+                    }
+                    cutoff *= 0.5 + voice.brightness * 0.5;
+                    #[cfg(feature = "std")]
+                    {
+                        voice.cutoff_smoother.set_target(cutoff);
+                        cutoff = voice.cutoff_smoother.next_value();
+                    }
+                    voice.filter.set_cutoff(cutoff, self.sample_rate);
+                }
+
+                let (fl, fr) = voice.filter.process_stereo(sl, sr);
+                sl = fl;
+                sr = fr;
+
+                let env = voice.amp_env.tick();
+                if !voice.amp_env.is_active() {
+                    voice.active = false;
+                    break;
+                }
+
+                let pressure_mod = 1.0 + (voice.pressure - 0.5) * 0.4;
+                let amp = voice.amplitude * env * pressure_mod;
+
+                self.scratch_buf[f * 2] = sl * amp * pan_l;
+                self.scratch_buf[f * 2 + 1] = sr * amp * pan_r;
+
+                // Advance position
+                let saved_speed = voice.speed;
+                voice.speed = effective_speed;
+                if !Self::advance_position(
+                    voice,
+                    zone.loop_mode(),
+                    zone.loop_start,
+                    zone.loop_end,
+                    effective_frames,
+                    voice.amp_env.is_releasing(),
+                ) {
+                    voice.active = false;
+                }
+                voice.speed = saved_speed;
+            }
+
+            // Accumulate voice into output buffer
+            accumulate_buffers(&mut buffer[..needed], &self.scratch_buf[..needed]);
         }
     }
 

@@ -33,7 +33,8 @@ default = ["std"]
 std = ["dep:naad", "serde/std", "thiserror/std", "tracing/std"]
 io = ["std", "dep:shravan"]
 logging = ["dep:tracing-subscriber"]
-full = ["std", "io", "logging"]
+simd = ["std"]
+full = ["std", "io", "logging", "simd"]
 
 [dependencies.shravan]
 version = "1.0.1"

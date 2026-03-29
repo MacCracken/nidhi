@@ -245,6 +245,9 @@ impl Sample {
     /// Read a stereo frame with cubic Hermite interpolation.
     ///
     /// Returns `(left, right)`. For mono samples, both channels are identical.
+    ///
+    /// When the `simd` feature is enabled on x86_64, both channels are computed
+    /// in a single SIMD pass using SSE.
     #[inline]
     #[must_use]
     pub fn read_stereo_interpolated(&self, position: f64) -> (f32, f32) {
@@ -259,9 +262,78 @@ impl Sample {
         let (l2, r2) = self.read_stereo_frame(idx + 1);
         let (l3, r3) = self.read_stereo_frame(idx + 2);
 
-        let left = Self::cubic_hermite(l0, l1, l2, l3, frac);
-        let right = Self::cubic_hermite(r0, r1, r2, r3, frac);
-        (left, right)
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            Self::cubic_hermite_stereo_sse(l0, r0, l1, r1, l2, r2, l3, r3, frac)
+        }
+        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+        {
+            let left = Self::cubic_hermite(l0, l1, l2, l3, frac);
+            let right = Self::cubic_hermite(r0, r1, r2, r3, frac);
+            (left, right)
+        }
+    }
+
+    /// SSE-accelerated stereo cubic Hermite interpolation.
+    ///
+    /// Computes both L and R channels simultaneously using packed f32x4:
+    /// lanes 0,1 = L,R for each coefficient, evaluated via Horner's method.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[inline]
+    #[allow(unsafe_code, clippy::too_many_arguments)]
+    fn cubic_hermite_stereo_sse(
+        l0: f32,
+        r0: f32,
+        l1: f32,
+        r1: f32,
+        l2: f32,
+        r2: f32,
+        l3: f32,
+        r3: f32,
+        t: f32,
+    ) -> (f32, f32) {
+        use core::arch::x86_64::*;
+        // SAFETY: SSE2 is baseline on x86_64.
+        unsafe {
+            // Pack L,R pairs: y0 = [l0, r0, 0, 0], etc.
+            let y0 = _mm_set_ps(0.0, 0.0, r0, l0);
+            let y1 = _mm_set_ps(0.0, 0.0, r1, l1);
+            let y2 = _mm_set_ps(0.0, 0.0, r2, l2);
+            let y3 = _mm_set_ps(0.0, 0.0, r3, l3);
+            let tv = _mm_set1_ps(t);
+
+            // a = -0.5*y0 + 1.5*y1 - 1.5*y2 + 0.5*y3
+            let half = _mm_set1_ps(0.5);
+            let one_half = _mm_set1_ps(1.5);
+            let a = _mm_add_ps(
+                _mm_add_ps(_mm_mul_ps(_mm_set1_ps(-0.5), y0), _mm_mul_ps(one_half, y1)),
+                _mm_add_ps(_mm_mul_ps(_mm_set1_ps(-1.5), y2), _mm_mul_ps(half, y3)),
+            );
+            // b = y0 - 2.5*y1 + 2.0*y2 - 0.5*y3
+            let b = _mm_add_ps(
+                _mm_add_ps(y0, _mm_mul_ps(_mm_set1_ps(-2.5), y1)),
+                _mm_add_ps(
+                    _mm_mul_ps(_mm_set1_ps(2.0), y2),
+                    _mm_mul_ps(_mm_set1_ps(-0.5), y3),
+                ),
+            );
+            // c = -0.5*y0 + 0.5*y2
+            let c = _mm_add_ps(_mm_mul_ps(_mm_set1_ps(-0.5), y0), _mm_mul_ps(half, y2));
+            // d = y1
+            // Horner: ((a*t + b)*t + c)*t + d
+            let result = _mm_add_ps(
+                _mm_mul_ps(
+                    _mm_add_ps(_mm_mul_ps(_mm_add_ps(_mm_mul_ps(a, tv), b), tv), c),
+                    tv,
+                ),
+                y1,
+            );
+
+            // Extract L and R from lanes 0 and 1
+            let mut out = [0.0f32; 4];
+            _mm_storeu_ps(out.as_mut_ptr(), result);
+            (out[0], out[1])
+        }
     }
 }
 
