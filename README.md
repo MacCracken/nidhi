@@ -76,8 +76,9 @@ let (presets, instruments, bank) = sf2::parse(&bytes).unwrap();
 |-----------|---------|-------------|
 | `std`     | Yes     | Standard library + naad integration. Disable for `no_std` + `alloc` |
 | `io`      | No      | WAV file loading and streaming via shravan (implies `std`) |
+| `simd`    | No      | SIMD-accelerated stereo mixing and interpolation (implies `std`) |
 | `logging` | No      | `tracing-subscriber` for debug logging |
-| `full`    | No      | Enables `std` + `io` + `logging` |
+| `full`    | No      | Enables `std` + `io` + `simd` + `logging` |
 
 ## Architecture
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.1.0 — 2026-03-28
+
+Performance + real-time safety release. Zero-allocation render path, block-based voice rendering, filter caching, denormal protection, and SIMD infrastructure.
+
+### Performance
+- **Block-based voice rendering** — `fill_buffer_stereo` now renders each voice for the entire block into a pre-allocated scratch buffer, then accumulates into output. ~2.9x speedup for single-voice workloads, ~1.2x for 16 voices
+- **Filter coefficient caching** — epsilon check on cutoff skips expensive `set_params()` when cutoff hasn't changed meaningfully (< 0.5 Hz). 3.4x speedup on filtered voices
+- **Parameter smoothing** — per-voice `naad::smoothing::ParamSmoother` on filter cutoff modulation for click-free filter changes (std only)
+- **SIMD stereo mixing** — SSE2 (x86_64) and NEON (aarch64) buffer accumulation behind `simd` feature gate, with scalar fallback
+- **SIMD cubic Hermite interpolation** — SSE-accelerated stereo interpolation computes both L/R channels in a single SIMD pass (behind `simd` feature gate)
+- **Pre-allocated scratch buffer** — engine allocates a reusable stereo scratch buffer at construction, eliminating render-path heap allocation
+
+### Real-time Safety
+- **Denormal flushing** — `flush_denormal()` applied to no_std filter feedback paths and envelope release ramp to prevent 10–100x slowdowns on x86
+- **Removed per-sample Vec allocation** in `fill_buses_stereo` — eliminated `Vec::new()` that was called every sample frame
+
+### Bug Fixes
+- **Fixed infinite loop** in `detect_onsets()` when sample has ≤ 3 frames (hop became 0)
+- **Fixed integer overflow** in SF2 chunk iterator — crafted SF2 with large chunk size could cause wraparound and infinite loop
+- **Fixed `stretch()`/`stretch_ola()`** — ratio ≤ 0, NaN, or infinity now returns empty instead of producing inf/NaN
+
+### Quality
+- **Benchmark suite** — 7 Criterion benchmarks: voice count scaling, block vs per-sample buffer fill, cubic/stereo interpolation, filtered rendering, WSOLA throughput
+- Added `#[must_use]` on 10 accessors/constructors across 5 modules
+- Added `#[inline]` on 9 hot-path render functions and accessors
+- **117 unit tests + 4 doc-tests** (up from 114)
+- New `simd` feature flag for SIMD-accelerated mixing and interpolation
+
 ## 1.0.1 — 2026-03-28
 
 ### Changed

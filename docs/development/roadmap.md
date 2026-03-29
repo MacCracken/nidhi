@@ -3,20 +3,20 @@
 nidhi is the standalone sampler crate in the AGNOS ecosystem, replacing
 `shruti-instruments::sampler`. Published to crates.io at 1.0.0.
 
-## v1.1.0 — Performance + real-time safety
+## v1.1.0 — Performance + real-time safety ✓
 
-Zero-allocation render path, SIMD, and caching optimizations.
+Zero-allocation render path, SIMD, and caching optimizations. Released 2026-03-28.
 
-- [ ] Benchmark suite: voice count scaling, buffer fill throughput, interpolation cost (prerequisite — measure first)
-- [ ] Pre-allocated voice buffers (zero allocation in render path)
-- [ ] Fix per-sample Vec allocation in `fill_buses_stereo` (engine.rs:888)
-- [ ] Per-voice buffer accumulation (batch render into temp buffer, then SIMD mix-down)
-- [ ] Filter coefficient caching (epsilon check on cutoff/resonance, skip recompute when unchanged)
-- [ ] Envelope stage duration caching
-- [ ] Denormal flushing via `naad::flush_denormal()` in no_std filter feedback + envelope release
-- [ ] Parameter smoothing via `naad::smoothing::ParamSmoother` (exponential EMA on filter cutoff modulation)
-- [ ] SIMD-accelerated stereo mixing (`core::arch` intrinsics with scalar fallback, behind feature gate)
-- [ ] SIMD-accelerated cubic Hermite interpolation (pack L/R into f32x4, vectorized Horner eval)
+- [x] Benchmark suite: voice count scaling, buffer fill throughput, interpolation cost
+- [x] Pre-allocated voice buffers (zero allocation in render path)
+- [x] Fix per-sample Vec allocation in `fill_buses_stereo`
+- [x] Per-voice buffer accumulation (batch render into temp buffer, then SIMD mix-down)
+- [x] Filter coefficient caching (epsilon check on cutoff, skip recompute when unchanged)
+- [x] Envelope stage duration caching (no-op — already cheap, naad handles internally)
+- [x] Denormal flushing via `flush_denormal()` in no_std filter feedback + envelope release
+- [x] Parameter smoothing via `naad::smoothing::ParamSmoother` (filter cutoff modulation)
+- [x] SIMD-accelerated stereo mixing (`core::arch` SSE2/NEON, behind `simd` feature)
+- [x] SIMD-accelerated cubic Hermite interpolation (L/R in f32x4, behind `simd` feature)
 
 ## v1.2.0 — Advanced modulation + expression
 
