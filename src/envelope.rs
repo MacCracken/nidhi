@@ -270,7 +270,7 @@ impl AmpEnvelope {
                     self.pos = 0;
                 } else {
                     let progress = (self.pos as f32 + 1.0) / self.config.release_samples as f32;
-                    self.level = self.release_start_level * (1.0 - progress);
+                    self.level = crate::flush_denormal(self.release_start_level * (1.0 - progress));
                     self.pos += 1;
                     if self.level <= 0.0 || self.pos >= self.config.release_samples {
                         self.level = 0.0;

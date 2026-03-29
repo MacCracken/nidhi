@@ -51,6 +51,7 @@ pub enum StealMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VoiceFilter {
     active: bool,
+    last_cutoff: f32,
 
     #[cfg(feature = "std")]
     filter_l: Option<naad::filter::StateVariableFilter>,
@@ -71,6 +72,7 @@ impl VoiceFilter {
     fn bypass() -> Self {
         Self {
             active: false,
+            last_cutoff: 0.0,
             #[cfg(feature = "std")]
             filter_l: None,
             #[cfg(feature = "std")]
@@ -109,6 +111,7 @@ impl VoiceFilter {
             let fr = naad::filter::StateVariableFilter::new(effective_cutoff, q, sample_rate).ok();
             Self {
                 active: fl.is_some(),
+                last_cutoff: effective_cutoff,
                 filter_l: fl,
                 filter_r: fr,
                 mode,
@@ -121,6 +124,7 @@ impl VoiceFilter {
             let coeff = 1.0 - (-core::f32::consts::TAU * effective_cutoff / sample_rate).exp();
             Self {
                 active: true,
+                last_cutoff: effective_cutoff,
                 state_l: 0.0,
                 state_r: 0.0,
                 coeff: coeff.clamp(0.0, 1.0),
@@ -134,6 +138,12 @@ impl VoiceFilter {
             return;
         }
         let cutoff = cutoff.clamp(20.0, sample_rate * 0.49);
+
+        // Skip recomputation when cutoff hasn't changed meaningfully (< 0.5 Hz).
+        if (cutoff - self.last_cutoff).abs() < 0.5 {
+            return;
+        }
+        self.last_cutoff = cutoff;
 
         #[cfg(feature = "std")]
         {
@@ -185,6 +195,8 @@ impl VoiceFilter {
         {
             self.state_l += self.coeff * (left - self.state_l);
             self.state_r += self.coeff * (right - self.state_r);
+            self.state_l = crate::flush_denormal(self.state_l);
+            self.state_r = crate::flush_denormal(self.state_r);
             (self.state_l, self.state_r)
         }
     }
@@ -230,6 +242,9 @@ pub struct SamplerVoice {
     filter_lfo_depth: f32,
     /// Filter key tracking amount (0.0–1.0).
     fil_keytrack: f32,
+    /// Per-voice cutoff smoother for click-free filter modulation (std only).
+    #[cfg(feature = "std")]
+    cutoff_smoother: naad::smoothing::ParamSmoother,
 }
 
 impl SamplerVoice {
@@ -259,6 +274,8 @@ impl SamplerVoice {
             filter_lfo: None,
             filter_lfo_depth: 0.0,
             fil_keytrack: 0.0,
+            #[cfg(feature = "std")]
+            cutoff_smoother: naad::smoothing::ParamSmoother::new(0.005, sample_rate, 0.0),
         }
     }
 
@@ -780,6 +797,13 @@ impl SamplerEngine {
                 // Brightness
                 cutoff *= 0.5 + voice.brightness * 0.5;
 
+                // Smooth cutoff to prevent clicks from discontinuous modulation
+                #[cfg(feature = "std")]
+                {
+                    voice.cutoff_smoother.set_target(cutoff);
+                    cutoff = voice.cutoff_smoother.next_value();
+                }
+
                 voice.filter.set_cutoff(cutoff, self.sample_rate);
             }
 
@@ -859,6 +883,9 @@ impl SamplerEngine {
     /// Voices are routed to their zone's `output_bus` index.
     /// Bus 0 is the main output; higher indices are aux sends.
     /// Voices targeting a bus index beyond `buses.len()` go to bus 0.
+    ///
+    /// Note: per-voice bus routing is planned for a future release.
+    /// Currently all output goes to bus 0.
     #[inline]
     pub fn fill_buses_stereo(&mut self, buses: &mut [&mut [f32]]) {
         if buses.is_empty() {
@@ -866,31 +893,13 @@ impl SamplerEngine {
         }
         let frames = buses[0].len() / 2;
         for frame in 0..frames {
-            let (out_l, out_r, bus_assignments) = self.next_sample_stereo_with_buses();
-            for (bus_idx, &(l, r)) in bus_assignments.iter().enumerate() {
-                let target = if bus_idx < buses.len() { bus_idx } else { 0 };
-                let buf = &mut buses[target];
-                let i = frame * 2;
-                if i + 1 < buf.len() {
-                    buf[i] += l;
-                    buf[i + 1] += r;
-                }
-            }
-            // Main bus always gets the combined output
+            let (out_l, out_r) = self.next_sample_stereo();
             let i = frame * 2;
             if i + 1 < buses[0].len() {
                 buses[0][i] += out_l;
                 buses[0][i + 1] += out_r;
             }
         }
-    }
-
-    /// Internal: render one stereo sample and return per-bus contributions.
-    #[inline]
-    fn next_sample_stereo_with_buses(&mut self) -> (f32, f32, Vec<(f32, f32)>) {
-        // For now, delegate to the standard render and track bus 0
-        let (l, r) = self.next_sample_stereo();
-        (l, r, Vec::new())
     }
 
     /// Number of currently active voices.

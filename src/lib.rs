@@ -49,6 +49,16 @@
 
 extern crate alloc;
 
+/// Flush denormal (subnormal) floats to zero.
+///
+/// Denormals cause 10–100x slowdowns on x86 processors in feedback loops.
+#[inline]
+#[must_use]
+#[cfg_attr(feature = "std", allow(dead_code))]
+pub(crate) fn flush_denormal(x: f32) -> f32 {
+    if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x }
+}
+
 pub mod capture;
 pub mod effect_chain;
 pub mod engine;
