@@ -40,6 +40,6 @@ Real-time granular playback and FFT-based stretching.
 
 ## Backlog
 
-- [ ] Incorporate shravan 1.1.0 (not yet published)
+- [x] ~~Incorporate shravan~~ — done in 1.0.1 (replaced hound with shravan 1.0.1)
 - [ ] dhvani integration tested end-to-end (shruti consuming nidhi via dhvani)
-- [ ] FLAC/OGG loading helpers in `io` module
+- [ ] FLAC/AIFF/OGG loading helpers in `io` module (shravan now provides codecs)

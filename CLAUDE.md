@@ -23,16 +23,49 @@ dhvani (audio engine), shruti (DAW — nidhi replaces `shruti-instruments::sampl
 - **tracing**: Instrumentation
 - **tracing-subscriber**: Optional, behind `logging` feature
 
-## Work Loop
+## Development Process
 
-1. Read the relevant code before proposing changes
-2. Make the change
-3. `cargo fmt`
-4. `cargo clippy --all-features --all-targets -- -D warnings`
-5. `cargo test --all-features`
-6. `cargo test --doc`
-7. `cargo check --no-default-features` (no_std verification)
-8. `cargo bench` (if performance-relevant)
+### P(-1): Scaffold Hardening (before any new features)
+
+0. Read roadmap, CHANGELOG, and open issues
+1. Test + benchmark sweep of existing code
+2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
+3. Get baseline benchmarks
+4. Internal deep review
+5. External research -- sample playback specs, SFZ/SF2 formats, DSP algorithms
+6. Cleanliness check -- must be clean after review
+7. Additional tests/benchmarks from findings
+8. Post-review benchmarks
+9. Repeat if heavy
+
+### Work Loop (continuous)
+
+1. Work phase
+2. Cleanliness check
+3. Test + benchmark additions
+4. Run benchmarks
+5. Internal review
+6. Cleanliness check
+7. Deeper tests/benchmarks
+8. Benchmarks again
+9. If review heavy -> return to step 5
+10. Documentation -- CHANGELOG, roadmap, docs
+11. Version check
+12. Return to step 1
+
+### Cleanliness Check
+
+```bash
+cargo fmt --check
+cargo clippy --all-features --all-targets -- -D warnings
+cargo test --all-features
+cargo test --doc
+cargo check --no-default-features
+cargo audit
+cargo deny check
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+cargo bench
+```
 
 ## Task Sizing
 
@@ -45,9 +78,12 @@ dhvani (audio engine), shruti (DAW — nidhi replaces `shruti-instruments::sampl
 - Never skip benchmarks
 - `#[non_exhaustive]` on ALL public enums
 - `#[must_use]` on all pure functions and accessors
+- `#[inline]` on hot-path render and sample processing functions
 - Every type must be Serialize + Deserialize (serde)
+- Feature-gate optional modules
 - Zero unwrap/panic in library code (`.expect()` only on provably infallible paths)
 - All types must have serde roundtrip tests
+- `no_std` compatible (with alloc)
 - Playback accuracy over speed
 - Sample-accurate loop points and crossfades
 
@@ -73,4 +109,5 @@ dhvani (audio engine), shruti (DAW — nidhi replaces `shruti-instruments::sampl
 - **Do not commit or push** — the user handles all git operations
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
 - Do not add unnecessary dependencies
+- Do not break backward compatibility without a major version bump
 - Do not skip benchmarks before claiming performance improvements

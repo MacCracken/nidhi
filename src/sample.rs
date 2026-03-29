@@ -83,7 +83,7 @@ impl Sample {
         }
 
         let window = 512.min(self.frames / 2).max(1);
-        let hop = window / 2;
+        let hop = (window / 2).max(1);
         let threshold = threshold.clamp(0.01, 1.0);
 
         // Compute energy per window
@@ -401,6 +401,17 @@ mod tests {
         let mut s = Sample::from_mono(vec![0.0; 4000], 44100);
         s.detect_onsets(0.1, 100);
         assert!(s.slices().is_empty(), "silence should produce no onsets");
+    }
+
+    #[test]
+    fn detect_onsets_very_short_sample() {
+        // Regression: frames <= 3 caused hop=0 and infinite loop
+        let mut s = Sample::from_mono(vec![0.5, -0.5], 44100);
+        s.detect_onsets(0.1, 1);
+        // Just verifying it terminates without hanging
+
+        let mut s = Sample::from_mono(vec![0.5, -0.5, 0.3], 44100);
+        s.detect_onsets(0.1, 1);
     }
 
     #[test]

@@ -196,7 +196,13 @@ impl<'a> Iterator for ChunkIter<'a> {
             Err(e) => return Some(Err(e)),
         };
         let data_start = self.offset + 8;
-        let data_end = data_start + size;
+        let Some(data_end) = data_start.checked_add(size) else {
+            self.offset = self.data.len();
+            return Some(Err(NidhiError::ImportError(format!(
+                "chunk size overflow at offset {}",
+                self.offset
+            ))));
+        };
         if data_end > self.data.len() {
             self.offset = self.data.len();
             return Some(Err(NidhiError::ImportError(format!(
@@ -208,7 +214,7 @@ impl<'a> Iterator for ChunkIter<'a> {
             id,
             data: &self.data[data_start..data_end],
         };
-        self.offset = data_end + (size & 1); // pad to even
+        self.offset = data_end.saturating_add(size & 1); // pad to even
         Some(Ok(chunk))
     }
 }
@@ -875,5 +881,19 @@ mod tests {
     #[test]
     fn pcm16_out_of_bounds() {
         assert!(pcm16_to_f32(&[0, 0], 0, 100).is_empty());
+    }
+
+    #[test]
+    fn reject_chunk_size_overflow() {
+        // Craft a RIFF with a chunk whose declared size would overflow usize
+        let mut data = Vec::new();
+        write_fourcc(&mut data, b"RIFF");
+        write_u32_le(&mut data, 20); // RIFF size (enough for sfbk + one chunk)
+        write_fourcc(&mut data, b"sfbk");
+        // Sub-chunk with enormous size
+        write_fourcc(&mut data, b"LIST");
+        write_u32_le(&mut data, u32::MAX); // will overflow on data_start + size
+        // No actual data follows — parser should error, not panic
+        assert!(parse(&data).is_err());
     }
 }
