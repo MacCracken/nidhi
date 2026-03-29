@@ -514,6 +514,7 @@ impl Zone {
 
     /// Sample ID for this zone.
     #[inline]
+    #[must_use = "returns the sample ID for this zone"]
     pub fn sample_id(&self) -> SampleId {
         self.sample_id
     }

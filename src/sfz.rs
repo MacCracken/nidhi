@@ -562,6 +562,7 @@ impl SfzFile {
     /// [`SampleId`] corresponding to the index in the returned `Vec<String>`.
     ///
     /// `sample_rate` is needed to convert ADSR times (seconds) to samples.
+    #[must_use = "returns the built instrument and sample file list"]
     pub fn to_instrument(&self, name: &str, sample_rate: f32) -> (Instrument, Vec<String>) {
         let zones_and_files = self.to_zones(sample_rate);
         let mut inst = Instrument::new(name);

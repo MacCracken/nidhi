@@ -339,6 +339,7 @@ impl SamplerEngine {
     }
 
     /// Get a reference to the sample bank.
+    #[must_use = "returns a reference to the sample bank"]
     pub fn bank(&self) -> &SampleBank {
         &self.bank
     }
@@ -833,6 +834,7 @@ impl SamplerEngine {
     }
 
     /// Fill a buffer with mono sampler output.
+    #[inline]
     pub fn fill_buffer(&mut self, buffer: &mut [f32]) {
         for s in buffer.iter_mut() {
             *s = self.next_sample();
@@ -840,6 +842,7 @@ impl SamplerEngine {
     }
 
     /// Fill interleaved stereo buffer.
+    #[inline]
     pub fn fill_buffer_stereo(&mut self, buffer: &mut [f32]) {
         let mut i = 0;
         while i + 1 < buffer.len() {
@@ -856,6 +859,7 @@ impl SamplerEngine {
     /// Voices are routed to their zone's `output_bus` index.
     /// Bus 0 is the main output; higher indices are aux sends.
     /// Voices targeting a bus index beyond `buses.len()` go to bus 0.
+    #[inline]
     pub fn fill_buses_stereo(&mut self, buses: &mut [&mut [f32]]) {
         if buses.is_empty() {
             return;
@@ -882,6 +886,7 @@ impl SamplerEngine {
     }
 
     /// Internal: render one stereo sample and return per-bus contributions.
+    #[inline]
     fn next_sample_stereo_with_buses(&mut self) -> (f32, f32, Vec<(f32, f32)>) {
         // For now, delegate to the standard render and track bus 0
         let (l, r) = self.next_sample_stereo();

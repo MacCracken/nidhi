@@ -91,7 +91,7 @@ impl TimeStretcher {
     /// - `ratio == 1.0` = identity (approximate)
     #[must_use]
     pub fn stretch(&self, ratio: f64) -> Vec<f32> {
-        if self.input.is_empty() || self.frame_size == 0 {
+        if self.input.is_empty() || self.frame_size == 0 || ratio <= 0.0 || !ratio.is_finite() {
             return Vec::new();
         }
 
@@ -193,7 +193,7 @@ impl TimeStretcher {
     /// frame boundaries.
     #[must_use]
     pub fn stretch_ola(&self, ratio: f64) -> Vec<f32> {
-        if self.input.is_empty() || self.frame_size == 0 {
+        if self.input.is_empty() || self.frame_size == 0 || ratio <= 0.0 || !ratio.is_finite() {
             return Vec::new();
         }
 
@@ -449,6 +449,19 @@ mod tests {
         let ts = TimeStretcher::new(vec![], 44100.0);
         assert!(ts.stretch(2.0).is_empty());
         assert!(ts.stretch_ola(2.0).is_empty());
+    }
+
+    #[test]
+    fn invalid_ratio_returns_empty() {
+        let ts = TimeStretcher::new(vec![0.5; 1000], 44100.0);
+        assert!(ts.stretch(0.0).is_empty());
+        assert!(ts.stretch(-1.0).is_empty());
+        assert!(ts.stretch(f64::NAN).is_empty());
+        assert!(ts.stretch(f64::INFINITY).is_empty());
+        assert!(ts.stretch_ola(0.0).is_empty());
+        assert!(ts.stretch_ola(-1.0).is_empty());
+        assert!(ts.stretch_ola(f64::NAN).is_empty());
+        assert!(ts.stretch_ola(f64::INFINITY).is_empty());
     }
 
     #[test]

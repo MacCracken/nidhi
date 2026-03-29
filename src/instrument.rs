@@ -20,6 +20,7 @@ pub struct Instrument {
 
 impl Instrument {
     /// Create a new empty instrument.
+    #[must_use = "returns a new Instrument"]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -55,6 +56,7 @@ impl Instrument {
     /// For zones with `group > 0`, cycles through matching zones in that group.
     /// For zones with `group == 0` (ungrouped), returns the first match.
     /// Returns the zone index and a reference to the zone.
+    #[must_use]
     pub fn find_zone_rr(&mut self, note: u8, velocity: u8) -> Option<(usize, &Zone)> {
         // Collect matching zone indices
         let matching: Vec<usize> = self
@@ -117,6 +119,7 @@ impl Instrument {
     }
 
     /// Get all zones.
+    #[must_use = "returns a reference to the zone slice"]
     pub fn zones(&self) -> &[Zone] {
         &self.zones
     }

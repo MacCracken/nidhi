@@ -7,15 +7,16 @@ nidhi is the standalone sampler crate in the AGNOS ecosystem, replacing
 
 Zero-allocation render path, SIMD, and caching optimizations.
 
+- [ ] Benchmark suite: voice count scaling, buffer fill throughput, interpolation cost (prerequisite — measure first)
 - [ ] Pre-allocated voice buffers (zero allocation in render path)
-- [ ] Per-voice buffer accumulation (batch render, 5–10% perf)
-- [ ] Filter coefficient caching (skip recompute when params unchanged)
+- [ ] Fix per-sample Vec allocation in `fill_buses_stereo` (engine.rs:888)
+- [ ] Per-voice buffer accumulation (batch render into temp buffer, then SIMD mix-down)
+- [ ] Filter coefficient caching (epsilon check on cutoff/resonance, skip recompute when unchanged)
 - [ ] Envelope stage duration caching
-- [ ] Denormal flushing in filter feedback paths (no_std path)
-- [ ] Parameter smoothing via `naad::smoothing::ParamSmoother` (click-free param changes)
-- [ ] SIMD-accelerated stereo mixing (accumulate L/R buffers)
-- [ ] SIMD-accelerated cubic Hermite interpolation
-- [ ] Benchmark suite: voice count scaling, buffer fill throughput, interpolation cost
+- [ ] Denormal flushing via `naad::flush_denormal()` in no_std filter feedback + envelope release
+- [ ] Parameter smoothing via `naad::smoothing::ParamSmoother` (exponential EMA on filter cutoff modulation)
+- [ ] SIMD-accelerated stereo mixing (`core::arch` intrinsics with scalar fallback, behind feature gate)
+- [ ] SIMD-accelerated cubic Hermite interpolation (pack L/R into f32x4, vectorized Horner eval)
 
 ## v1.2.0 — Advanced modulation + expression
 

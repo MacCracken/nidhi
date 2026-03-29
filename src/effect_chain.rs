@@ -125,22 +125,29 @@ impl EffectChain {
     }
 
     /// Get a reference to the slots.
+    #[inline]
     #[must_use]
     pub fn slots(&self) -> &[EffectSlot] {
         &self.slots
     }
 
     /// Get a mutable reference to a slot by index.
+    #[inline]
+    #[must_use]
     pub fn slot_mut(&mut self, index: usize) -> Option<&mut EffectSlot> {
         self.slots.get_mut(index)
     }
 
     /// Number of active slots.
+    #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.slots.len()
     }
 
     /// Whether the chain is empty.
+    #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
