@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 — 2026-03-28
+
+### Changed
+- **Replace hound with shravan** for WAV I/O — shravan provides broader codec support (WAV, FLAC, AIFF, Ogg, MP3, Opus), streaming decoding, and PCM format conversion
+- `StreamingWavReader` now uses shravan's `WavStreamDecoder` for chunked decoding
+
 ## 1.0.0 — 2026-03-28
 
 Stable release. Full-featured sample playback engine for AGNOS.
@@ -63,7 +69,7 @@ Stable release. Full-featured sample playback engine for AGNOS.
 - **Per-slot bypass** and wet/dry mix
 
 ### File I/O (`io` feature)
-- **WAV loading**: `load_wav()`, `load_wav_from_memory()` via hound
+- **WAV loading**: `load_wav()`, `load_wav_from_memory()` via shravan
 - **Streaming**: `StreamingWavReader` for chunked reading of large instruments
 - Supports 8/16/24-bit integer and 32-bit float WAV
 

@@ -1,4 +1,4 @@
-//! File I/O helpers — load WAV files into [`Sample`], stream large instruments.
+//! File I/O helpers — load audio files into [`Sample`], stream large instruments.
 //!
 //! Requires the `io` feature flag (which implies `std`).
 //!
@@ -11,7 +11,6 @@
 //! assert!(sample.frames() > 0);
 //! ```
 
-use std::io::Read;
 use std::path::Path;
 
 use crate::error::{NidhiError, Result};
@@ -22,14 +21,14 @@ use crate::sample::Sample;
 /// Supports 8-bit, 16-bit, 24-bit integer and 32-bit float WAV files.
 /// Stereo files are loaded as interleaved stereo; mono files as mono.
 pub fn load_wav<P: AsRef<Path>>(path: P) -> Result<Sample> {
-    let reader = hound::WavReader::open(path.as_ref())
-        .map_err(|e| NidhiError::ImportError(format!("failed to open WAV: {e}")))?;
+    let data = std::fs::read(path.as_ref())
+        .map_err(|e| NidhiError::ImportError(format!("failed to read WAV file: {e}")))?;
 
-    let spec = reader.spec();
-    let channels = spec.channels as u32;
-    let sample_rate = spec.sample_rate;
+    let (info, samples) = shravan::wav::decode(&data)
+        .map_err(|e| NidhiError::ImportError(format!("failed to decode WAV: {e}")))?;
 
-    let data = read_wav_samples(reader)?;
+    let channels = info.channels as u32;
+    let sample_rate = info.sample_rate;
 
     let name = path
         .as_ref()
@@ -38,9 +37,9 @@ pub fn load_wav<P: AsRef<Path>>(path: P) -> Result<Sample> {
         .unwrap_or("");
 
     let sample = if channels == 1 {
-        Sample::from_mono(data, sample_rate)
+        Sample::from_mono(samples, sample_rate)
     } else {
-        Sample::from_stereo(data, sample_rate)
+        Sample::from_stereo(samples, sample_rate)
     };
 
     Ok(sample.with_name(name))
@@ -48,15 +47,11 @@ pub fn load_wav<P: AsRef<Path>>(path: P) -> Result<Sample> {
 
 /// Load a WAV file from a byte slice (in-memory).
 pub fn load_wav_from_memory(data: &[u8]) -> Result<Sample> {
-    let cursor = std::io::Cursor::new(data);
-    let reader = hound::WavReader::new(cursor)
+    let (info, samples) = shravan::wav::decode(data)
         .map_err(|e| NidhiError::ImportError(format!("failed to parse WAV: {e}")))?;
 
-    let spec = reader.spec();
-    let channels = spec.channels as u32;
-    let sample_rate = spec.sample_rate;
-
-    let samples = read_wav_samples(reader)?;
+    let channels = info.channels as u32;
+    let sample_rate = info.sample_rate;
 
     let sample = if channels == 1 {
         Sample::from_mono(samples, sample_rate)
@@ -67,55 +62,49 @@ pub fn load_wav_from_memory(data: &[u8]) -> Result<Sample> {
     Ok(sample)
 }
 
-fn read_wav_samples<R: Read>(reader: hound::WavReader<R>) -> Result<Vec<f32>> {
-    let spec = reader.spec();
-
-    match spec.sample_format {
-        hound::SampleFormat::Int => {
-            let bits = spec.bits_per_sample;
-            let scale = 1.0 / (1u32 << (bits - 1)) as f32;
-            reader
-                .into_samples::<i32>()
-                .map(|s| {
-                    s.map(|v| v as f32 * scale)
-                        .map_err(|e| NidhiError::ImportError(format!("WAV sample error: {e}")))
-                })
-                .collect()
-        }
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .map(|s| s.map_err(|e| NidhiError::ImportError(format!("WAV sample error: {e}"))))
-            .collect(),
-    }
-}
-
-/// Load a WAV file and stream it in chunks for large instruments.
+/// Stream a WAV file in chunks for large instruments.
 ///
-/// Returns an iterator yielding `chunk_frames` frames at a time.
 /// Useful for instruments too large to fit entirely in memory.
 pub struct StreamingWavReader {
-    reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+    decoder: shravan::stream::WavStreamDecoder,
+    info: Option<shravan::format::FormatInfo>,
+    pending_samples: Vec<f32>,
     channels: u32,
     sample_rate: u32,
     total_frames: usize,
     frames_read: usize,
+    finished: bool,
+    file_data: Vec<u8>,
+    file_offset: usize,
 }
 
 impl StreamingWavReader {
     /// Open a WAV file for streaming.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let reader = hound::WavReader::open(path.as_ref()).map_err(|e| {
+        let file_data = std::fs::read(path.as_ref()).map_err(|e| {
             NidhiError::ImportError(format!("failed to open WAV for streaming: {e}"))
         })?;
-        let spec = reader.spec();
-        let total_samples = reader.len() as usize;
-        let channels = spec.channels as u32;
+
+        // Do a full decode just for the header info (total_frames, channels, sample_rate).
+        // The streaming decoder will process chunks incrementally.
+        let (info, _) = shravan::wav::decode(&file_data)
+            .map_err(|e| NidhiError::ImportError(format!("failed to read WAV header: {e}")))?;
+
+        let channels = info.channels as u32;
+        let sample_rate = info.sample_rate;
+        let total_frames = info.total_samples as usize;
+
         Ok(Self {
-            reader,
+            decoder: shravan::stream::WavStreamDecoder::new(),
+            info: Some(info),
+            pending_samples: Vec::new(),
             channels,
-            sample_rate: spec.sample_rate,
-            total_frames: total_samples / channels as usize,
+            sample_rate,
+            total_frames,
             frames_read: 0,
+            finished: false,
+            file_data,
+            file_offset: 0,
         })
     }
 
@@ -145,35 +134,59 @@ impl StreamingWavReader {
 
     /// Read the next chunk of frames. Returns empty vec when done.
     pub fn read_chunk(&mut self, chunk_frames: usize) -> Result<Vec<f32>> {
+        use shravan::stream::{StreamDecoder, StreamEvent};
+
         let remaining = self.total_frames - self.frames_read;
         let frames_to_read = chunk_frames.min(remaining);
         if frames_to_read == 0 {
             return Ok(Vec::new());
         }
 
-        let samples_to_read = frames_to_read * self.channels as usize;
-        let spec = self.reader.spec();
-        let mut data = Vec::with_capacity(samples_to_read);
+        let samples_needed = frames_to_read * self.channels as usize;
 
-        match spec.sample_format {
-            hound::SampleFormat::Int => {
-                let bits = spec.bits_per_sample;
-                let scale = 1.0 / (1u32 << (bits - 1)) as f32;
-                for s in self.reader.samples::<i32>().take(samples_to_read) {
-                    let v =
-                        s.map_err(|e| NidhiError::ImportError(format!("WAV stream error: {e}")))?;
-                    data.push(v as f32 * scale);
+        // Feed data until we have enough samples or run out
+        while self.pending_samples.len() < samples_needed && !self.finished {
+            if self.file_offset < self.file_data.len() {
+                let end = (self.file_offset + 4096).min(self.file_data.len());
+                let chunk = &self.file_data[self.file_offset..end];
+                self.file_offset = end;
+
+                let events = self
+                    .decoder
+                    .feed(chunk)
+                    .map_err(|e| NidhiError::ImportError(format!("WAV stream error: {e}")))?;
+
+                for event in events {
+                    match event {
+                        StreamEvent::Header(info) => {
+                            self.info = Some(info);
+                        }
+                        StreamEvent::Samples(s) => {
+                            self.pending_samples.extend_from_slice(&s);
+                        }
+                        StreamEvent::End => {
+                            self.finished = true;
+                        }
+                        _ => {}
+                    }
                 }
-            }
-            hound::SampleFormat::Float => {
-                for s in self.reader.samples::<f32>().take(samples_to_read) {
-                    let v =
-                        s.map_err(|e| NidhiError::ImportError(format!("WAV stream error: {e}")))?;
-                    data.push(v);
+            } else {
+                let events = self
+                    .decoder
+                    .flush()
+                    .map_err(|e| NidhiError::ImportError(format!("WAV stream flush error: {e}")))?;
+
+                for event in events {
+                    if let StreamEvent::Samples(s) = event {
+                        self.pending_samples.extend_from_slice(&s);
+                    }
                 }
+                self.finished = true;
             }
         }
 
+        let take = samples_needed.min(self.pending_samples.len());
+        let data: Vec<f32> = self.pending_samples.drain(..take).collect();
         self.frames_read += data.len() / self.channels as usize;
         Ok(data)
     }
@@ -195,19 +208,8 @@ mod tests {
     use super::*;
 
     fn make_wav_bytes(samples: &[f32], channels: u16, sample_rate: u32) -> Vec<u8> {
-        let mut cursor = std::io::Cursor::new(Vec::new());
-        let spec = hound::WavSpec {
-            channels,
-            sample_rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
-        for &s in samples {
-            writer.write_sample(s).unwrap();
-        }
-        writer.finalize().unwrap();
-        cursor.into_inner()
+        shravan::wav::encode(samples, sample_rate, channels, shravan::pcm::PcmFormat::F32)
+            .expect("WAV encoding failed")
     }
 
     #[test]

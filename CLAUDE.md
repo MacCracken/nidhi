@@ -16,7 +16,7 @@ dhvani (audio engine), shruti (DAW — nidhi replaces `shruti-instruments::sampl
 ## Dependencies
 
 - **naad**: Audio synthesis primitives — filters, envelopes, modulation, voice management, effects (optional, behind `std`)
-- **hound**: WAV file I/O (optional, behind `io`)
+- **shravan**: Audio codecs — WAV, FLAC, AIFF, streaming (optional, behind `io`)
 - **hisab**: Math primitives (num features)
 - **serde**: Serialization (derive, alloc)
 - **thiserror**: Error types

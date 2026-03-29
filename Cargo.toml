@@ -1,6 +1,6 @@
 [package]
 name = "nidhi"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-only"
@@ -26,12 +26,14 @@ serde_json = "1"
 [features]
 default = ["std"]
 std = ["dep:naad", "serde/std", "thiserror/std", "tracing/std"]
-io = ["std", "dep:hound"]
+io = ["std", "dep:shravan"]
 logging = ["dep:tracing-subscriber"]
 full = ["std", "io", "logging"]
 
-[dependencies.hound]
-version = "3.5"
+[dependencies.shravan]
+version = "1.0.1"
+default-features = false
+features = ["wav", "pcm", "streaming"]
 optional = true
 
 [dependencies.tracing-subscriber]

@@ -41,7 +41,7 @@ Or simply run `make check` for the core checks.
 - Zero `unwrap`/`panic` in library code (`.expect()` only on provably infallible paths)
 - `no_std` compatible — use `alloc` not `std` collections
 - Feature-gate `naad` usage behind `#[cfg(feature = "std")]`
-- Feature-gate `hound` usage behind `#[cfg(feature = "io")]`
+- Feature-gate `shravan` usage behind `#[cfg(feature = "io")]`
 - All new fields on Zone must have `#[serde(default)]` for backward compatibility
 
 ## Adding a New Module

@@ -75,7 +75,7 @@ let (presets, instruments, bank) = sf2::parse(&bytes).unwrap();
 | Feature   | Default | Description |
 |-----------|---------|-------------|
 | `std`     | Yes     | Standard library + naad integration. Disable for `no_std` + `alloc` |
-| `io`      | No      | WAV file loading and streaming via hound (implies `std`) |
+| `io`      | No      | WAV file loading and streaming via shravan (implies `std`) |
 | `logging` | No      | `tracing-subscriber` for debug logging |
 | `full`    | No      | Enables `std` + `io` + `logging` |
 
