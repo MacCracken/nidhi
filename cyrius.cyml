@@ -26,6 +26,7 @@ modules = [
     "src/instrument.cyr",
     "src/capture.cyr",
     "src/stretch.cyr",
+    "src/effect_chain.cyr",
 ]
 
 [deps]

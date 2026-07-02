@@ -74,12 +74,12 @@ fn n_adsr_config_is_default_sfz(config, sample_rate) {
 # sample_rate is an f64 bit pattern (Hz).
 #must_use
 fn n_amp_envelope_new(config, sample_rate) {
-    var sr = f64_max(sample_rate, F64_ONE);
-    var a = f64_max(f64_div(f64_from(NAdsrConfig_attack_samples(config)), sr), 0);
-    var d = f64_max(f64_div(f64_from(NAdsrConfig_decay_samples(config)), sr), 0);
+    # to_seconds divides by the RAW sample_rate (matches Rust); ONLY the 5th arg is clamped max(.,1).
+    var a = f64_max(f64_div(f64_from(NAdsrConfig_attack_samples(config)), sample_rate), 0);
+    var d = f64_max(f64_div(f64_from(NAdsrConfig_decay_samples(config)), sample_rate), 0);
     var s = f64_min(f64_max(NAdsrConfig_sustain_level(config), 0), F64_ONE);
-    var rel = f64_max(f64_div(f64_from(NAdsrConfig_release_samples(config)), sr), 0);
-    var env = envelope_adsr_with_sample_rate(a, d, s, rel, sr);
+    var rel = f64_max(f64_div(f64_from(NAdsrConfig_release_samples(config)), sample_rate), 0);
+    var env = envelope_adsr_with_sample_rate(a, d, s, rel, f64_max(sample_rate, F64_ONE));
     if (naad_is_err(env) == 1) {
         # fallback: 0.0 attack, 0.0 decay, 1.0 sustain, 0.01s release, 44100 Hz -- always valid
         env = envelope_adsr_with_sample_rate(0, 0, F64_ONE, f64_div(F64_ONE, f64_from(100)), f64_from(44100));

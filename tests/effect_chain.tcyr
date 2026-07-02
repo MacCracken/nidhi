@@ -1,0 +1,62 @@
+# effect_chain.tcyr -- parity tests for src/effect_chain.cyr (ports rust-old/src/effect_chain.rs #[test]s).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/effect_chain.cyr"
+
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var tol = f64_div(F64_ONE, f64_from(100));
+    var half = F64_HALF;
+    var sr = f64_from(44100);
+
+    test_group("empty chain passthrough");
+    var c = n_effect_chain_new(sr);
+    assert_eq(n_effect_chain_is_empty(c), 1, "new chain is empty");
+    assert_eq(approx(n_effect_chain_process_sample(c, half), half, tol), 1, "empty chain passes 0.5 through");
+
+    test_group("max slots enforced");
+    var c2 = n_effect_chain_new(sr);
+    assert_eq(n_effect_chain_add(c2, FX_NONE), 1, "add slot 1 ok");
+    assert_eq(n_effect_chain_add(c2, FX_NONE), 1, "add slot 2 ok");
+    assert_eq(n_effect_chain_add(c2, FX_NONE), 1, "add slot 3 ok");
+    assert_eq(n_effect_chain_add(c2, FX_NONE), 1, "add slot 4 ok");
+    assert_eq(n_effect_chain_add(c2, FX_NONE), 1, "add slot 5 ok");
+    assert_eq(n_effect_chain_add(c2, FX_NONE), 0, "6th add rejected (MAX_SLOTS)");
+    assert_eq(n_effect_chain_len(c2), 5, "len capped at 5");
+
+    test_group("bypass skips effect");
+    var c3 = n_effect_chain_new(sr);
+    n_effect_chain_add(c3, FX_COMPRESSOR);
+    NEffectSlot_set_bypass(n_effect_chain_slot(c3, 0), 1);
+    assert_eq(approx(n_effect_chain_process_sample(c3, half), half, tol), 1, "bypassed effect -> passthrough");
+
+    test_group("remove slot");
+    var c4 = n_effect_chain_new(sr);
+    n_effect_chain_add(c4, FX_REVERB);
+    n_effect_chain_add(c4, FX_DELAY);
+    assert_eq(n_effect_chain_len(c4), 2, "two effects -> len 2");
+    n_effect_chain_remove(c4, 0);
+    assert_eq(n_effect_chain_len(c4), 1, "len 1 after remove(0)");
+
+    test_group("wet dry mix");
+    var c5 = n_effect_chain_new(sr);
+    n_effect_chain_add(c5, FX_NONE);
+    NEffectSlot_set_mix(n_effect_chain_slot(c5, 0), f64_from(0));
+    assert_eq(approx(n_effect_chain_process_sample(c5, half), half, tol), 1, "fully-dry mix -> passthrough");
+
+    test_group("clear");
+    n_effect_chain_clear(c5);
+    assert_eq(n_effect_chain_is_empty(c5), 1, "clear empties the chain");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

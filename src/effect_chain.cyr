@@ -1,0 +1,177 @@
+# effect_chain.cyr -- per-instrument serial effect chain (up to 5 naad effects)
+# Requires: alloc, vec, math, naad (reverb_new/reverb_process_sample, comb_filter_new/
+#           comb_filter_process_sample, effects_chorus_new/effects_chorus_process_sample,
+#           dynamics_compressor_new/_process_sample, dynamics_limiter_new/_process_sample,
+#           naad_is_err)
+#
+# Ports rust-old/src/effect_chain.rs. "Use naad fully": slots hold real naad effect objects
+# (the Rust no_std passthrough is dropped). Effects run SERIALLY with per-slot bypass + wet/dry
+# mix. process_stereo runs L then R through the SAME stateful chain (source behavior, preserved).
+#
+# NOTE (bug-for-bug parity): the Rust source builds the Reverb with positional args
+# (sr, 1.5, 0.3, 0.5, 0.6) against naad's reverb_new(decay, damping, pre_delay_ms, mix,
+# sample_rate) -- i.e. the sample_rate arrives in `decay` and 0.6 in `sample_rate`. Replicated
+# verbatim; if reverb_new rejects it, the slot falls back to None (Rust `.unwrap_or(None)`).
+
+var FX_NONE       = 0;
+var FX_REVERB     = 1;
+var FX_DELAY      = 2;
+var FX_CHORUS     = 3;
+var FX_COMPRESSOR = 4;
+var FX_LIMITER    = 5;
+var N_FX_MAX_SLOTS = 5;
+
+# --- EffectSlot ---
+# Fields: effect_type (FX_* tag), bypass (0/1), mix (f64 bits, 0=dry 1=wet),
+# state (naad effect pointer, or 0 for None/failed-construction).
+#derive(accessors)
+struct NEffectSlot {
+    effect_type;
+    bypass;
+    mix;
+    state;
+}
+
+#must_use
+fn n_effect_slot_new() {
+    var s = alloc(sizeof(NEffectSlot));
+    NEffectSlot_set_effect_type(s, FX_NONE);
+    NEffectSlot_set_bypass(s, 0);
+    NEffectSlot_set_mix(s, F64_ONE);
+    NEffectSlot_set_state(s, 0);
+    return s;
+}
+
+# --- EffectChain ---
+#derive(accessors)
+struct NEffectChain {
+    slots;
+    sample_rate;
+}
+
+#must_use
+fn n_effect_chain_new(sample_rate) {
+    var c = alloc(sizeof(NEffectChain));
+    NEffectChain_set_slots(c, vec_new());
+    NEffectChain_set_sample_rate(c, sample_rate);
+    return c;
+}
+
+# create_state(effect_type) -> naad effect pointer, or 0 (None/failed). sample_rate f64 bits.
+fn n_effect_chain_create_state(chain, effect_type) {
+    var sr = NEffectChain_sample_rate(chain);
+    if (effect_type == FX_REVERB) {
+        # (sr, 1.5, 0.3, 0.5, 0.6) -> reverb_new(decay, damping, pre_delay_ms, mix, sample_rate)
+        var st = reverb_new(sr, f64_div(f64_from(3), f64_from(2)),
+            f64_div(f64_from(3), f64_from(10)), F64_HALF, f64_div(f64_from(6), f64_from(10)));
+        if (naad_is_err(st) == 1) { return 0; }
+        return st;
+    }
+    if (effect_type == FX_DELAY) {
+        var samples = f64_to(f64_mul(sr, f64_div(f64_from(3), f64_from(10))));   # (sr * 0.3) as usize
+        return comb_filter_new(samples, f64_div(f64_from(4), f64_from(10)));      # feedback 0.4
+    }
+    if (effect_type == FX_CHORUS) {
+        # (3, 0.02, 0.002, 1.5, 0.5, sr)
+        var st2 = effects_chorus_new(3, f64_div(f64_from(2), f64_from(100)),
+            f64_div(f64_from(2), f64_from(1000)), f64_div(f64_from(3), f64_from(2)), F64_HALF, sr);
+        if (naad_is_err(st2) == 1) { return 0; }
+        return st2;
+    }
+    if (effect_type == FX_COMPRESSOR) {
+        # (-20, 4, 0.01, 0.1, sr)
+        return dynamics_compressor_new(f64_neg(f64_from(20)), f64_from(4),
+            f64_div(F64_ONE, f64_from(100)), f64_div(F64_ONE, f64_from(10)), sr);
+    }
+    if (effect_type == FX_LIMITER) {
+        # (-1.0, 0.05, sr)
+        return dynamics_limiter_new(f64_neg(F64_ONE), f64_div(f64_from(5), f64_from(100)), sr);
+    }
+    return 0;
+}
+
+# add(effect_type) -> 1 on success, 0 if the chain is already full (MAX_SLOTS).
+fn n_effect_chain_add(chain, effect_type) {
+    var slots = NEffectChain_slots(chain);
+    if (vec_len(slots) >= N_FX_MAX_SLOTS) { return 0; }
+    var slot = n_effect_slot_new();
+    NEffectSlot_set_effect_type(slot, effect_type);
+    NEffectSlot_set_state(slot, n_effect_chain_create_state(chain, effect_type));
+    vec_push(slots, slot);
+    return 1;
+}
+
+fn n_effect_chain_remove(chain, index) {
+    var slots = NEffectChain_slots(chain);
+    if (index >= 0) {
+        if (index < vec_len(slots)) { vec_remove(slots, index); }
+    }
+    return 0;
+}
+
+fn n_effect_chain_clear(chain) {
+    vec_truncate(NEffectChain_slots(chain), 0);
+    return 0;
+}
+
+#must_use
+fn n_effect_chain_len(chain) {
+    return vec_len(NEffectChain_slots(chain));
+}
+
+#must_use
+fn n_effect_chain_is_empty(chain) {
+    if (vec_len(NEffectChain_slots(chain)) == 0) { return 1; }
+    return 0;
+}
+
+# slot(index) -> EffectSlot pointer, or 0 if out of range.
+#must_use
+fn n_effect_chain_slot(chain, index) {
+    var slots = NEffectChain_slots(chain);
+    if (index < 0) { return 0; }
+    if (index >= vec_len(slots)) { return 0; }
+    return vec_get(slots, index);
+}
+
+# apply one effect to a sample -> wet value. Reverb returns a stereo pair; take the left (.0).
+#inline
+fn n_effect_apply(effect_type, state, input) {
+    if (state == 0) { return input; }
+    if (effect_type == FX_REVERB) { return load64(reverb_process_sample(state, input)); }
+    if (effect_type == FX_DELAY) { return comb_filter_process_sample(state, input); }
+    if (effect_type == FX_CHORUS) { return effects_chorus_process_sample(state, input); }
+    if (effect_type == FX_COMPRESSOR) { return dynamics_compressor_process_sample(state, input); }
+    if (effect_type == FX_LIMITER) { return dynamics_limiter_process_sample(state, input); }
+    return input;
+}
+
+# process_sample(input) -> output. Serial; skip bypassed/None slots; wet/dry blend per slot.
+#inline
+fn n_effect_chain_process_sample(chain, input) {
+    var slots = NEffectChain_slots(chain);
+    var n = vec_len(slots);
+    var out = input;
+    var i = 0;
+    while (i < n) {
+        var slot = vec_get(slots, i);
+        var etype = NEffectSlot_effect_type(slot);
+        if (NEffectSlot_bypass(slot) == 0) {
+            if (etype != FX_NONE) {
+                var wet = n_effect_apply(etype, NEffectSlot_state(slot), out);
+                var mix = NEffectSlot_mix(slot);
+                out = f64_add(f64_mul(out, f64_sub(F64_ONE, mix)), f64_mul(wet, mix));
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# process_stereo(left, right, out2) -> out2[0]=L, out2[1]=R. L then R share the stateful chain.
+#inline
+fn n_effect_chain_process_stereo(chain, left, right, out2) {
+    store64(out2, n_effect_chain_process_sample(chain, left));
+    store64(out2 + 8, n_effect_chain_process_sample(chain, right));
+    return 0;
+}

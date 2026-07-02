@@ -83,6 +83,14 @@ fn main() {
     var mid = n_amp_envelope_tick(e2);
     assert_eq(f64_gt(mid, first), 1, "attack level rises (mid > first)");
 
+    test_group("sub-1.0 sample rate (raw-division parity, regression)");
+    # Rust to_seconds divides by the RAW sample_rate; only naad's 5th arg is clamped max(.,1).
+    var cfg_lo = n_adsr_config_new(4, 8, F64_HALF, 20);
+    var elo = n_amp_envelope_new(cfg_lo, F64_HALF);
+    var tol3 = f64_div(F64_ONE, f64_from(100));
+    assert_eq(approx(Adsr_attack_time(elo), f64_from(8), tol3), 1, "attack_time = 4/0.5 = 8s (raw sr, not clamped)");
+    assert_eq(approx(Adsr_release_time(elo), f64_from(40), tol3), 1, "release_time = 20/0.5 = 40s (raw sr, not clamped)");
+
     return assert_summary();
 }
 
