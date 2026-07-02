@@ -1,0 +1,134 @@
+# capture.tcyr -- parity tests for src/capture.cyr (ports rust-old/src/capture.rs #[test]s).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/sample.cyr"
+include "src/capture.cyr"
+
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+fn push_n(v, val, n) {
+    var i = 0;
+    while (i < n) { vec_push(v, val); i = i + 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var tol = f64_div(F64_ONE, f64_from(100));       # 0.01
+    var half = F64_HALF;
+
+    test_group("recorder mono");
+    var r = n_recorder_new(44100, 1);
+    var d1 = vec_new();
+    vec_push(d1, f64_div(f64_from(1), f64_from(10)));
+    vec_push(d1, f64_div(f64_from(2), f64_from(10)));
+    vec_push(d1, f64_div(f64_from(3), f64_from(10)));
+    n_recorder_write(r, d1);
+    var d2 = vec_new();
+    vec_push(d2, f64_div(f64_from(4), f64_from(10)));
+    vec_push(d2, f64_div(f64_from(5), f64_from(10)));
+    n_recorder_write(r, d2);
+    assert_eq(n_recorder_frames(r), 5, "mono recorder frames == 5");
+    var sm = n_recorder_finish(r);
+    assert_eq(NSample_frames(sm), 5, "finished mono frames == 5");
+    assert_eq(NSample_channels(sm), 1, "finished mono channels == 1");
+
+    test_group("recorder stereo");
+    var rs = n_recorder_new(44100, 2);
+    var ds = vec_new();
+    push_n(ds, half, 4);
+    n_recorder_write(rs, ds);
+    assert_eq(n_recorder_frames(rs), 2, "stereo recorder frames == 2");
+    var sst = n_recorder_finish(rs);
+    assert_eq(NSample_frames(sst), 2, "finished stereo frames == 2");
+    assert_eq(NSample_channels(sst), 2, "finished stereo channels == 2");
+
+    test_group("trim_silence");
+    var td = vec_new();
+    vec_push(td, f64_from(0));
+    vec_push(td, f64_from(0));
+    vec_push(td, f64_from(0));
+    vec_push(td, f64_div(f64_from(5), f64_from(10)));
+    vec_push(td, f64_div(f64_from(8), f64_from(10)));
+    vec_push(td, f64_div(f64_from(3), f64_from(10)));
+    vec_push(td, f64_from(0));
+    vec_push(td, f64_from(0));
+    var ts = n_sample_from_mono(td, 44100);
+    n_trim_silence(ts, f64_div(F64_ONE, f64_from(100)));
+    assert_eq(NSample_frames(ts), 3, "trim -> 3 frames");
+    assert_eq(approx(vec_get(NSample_data(ts), 0), f64_div(f64_from(5), f64_from(10)), tol), 1, "trim data[0] ~ 0.5");
+
+    test_group("trim_silence all silent");
+    var sil = vec_new();
+    push_n(sil, f64_from(0), 100);
+    var sils = n_sample_from_mono(sil, 44100);
+    n_trim_silence(sils, f64_div(F64_ONE, f64_from(100)));
+    assert_eq(NSample_frames(sils), 0, "all-silent trim -> 0 frames");
+
+    test_group("normalize_peak");
+    var pd = vec_new();
+    vec_push(pd, f64_from(0));
+    vec_push(pd, f64_div(f64_from(1), f64_from(4)));
+    vec_push(pd, f64_neg(f64_div(f64_from(1), f64_from(2))));
+    vec_push(pd, f64_div(f64_from(1), f64_from(10)));
+    var ps = n_sample_from_mono(pd, 44100);
+    n_normalize_peak(ps);
+    assert_eq(approx(peak(NSample_data(ps)), F64_ONE, f64_div(F64_ONE, f64_from(1000))), 1, "peak normalized to 1.0");
+
+    test_group("normalize_rms");
+    var rd = vec_new();
+    push_n(rd, half, 100);
+    var rsm = n_sample_from_mono(rd, 44100);
+    n_normalize_rms(rsm, f64_div(f64_from(2), f64_from(10)));   # target 0.2
+    assert_eq(approx(rms(NSample_data(rsm)), f64_div(f64_from(2), f64_from(10)), tol), 1, "rms adjusted to ~0.2");
+
+    test_group("detect_loop_points");
+    # 4410-sample 100 Hz sine @ 44100
+    var sine = vec_new();
+    var two_pi = F64_TAU;
+    var i = 0;
+    while (i < 4410) {
+        var ph = f64_div(f64_mul(f64_mul(two_pi, f64_from(100)), f64_from(i)), f64_from(44100));
+        vec_push(sine, f64_sin(ph));
+        i = i + 1;
+    }
+    var sine_s = n_sample_from_mono(sine, 44100);
+    var loops = n_detect_loop_points(sine_s, 100);
+    assert(vec_len(loops) > 0, "detect_loop_points finds candidates");
+    var p0 = vec_get(loops, 0);
+    var ls = load64(p0);
+    var le = load64(p0 + 8);
+    assert(le > ls, "loop end > start");
+    assert(le - ls >= 100, "loop length >= min_loop_frames");
+
+    test_group("detect_loop_points short");
+    var shortd = vec_new();
+    push_n(shortd, f64_from(0), 10);
+    var shorts = n_sample_from_mono(shortd, 44100);
+    assert_eq(vec_len(n_detect_loop_points(shorts, 100)), 0, "short sample -> no candidates");
+
+    test_group("finish_processed");
+    var rp = n_recorder_new(44100, 1);
+    var pre = vec_new();
+    push_n(pre, f64_from(0), 100);
+    n_recorder_write(rp, pre);
+    var body = vec_new();
+    push_n(body, f64_div(f64_from(1), f64_from(4)), 200);
+    n_recorder_write(rp, body);
+    var post = vec_new();
+    push_n(post, f64_from(0), 100);
+    n_recorder_write(rp, post);
+    var fp = n_recorder_finish_processed(rp, f64_div(F64_ONE, f64_from(100)));
+    assert_eq(NSample_frames(fp), 200, "finish_processed trims to 200 frames");
+    assert_eq(approx(peak(NSample_data(fp)), F64_ONE, tol), 1, "finish_processed peak ~ 1.0");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -23,6 +23,8 @@ modules = [
     "src/envelope.cyr",
     "src/zone.cyr",
     "src/sample.cyr",
+    "src/instrument.cyr",
+    "src/capture.cyr",
 ]
 
 [deps]

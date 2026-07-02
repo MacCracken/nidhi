@@ -1,0 +1,69 @@
+# instrument.tcyr -- parity tests for src/instrument.cyr (ports rust-old/src/instrument.rs #[test]s).
+
+include "src/loop_mode.cyr"
+include "src/zone.cyr"
+include "src/instrument.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("find_zones");
+    var inst = n_instrument_new(str_from("test"));
+    var z0 = n_zone_new(0);
+    z0 = n_zone_with_key_range(z0, 60, 72);
+    var z1 = n_zone_new(1);
+    z1 = n_zone_with_key_range(z1, 48, 59);
+    n_instrument_add_zone(inst, z0);
+    n_instrument_add_zone(inst, z1);
+    var m1 = n_instrument_find_zones(inst, 66, 100);
+    assert_eq(vec_len(m1), 1, "find_zones(66,100) -> 1 zone");
+    assert_eq(NZone_sample_id(vec_get(m1, 0)), 0, "matched zone sample_id 0");
+    var m2 = n_instrument_find_zones(inst, 50, 100);
+    assert_eq(vec_len(m2), 1, "find_zones(50,100) -> 1 zone");
+    assert_eq(NZone_sample_id(vec_get(m2, 0)), 1, "matched zone sample_id 1");
+    assert_eq(vec_len(n_instrument_find_zones(inst, 30, 100)), 0, "find_zones(30,100) -> none");
+
+    test_group("round robin cycles");
+    var inst2 = n_instrument_new(str_from("rr"));
+    var g0 = n_zone_new(0);
+    g0 = n_zone_with_key_range(g0, 60, 72);
+    g0 = n_zone_with_group(g0, 1);
+    var g1 = n_zone_new(1);
+    g1 = n_zone_with_key_range(g1, 60, 72);
+    g1 = n_zone_with_group(g1, 1);
+    var g2 = n_zone_new(2);
+    g2 = n_zone_with_key_range(g2, 60, 72);
+    g2 = n_zone_with_group(g2, 1);
+    n_instrument_add_zone(inst2, g0);
+    n_instrument_add_zone(inst2, g1);
+    n_instrument_add_zone(inst2, g2);
+    assert_eq(n_instrument_find_zone_rr(inst2, 66, 100), 0, "rr pick 0");
+    assert_eq(n_instrument_find_zone_rr(inst2, 66, 100), 1, "rr pick 1");
+    assert_eq(n_instrument_find_zone_rr(inst2, 66, 100), 2, "rr pick 2");
+    assert_eq(n_instrument_find_zone_rr(inst2, 66, 100), 0, "rr wraps to 0");
+
+    test_group("round robin ungrouped returns first");
+    var inst3 = n_instrument_new(str_from("ung"));
+    var u0 = n_zone_new(0);
+    u0 = n_zone_with_key_range(u0, 60, 72);
+    var u1 = n_zone_new(1);
+    u1 = n_zone_with_key_range(u1, 60, 72);
+    n_instrument_add_zone(inst3, u0);
+    n_instrument_add_zone(inst3, u1);
+    assert_eq(n_instrument_find_zone_rr(inst3, 66, 100), 0, "ungrouped returns first (call 1)");
+    assert_eq(n_instrument_find_zone_rr(inst3, 66, 100), 0, "ungrouped returns first (call 2)");
+
+    test_group("round robin no match");
+    var inst4 = n_instrument_new(str_from("nm"));
+    var nz = n_zone_new(0);
+    nz = n_zone_with_key_range(nz, 60, 72);
+    nz = n_zone_with_group(nz, 1);
+    n_instrument_add_zone(inst4, nz);
+    assert_eq(n_instrument_find_zone_rr(inst4, 50, 100), 0 - 1, "no match -> -1 (None)");
+    assert_eq(n_instrument_zone_count(inst4), 1, "zone_count == 1");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

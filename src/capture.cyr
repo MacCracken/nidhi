@@ -1,0 +1,275 @@
+# capture.cyr -- sample recording, silence trim, normalization, loop detection
+# Requires: alloc, vec, math, sample (NSample_*), naad (normalize, rms)
+#
+# Ports rust-old/src/capture.rs. "Use naad fully": normalize_peak -> naad normalize(buffer)
+# (scale peak to 1.0 in place), normalize_rms -> naad rms(buffer) + scale. trim_silence and
+# detect_loop_points are nidhi-specific and ported directly.
+
+# --- SampleRecorder ---
+#derive(accessors)
+struct NSampleRecorder {
+    buffer;
+    sample_rate;
+    channels;
+}
+
+#must_use
+fn n_recorder_new(sample_rate, channels) {
+    var ch = channels;
+    if (ch < 1) { ch = 1; }
+    if (ch > 2) { ch = 2; }
+    var r = alloc(sizeof(NSampleRecorder));
+    NSampleRecorder_set_buffer(r, vec_new());
+    NSampleRecorder_set_sample_rate(r, sample_rate);
+    NSampleRecorder_set_channels(r, ch);
+    return r;
+}
+
+# write(data) -- append all f64 elements of the vec `data` (interleaved) to the buffer.
+fn n_recorder_write(r, data) {
+    var buffer = NSampleRecorder_buffer(r);
+    var n = vec_len(data);
+    var i = 0;
+    while (i < n) {
+        vec_push(buffer, vec_get(data, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+#must_use
+fn n_recorder_frames(r) {
+    return vec_len(NSampleRecorder_buffer(r)) / NSampleRecorder_channels(r);
+}
+
+fn n_recorder_clear(r) {
+    vec_truncate(NSampleRecorder_buffer(r), 0);
+    return 0;
+}
+
+# finish() -> NSample owning the recorded buffer.
+#must_use
+fn n_recorder_finish(r) {
+    var buffer = NSampleRecorder_buffer(r);
+    var sr = NSampleRecorder_sample_rate(r);
+    if (NSampleRecorder_channels(r) == 2) {
+        return n_sample_from_stereo(buffer, sr);
+    }
+    return n_sample_from_mono(buffer, sr);
+}
+
+#must_use
+fn n_recorder_finish_processed(r, silence_threshold) {
+    var sample = n_recorder_finish(r);
+    n_trim_silence(sample, silence_threshold);
+    n_normalize_peak(sample);
+    return sample;
+}
+
+# --- trim_silence: remove leading + trailing silence (strict > threshold) ---
+fn n_trim_silence(sample, threshold) {
+    var thr = f64_max(threshold, 0);
+    var ch = NSample_channels(sample);
+    var frames = NSample_frames(sample);
+    if (frames == 0) { return 0; }
+    var data = NSample_data(sample);
+
+    var start = frames;
+    var found_start = 0;
+    var f = 0;
+    while (f < frames) {
+        if (found_start == 0) {
+            var c = 0;
+            var nonsilent = 0;
+            while (c < ch) {
+                if (f64_gt(f64_abs(vec_get(data, f * ch + c)), thr) == 1) { nonsilent = 1; }
+                c = c + 1;
+            }
+            if (nonsilent == 1) {
+                start = f;
+                found_start = 1;
+            }
+        }
+        f = f + 1;
+    }
+
+    var end = 0;
+    var found_end = 0;
+    var g = frames;
+    while (g > 0) {
+        g = g - 1;
+        if (found_end == 0) {
+            var c2 = 0;
+            var ns2 = 0;
+            while (c2 < ch) {
+                if (f64_gt(f64_abs(vec_get(data, g * ch + c2)), thr) == 1) { ns2 = 1; }
+                c2 = c2 + 1;
+            }
+            if (ns2 == 1) {
+                end = g + 1;
+                found_end = 1;
+            }
+        }
+    }
+
+    if (start >= end) {
+        vec_truncate(data, 0);
+        NSample_set_frames(sample, 0);
+        return 0;
+    }
+
+    var sample_start = start * ch;
+    var sample_end = end * ch;
+    var nd = vec_new();
+    var k = sample_start;
+    while (k < sample_end) {
+        vec_push(nd, vec_get(data, k));
+        k = k + 1;
+    }
+    NSample_set_data(sample, nd);
+    NSample_set_frames(sample, end - start);
+    return 0;
+}
+
+# --- normalize_peak: scale so loudest |sample| -> 1.0 (via naad) ---
+fn n_normalize_peak(sample) {
+    normalize(NSample_data(sample));
+    return 0;
+}
+
+# --- normalize_rms: scale to target RMS (naad rms + manual gain) ---
+fn n_normalize_rms(sample, target_rms) {
+    var data = NSample_data(sample);
+    if (vec_len(data) == 0) { return 0; }
+    var r = rms(data);
+    var eps = f64_div(F64_ONE, f64_from(10000000000));
+    if (f64_gt(r, eps) == 1) {
+        var gain = f64_div(target_rms, r);
+        var n = vec_len(data);
+        var i = 0;
+        while (i < n) {
+            vec_set(data, i, f64_mul(vec_get(data, i), gain));
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# --- detect_loop_points: zero-crossing + normalized cross-correlation ---
+# Returns a vec of pair pointers (each alloc(16): start at +0, end at +8), best score first,
+# at most 10. Empty if frames < min_loop_frames*2 or < 2 positive zero crossings.
+#must_use
+fn n_detect_loop_points(sample, min_loop_frames) {
+    var out = vec_new();
+    var frames = NSample_frames(sample);
+    if (frames < min_loop_frames * 2) { return out; }
+    var data = NSample_data(sample);
+    var ch = NSample_channels(sample);
+    var eps = f64_div(F64_ONE, f64_from(10000000000));
+
+    # 1. downmix to mono (mean over channels)
+    var mono = vec_new();
+    var f = 0;
+    while (f < frames) {
+        var s = 0;
+        var c = 0;
+        while (c < ch) {
+            s = f64_add(s, vec_get(data, f * ch + c));
+            c = c + 1;
+        }
+        vec_push(mono, f64_div(s, f64_from(ch)));
+        f = f + 1;
+    }
+
+    # 2. positive-going zero crossings: mono[i-1] <= 0 && mono[i] > 0
+    var crossings = vec_new();
+    var i = 1;
+    var mlen = vec_len(mono);
+    while (i < mlen) {
+        if (f64_le(vec_get(mono, i - 1), 0) == 1) {
+            if (f64_gt(vec_get(mono, i), 0) == 1) { vec_push(crossings, i); }
+        }
+        i = i + 1;
+    }
+    if (vec_len(crossings) < 2) { return out; }
+
+    # 3. score candidate pairs
+    var compare_len = 64;
+    if (frames / 4 < compare_len) { compare_len = frames / 4; }
+    var c_starts = vec_new();
+    var c_ends = vec_new();
+    var c_scores = vec_new();
+    var ncross = vec_len(crossings);
+    var ci = 0;
+    while (ci < ncross) {
+        var start = vec_get(crossings, ci);
+        var cj = ci + 1;
+        while (cj < ncross) {
+            var end = vec_get(crossings, cj);
+            if (end - start >= min_loop_frames) {
+                if (start + compare_len <= frames) {
+                    if (end + compare_len <= frames) {
+                        var dot = 0;
+                        var na = 0;
+                        var nb = 0;
+                        var k = 0;
+                        while (k < compare_len) {
+                            var a = vec_get(mono, start + k);
+                            var b = vec_get(mono, end + k);
+                            dot = f64_add(dot, f64_mul(a, b));
+                            na = f64_add(na, f64_mul(a, a));
+                            nb = f64_add(nb, f64_mul(b, b));
+                            k = k + 1;
+                        }
+                        var denom = f64_sqrt(f64_mul(na, nb));
+                        var score = 0;
+                        if (f64_gt(denom, eps) == 1) { score = f64_div(dot, denom); }
+                        vec_push(c_starts, start);
+                        vec_push(c_ends, end);
+                        vec_push(c_scores, score);
+                    }
+                }
+            }
+            cj = cj + 1;
+        }
+        # 100-candidate cap: checked once per OUTER iteration
+        if (vec_len(c_starts) > 100) { ci = ncross; } else { ci = ci + 1; }
+    }
+
+    # 4. selection sort by score DESCENDING
+    var ncand = vec_len(c_starts);
+    var a2 = 0;
+    while (a2 < ncand) {
+        var best = a2;
+        var b2 = a2 + 1;
+        while (b2 < ncand) {
+            if (f64_gt(vec_get(c_scores, b2), vec_get(c_scores, best)) == 1) { best = b2; }
+            b2 = b2 + 1;
+        }
+        if (best != a2) {
+            var ts = vec_get(c_starts, a2);
+            vec_set(c_starts, a2, vec_get(c_starts, best));
+            vec_set(c_starts, best, ts);
+            var te = vec_get(c_ends, a2);
+            vec_set(c_ends, a2, vec_get(c_ends, best));
+            vec_set(c_ends, best, te);
+            var tsc = vec_get(c_scores, a2);
+            vec_set(c_scores, a2, vec_get(c_scores, best));
+            vec_set(c_scores, best, tsc);
+        }
+        a2 = a2 + 1;
+    }
+
+    # 5. top 10 (start,end) pairs
+    var take = ncand;
+    if (take > 10) { take = 10; }
+    var t = 0;
+    while (t < take) {
+        var pair = alloc(16);
+        store64(pair, vec_get(c_starts, t));
+        store64(pair + 8, vec_get(c_ends, t));
+        vec_push(out, pair);
+        t = t + 1;
+    }
+    return out;
+}

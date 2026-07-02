@@ -1,0 +1,97 @@
+# instrument.cyr -- Instrument: zone collection + round-robin voice selection
+# Requires: alloc, vec, zone (n_zone_matches, NZone_group, NZone_sample_id)
+#
+# Ports rust-old/src/instrument.rs. zones and rr_counters are stdlib vecs. rr_counters is
+# indexed BY GROUP NUMBER (length >= max_group+1); group 0 is ungrouped and uses no counter.
+# The RR counter is a post-incremented u32 with 2^32 wrap. find_zone_rr returns a 0-based
+# zone index, or -1 for None (Rust's Option<(usize,&Zone)>).
+
+#derive(accessors)
+struct NInstrument {
+    name;
+    zones;
+    rr_counters;
+}
+
+#must_use
+fn n_instrument_new(name) {
+    var inst = alloc(sizeof(NInstrument));
+    NInstrument_set_name(inst, name);
+    NInstrument_set_zones(inst, vec_new());
+    NInstrument_set_rr_counters(inst, vec_new());
+    return inst;
+}
+
+# Grow rr_counters to at least `needed` length, zero-filled (Rust Vec::resize(n, 0)).
+fn n_instrument_ensure_counters(inst, needed) {
+    var rr = NInstrument_rr_counters(inst);
+    while (vec_len(rr) < needed) { vec_push(rr, 0); }
+    return 0;
+}
+
+fn n_instrument_add_zone(inst, zone) {
+    var zones = NInstrument_zones(inst);
+    vec_push(zones, zone);
+    var group = NZone_group(zone);
+    if (group > 0) {
+        n_instrument_ensure_counters(inst, group + 1);
+    }
+    return 0;
+}
+
+# find_zones(note, vel) -> vec of matching NZone pointers (in zone order).
+#must_use
+fn n_instrument_find_zones(inst, note, vel) {
+    var zones = NInstrument_zones(inst);
+    var out = vec_new();
+    var n = vec_len(zones);
+    var i = 0;
+    while (i < n) {
+        var z = vec_get(zones, i);
+        if (n_zone_matches(z, note, vel) == 1) { vec_push(out, z); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# find_zone_rr(note, vel) -> 0-based zone index, or -1 if no zone matches.
+# The RR group is the group of the FIRST matching zone; only same-group matches
+# participate. Ungrouped (group 0) always returns the first match.
+fn n_instrument_find_zone_rr(inst, note, vel) {
+    var zones = NInstrument_zones(inst);
+    var n = vec_len(zones);
+    var matching = vec_new();
+    var i = 0;
+    while (i < n) {
+        var z = vec_get(zones, i);
+        if (n_zone_matches(z, note, vel) == 1) { vec_push(matching, i); }
+        i = i + 1;
+    }
+    if (vec_len(matching) == 0) { return (0 - 1); }
+
+    var first_match = vec_get(matching, 0);
+    var group = NZone_group(vec_get(zones, first_match));
+    if (group == 0) { return first_match; }
+
+    var group_matches = vec_new();
+    var j = 0;
+    var m = vec_len(matching);
+    while (j < m) {
+        var idx = vec_get(matching, j);
+        if (NZone_group(vec_get(zones, idx)) == group) { vec_push(group_matches, idx); }
+        j = j + 1;
+    }
+    if (vec_len(group_matches) == 0) { return (0 - 1); }
+
+    n_instrument_ensure_counters(inst, group + 1);
+    var rr = NInstrument_rr_counters(inst);
+    var counter = vec_get(rr, group);
+    var pick = counter % vec_len(group_matches);
+    vec_set(rr, group, (counter + 1) & 0xFFFFFFFF);
+    return vec_get(group_matches, pick);
+}
+
+#must_use
+fn n_instrument_zone_count(inst) {
+    return vec_len(NInstrument_zones(inst));
+}

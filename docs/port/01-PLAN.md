@@ -57,10 +57,10 @@ docs/port/          this plan + the 13 recon briefs (10-26)
 | 4 | `envelope.cyr` | envelope.rs | **naad** | ✅ done (envelope.tcyr 19/0). naad-first: no_std fallback/EnvState/tick_no_std deleted; = NAdsrConfig + naad-Adsr builder + thin wrappers |
 | 5 | `zone.cyr` | zone.rs | env, loop_mode | ✅ done (zone.tcyr 33/0). 32 fields + VelocityCurve/FilterMode + matches()/playback_ratio() |
 | 6 | `sample.cyr` | sample.rs | vec, math | ✅ done (sample.tcyr 25/0). NSample (vec-of-f64 buffers), cubic-hermite interp, energy detect_onsets (naad's is spectral-flux, different), SampleBank. SampleId = bare i64 |
-| 7 | `instrument.cyr` | instrument.rs | zone | **NEXT**: zone collection, round-robin (u32-wrap counter per group) |
-| 8 | `stretch.cyr` | stretch.rs | vec, math | WSOLA/OLA; hot loops `#inline` |
+| 7 | `instrument.cyr` | instrument.rs | zone | ✅ done (instrument.tcyr 13/0). find_zones + round-robin (u32-wrap counter per group) |
+| 8 | `stretch.cyr` | stretch.rs | vec, math | **NEXT**: WSOLA/OLA; hot loops `#inline` |
 | 9 | `effect_chain.cyr` | effect_chain.rs | **naad** | 5-slot chain over naad effects |
-| 10 | `capture.cyr` | capture.rs | vec, math | record/trim/normalize/loop-detect |
+| 10 | `capture.cyr` | capture.rs | vec, math, **naad** | ✅ done (capture.tcyr 17/0). SampleRecorder, trim_silence, normalize_peak/rms→naad, detect_loop_points |
 | 11 | `sfz.cyr` | sfz.rs | str, hashmap | text parser (40+ opcodes); fuzz |
 | 12 | `sf2.cyr` | sf2.rs | vec | RIFF binary parser; fuzz |
 | 13 | `io.cyr` | io.rs | **shravan** | WAV load/stream |
