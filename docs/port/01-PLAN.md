@@ -65,7 +65,7 @@ docs/port/          this plan + the 13 recon briefs (10-26)
 | 10 | `capture.cyr` | capture.rs | vec, math, **naad** | ✅ done (capture.tcyr 17/0). SampleRecorder, trim_silence, normalize_peak/rms→naad, detect_loop_points |
 | 11 | `sfz.cyr` | sfz.rs | str, hashmap | text parser (40+ opcodes); fuzz |
 | 12 | `sf2.cyr` | sf2.rs | vec | RIFF binary parser; fuzz |
-| 13 | `io.cyr` | io.rs | **shravan** | WAV load/stream |
+| 13 | `io.cyr` | io.rs | **shravan** | ✅ done (io.tcyr 18/0). load_wav_from_memory + load_wav (file_stem) + StreamingWavReader (open/read_chunk/read_all) via shravan wav_decode/decode_file/wav_stream_*. Toolchain pin bumped 6.3.33→6.3.34 |
 | 14 | `engine.cyr` | engine.rs | **naad**, all above | core engine, voice mgmt, render loop — LAST |
 
 ## Parity test/bench/fuzz suites to build (mirror hisab's split)

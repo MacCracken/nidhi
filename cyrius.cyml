@@ -5,7 +5,7 @@ description = "nidhi — Sample playback engine (Cyrius port): key/velocity zone
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/nidhi"
 language = "cyrius"
-cyrius = "6.3.33"
+cyrius = "6.3.34"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -27,6 +27,7 @@ modules = [
     "src/capture.cyr",
     "src/stretch.cyr",
     "src/effect_chain.cyr",
+    "src/io.cyr",
 ]
 
 [deps]

@@ -1,0 +1,216 @@
+# io.cyr -- WAV loading + streaming (behind the Rust `io` feature; uses shravan)
+# Requires: alloc, vec, string (strlen), str (str_new), syscalls/fs (file_open/read/write/close,
+#           memcpy, load8/store8), sample (n_sample_from_mono/stereo/with_name), error (ERR_IMPORT),
+#           shravan (wav_decode, decode_file, decode_result_info/samples, fmtinfo_channels/
+#           sample_rate/total_samples, wav_stream_new/feed/flush, stream_evt_type/data,
+#           STREAM_EVT_HEADER/SAMPLES/END)
+#
+# Ports rust-old/src/io.rs. Samples are f64 bit patterns end-to-end (shravan decodes to f64), so
+# the Rust Vec<f32> boundary conversions are no-ops here. All failures collapse to ERR_IMPORT.
+# Success returns a positive Sample pointer; failure returns the negative ERR_IMPORT code.
+
+# n_read_file(path, out_len) -> heap byte buffer (or 0 on error); writes byte count to out_len.
+# Mirrors shravan's decode_file read loop (grow-and-read).
+fn n_read_file(path, out_len) {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    var buf_cap = 1048576;
+    var buf = alloc(buf_cap);
+    var total = 0;
+    var reading = 1;
+    while (reading == 1) {
+        var avail = buf_cap - total;
+        if (avail <= 0) {
+            var new_cap = buf_cap * 2;
+            var new_buf = alloc(new_cap);
+            memcpy(new_buf, buf, total);
+            buf = new_buf;
+            buf_cap = new_cap;
+            avail = buf_cap - total;
+        }
+        var n = file_read(fd, buf + total, avail);
+        if (n <= 0) { reading = 0; } else { total = total + n; }
+    }
+    file_close(fd);
+    store64(out_len, total);
+    return buf;
+}
+
+# n_file_stem(path cstr) -> a new Str of the basename without extension (Rust Path::file_stem).
+# A leading '.' is NOT treated as an extension separator (".bashrc" -> ".bashrc").
+#must_use
+fn n_file_stem(path) {
+    var len = strlen(path);
+    var slash = 0 - 1;
+    var i = 0;
+    while (i < len) {
+        if (load8(path + i) == 47) { slash = i; }
+        i = i + 1;
+    }
+    var start = slash + 1;
+    var dot = 0 - 1;
+    var j = start;
+    while (j < len) {
+        if (load8(path + j) == 46) { dot = j; }
+        j = j + 1;
+    }
+    var end = len;
+    if (dot > start) { end = dot; }
+    return str_new(path + start, end - start);
+}
+
+# Build a Sample from a decode_result (mono if channels==1 else stereo).
+#must_use
+fn n_sample_from_decode(dr) {
+    var info = decode_result_info(dr);
+    var samples = decode_result_samples(dr);
+    var channels = fmtinfo_channels(info);
+    var sample_rate = fmtinfo_sample_rate(info);
+    if (channels == 1) { return n_sample_from_mono(samples, sample_rate); }
+    return n_sample_from_stereo(samples, sample_rate);
+}
+
+# load_wav_from_memory(data, len) -> Sample pointer, or ERR_IMPORT.
+#must_use
+fn n_load_wav_from_memory(data, len) {
+    var dr = wav_decode(data, len);
+    if (dr < 0) { return ERR_IMPORT; }
+    return n_sample_from_decode(dr);
+}
+
+# load_wav(path) -> Sample pointer (named from the file stem), or ERR_IMPORT.
+#must_use
+fn n_load_wav(path) {
+    var dr = decode_file(path);
+    if (dr < 0) { return ERR_IMPORT; }
+    var sample = n_sample_from_decode(dr);
+    return n_sample_with_name(sample, n_file_stem(path));
+}
+
+# --- StreamingWavReader ---
+#derive(accessors)
+struct NStreamReader {
+    decoder;
+    info;
+    pending;
+    channels;
+    sample_rate;
+    total_frames;
+    frames_read;
+    finished;
+    file_data;
+    file_len;
+    file_offset;
+}
+
+# open(path) -> NStreamReader pointer, or ERR_IMPORT. Does a full decode up front for metadata.
+#must_use
+fn n_stream_reader_open(path) {
+    var lenslot = alloc(8);
+    var file_data = n_read_file(path, lenslot);
+    if (file_data == 0) { return ERR_IMPORT; }
+    var file_len = load64(lenslot);
+    var dr = wav_decode(file_data, file_len);
+    if (dr < 0) { return ERR_IMPORT; }
+    var info = decode_result_info(dr);
+    var r = alloc(sizeof(NStreamReader));
+    NStreamReader_set_decoder(r, wav_stream_new(0));
+    NStreamReader_set_info(r, info);
+    NStreamReader_set_pending(r, vec_new());
+    NStreamReader_set_channels(r, fmtinfo_channels(info));
+    NStreamReader_set_sample_rate(r, fmtinfo_sample_rate(info));
+    NStreamReader_set_total_frames(r, fmtinfo_total_samples(info));
+    NStreamReader_set_frames_read(r, 0);
+    NStreamReader_set_finished(r, 0);
+    NStreamReader_set_file_data(r, file_data);
+    NStreamReader_set_file_len(r, file_len);
+    NStreamReader_set_file_offset(r, 0);
+    return r;
+}
+
+# Append every SAMPLES event's data vec into pending; set finished on END; stash HEADER info.
+fn n_stream_drain_events(reader, events) {
+    var pending = NStreamReader_pending(reader);
+    var ne = vec_len(events);
+    var ei = 0;
+    while (ei < ne) {
+        var evt = vec_get(events, ei);
+        var etype = stream_evt_type(evt);
+        if (etype == STREAM_EVT_HEADER) {
+            NStreamReader_set_info(reader, stream_evt_data(evt));
+        } else {
+            if (etype == STREAM_EVT_SAMPLES) {
+                var s = stream_evt_data(evt);
+                var ns = vec_len(s);
+                var si = 0;
+                while (si < ns) { vec_push(pending, vec_get(s, si)); si = si + 1; }
+            } else {
+                if (etype == STREAM_EVT_END) { NStreamReader_set_finished(reader, 1); }
+            }
+        }
+        ei = ei + 1;
+    }
+    return 0;
+}
+
+# read_chunk(chunk_frames) -> vec of interleaved f64 samples (empty when done).
+fn n_stream_reader_read_chunk(reader, chunk_frames) {
+    var channels = NStreamReader_channels(reader);
+    var remaining = NStreamReader_total_frames(reader) - NStreamReader_frames_read(reader);
+    var frames_to_read = chunk_frames;
+    if (remaining < frames_to_read) { frames_to_read = remaining; }
+    if (frames_to_read == 0) { return vec_new(); }
+    var samples_needed = frames_to_read * channels;
+    var pending = NStreamReader_pending(reader);
+    var decoder = NStreamReader_decoder(reader);
+
+    var looping = 1;
+    while (looping == 1) {
+        if (vec_len(pending) >= samples_needed) {
+            looping = 0;
+        } else {
+            if (NStreamReader_finished(reader) == 1) {
+                looping = 0;
+            } else {
+                var file_offset = NStreamReader_file_offset(reader);
+                var file_len = NStreamReader_file_len(reader);
+                if (file_offset < file_len) {
+                    var end = file_offset + 4096;
+                    if (end > file_len) { end = file_len; }
+                    var chunk_ptr = NStreamReader_file_data(reader) + file_offset;
+                    NStreamReader_set_file_offset(reader, end);
+                    var events = wav_stream_feed(decoder, chunk_ptr, end - file_offset);
+                    n_stream_drain_events(reader, events);
+                } else {
+                    var fevents = wav_stream_flush(decoder);
+                    n_stream_drain_events(reader, fevents);
+                    NStreamReader_set_finished(reader, 1);
+                }
+            }
+        }
+    }
+
+    var take = samples_needed;
+    if (vec_len(pending) < take) { take = vec_len(pending); }
+    var result = vec_new();
+    var ti = 0;
+    while (ti < take) { vec_push(result, vec_get(pending, ti)); ti = ti + 1; }
+    # drain the first `take` samples from pending
+    var newpending = vec_new();
+    var plen = vec_len(pending);
+    var pi = take;
+    while (pi < plen) { vec_push(newpending, vec_get(pending, pi)); pi = pi + 1; }
+    NStreamReader_set_pending(reader, newpending);
+    NStreamReader_set_frames_read(reader, NStreamReader_frames_read(reader) + take / channels);
+    return result;
+}
+
+# read_all() -> Sample built from the whole stream.
+#must_use
+fn n_stream_reader_read_all(reader) {
+    var data = n_stream_reader_read_chunk(reader, NStreamReader_total_frames(reader));
+    if (NStreamReader_channels(reader) == 1) {
+        return n_sample_from_mono(data, NStreamReader_sample_rate(reader));
+    }
+    return n_sample_from_stereo(data, NStreamReader_sample_rate(reader));
+}

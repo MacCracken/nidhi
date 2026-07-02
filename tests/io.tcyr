@@ -1,0 +1,77 @@
+# io.tcyr -- parity tests for src/io.cyr (ports rust-old/src/io.rs #[test]s + file/stream round-trip).
+
+include "lib/sankoch.cyr"
+include "lib/shravan.cyr"
+include "src/error.cyr"
+include "src/sample.cyr"
+include "src/io.cyr"
+
+fn write_file(path, buf, len) {
+    var fd = file_open(path, 577, 420);   # O_WRONLY|O_CREAT|O_TRUNC, mode 0644
+    if (fd < 0) { return 0 - 1; }
+    file_write(fd, buf, len);
+    file_close(fd);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("load_wav_from_memory mono");
+    var mono = vec_new();
+    vec_push(mono, f64_div(f64_from(1), f64_from(10)));
+    vec_push(mono, f64_div(f64_from(2), f64_from(10)));
+    vec_push(mono, f64_div(f64_from(3), f64_from(10)));
+    vec_push(mono, f64_div(f64_from(4), f64_from(10)));
+    var wavbuf = alloc(8192);
+    var nbytes = wav_encode(mono, 44100, 1, PCM_F32, wavbuf);
+    assert(nbytes > 0, "wav_encode mono produced bytes");
+    var sm = n_load_wav_from_memory(wavbuf, nbytes);
+    assert(sm > 0, "load mono succeeded (positive ptr)");
+    assert_eq(NSample_frames(sm), 4, "mono frames 4");
+    assert_eq(NSample_channels(sm), 1, "mono channels 1");
+    assert_eq(NSample_sample_rate(sm), 44100, "mono sample_rate 44100");
+
+    test_group("load_wav_from_memory stereo");
+    var st = vec_new();
+    vec_push(st, f64_div(f64_from(1), f64_from(10)));
+    vec_push(st, f64_neg(f64_div(f64_from(1), f64_from(10))));
+    vec_push(st, f64_div(f64_from(2), f64_from(10)));
+    vec_push(st, f64_neg(f64_div(f64_from(2), f64_from(10))));
+    var wavbuf2 = alloc(8192);
+    var nbytes2 = wav_encode(st, 48000, 2, PCM_F32, wavbuf2);
+    var ss = n_load_wav_from_memory(wavbuf2, nbytes2);
+    assert_eq(NSample_frames(ss), 2, "stereo frames 2");
+    assert_eq(NSample_channels(ss), 2, "stereo channels 2");
+    assert_eq(NSample_sample_rate(ss), 48000, "stereo sample_rate 48000");
+
+    test_group("load_wav_from_memory invalid");
+    var badbuf = alloc(4);
+    store8(badbuf, 0);
+    store8(badbuf + 1, 1);
+    store8(badbuf + 2, 2);
+    store8(badbuf + 3, 3);
+    assert_eq(n_is_err(n_load_wav_from_memory(badbuf, 4)), 1, "invalid bytes -> error");
+
+    test_group("load_wav file + file_stem");
+    write_file("/tmp/nidhi_io_test.wav", wavbuf, nbytes);
+    var lw = n_load_wav("/tmp/nidhi_io_test.wav");
+    assert(lw > 0, "load_wav succeeded");
+    assert_eq(NSample_frames(lw), 4, "load_wav frames 4");
+    assert_eq(NSample_channels(lw), 1, "load_wav channels 1");
+    assert_eq(str_eq(NSample_name(lw), str_from("nidhi_io_test")), 1, "name == file stem");
+
+    test_group("streaming reader");
+    var srd = n_stream_reader_open("/tmp/nidhi_io_test.wav");
+    assert(srd > 0, "stream open succeeded");
+    assert_eq(NStreamReader_channels(srd), 1, "stream channels 1");
+    assert_eq(NStreamReader_sample_rate(srd), 44100, "stream sample_rate 44100");
+    assert_eq(NStreamReader_total_frames(srd), 4, "stream total_frames 4");
+    var allsmp = n_stream_reader_read_all(srd);
+    assert_eq(NSample_frames(allsmp), 4, "stream read_all frames 4");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
