@@ -1,0 +1,94 @@
+# zone.tcyr -- parity tests for src/zone.cyr (ports rust-old/src/zone.rs #[test]s + curve/clamp coverage).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/error.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+include "src/envelope.cyr"
+include "src/zone.cyr"
+
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("velocity curve");
+    assert_eq(f64_to(n_velocity_curve_apply(VEL_CURVE_LINEAR, 127)), 1, "Linear(127)=1.0");
+    assert_eq(n_velocity_curve_apply(VEL_CURVE_LINEAR, 0), 0, "Linear(0)=0.0");
+    assert_eq(f64_to(n_velocity_curve_apply(VEL_CURVE_CONCAVE, 127)), 1, "Concave(127)=1.0");
+    assert_eq(f64_to(n_velocity_curve_apply(VEL_CURVE_CONVEX, 127)), 1, "Convex(127)=1.0");
+    assert_eq(approx(n_velocity_curve_apply(VEL_CURVE_CONVEX, 64),
+        f64_sqrt(f64_div(f64_from(64), f64_from(127))), f64_div(F64_ONE, f64_from(10000))), 1,
+        "Convex(64)=sqrt(64/127)");
+    assert_eq(f64_to(n_velocity_curve_apply(VEL_CURVE_SWITCH, 65)), 1, "Switch(65)=1.0");
+    assert_eq(n_velocity_curve_apply(VEL_CURVE_SWITCH, 64), 0, "Switch(64)=0.0");
+    assert_eq(n_velocity_curve_apply(VEL_CURVE_SWITCH, 0), 0, "Switch(0)=0.0");
+
+    test_group("zone defaults");
+    var zd = n_zone_new(7);
+    assert_eq(NZone_sample_id(zd), 7, "sample_id set to 7");
+    assert_eq(NZone_key_lo(zd), 0, "key_lo default 0");
+    assert_eq(NZone_key_hi(zd), 127, "key_hi default 127");
+    assert_eq(NZone_vel_lo(zd), 1, "vel_lo default 1");
+    assert_eq(NZone_root_note(zd), 60, "root_note default 60");
+    assert_eq(NZone_loop_mode(zd), 0, "loop_mode default OneShot(0)");
+    assert_eq(NZone_filter_type(zd), 0, "filter_type default LowPass(0)");
+    assert_eq(NZone_vel_curve(zd), 0, "vel_curve default Linear(0)");
+    assert_eq(NZone_adsr(zd), 0, "adsr default None (null)");
+    assert_eq(NZone_fileg(zd), 0, "fileg default None (null)");
+    assert_eq(approx(NZone_filter_resonance(zd), f64_div(f64_from(707), f64_from(1000)),
+        f64_div(F64_ONE, f64_from(1000))), 1, "filter_resonance default ~0.707");
+
+    test_group("zone matches");
+    var zm = n_zone_new(0);
+    zm = n_zone_with_key_range(zm, 60, 72);
+    zm = n_zone_with_vel_range(zm, 1, 127);
+    assert_eq(n_zone_matches(zm, 66, 100), 1, "note 66 vel 100 matches");
+    assert_eq(n_zone_matches(zm, 59, 100), 0, "note 59 below key range");
+    assert_eq(n_zone_matches(zm, 73, 100), 0, "note 73 above key range");
+
+    test_group("playback ratio");
+    var zr = n_zone_new(0);
+    zr = n_zone_with_root_note(zr, 60);
+    assert_eq(approx(n_zone_playback_ratio(zr, 60), F64_ONE, f64_div(F64_ONE, f64_from(1000))), 1,
+        "ratio at root ~1.0");
+    assert_eq(approx(n_zone_playback_ratio(zr, 72), f64_from(2), f64_div(F64_ONE, f64_from(100))), 1,
+        "ratio one octave up ~2.0");
+    var zt = n_zone_new(0);
+    zt = n_zone_with_root_note(zt, 60);
+    zt = n_zone_with_tune(zt, f64_from(50));
+    var rt = n_zone_playback_ratio(zt, 60);
+    assert_eq(f64_gt(rt, F64_ONE), 1, "50-cent tuned ratio > 1.0");
+    assert_eq(f64_lt(rt, f64_div(f64_from(106), f64_from(100))), 1, "50-cent tuned ratio < 1.06");
+
+    test_group("zone clamps");
+    var zc = n_zone_new(0);
+    zc = n_zone_with_pan(zc, f64_from(5));
+    assert_eq(f64_to(NZone_pan(zc)), 1, "pan clamps to +1.0");
+    zc = n_zone_with_pan(zc, f64_neg(f64_from(5)));
+    assert_eq(f64_to(NZone_pan(zc)), 0 - 1, "pan clamps to -1.0");
+    zc = n_zone_with_time_stretch(zc, f64_from(10));
+    assert_eq(f64_to(NZone_time_stretch(zc)), 4, "time_stretch clamps to 4.0");
+    zc = n_zone_with_filter_resonance(zc, 0);
+    assert_eq(approx(NZone_filter_resonance(zc), f64_div(F64_ONE, f64_from(10)),
+        f64_div(F64_ONE, f64_from(1000))), 1, "resonance clamps up to 0.1");
+    zc = n_zone_with_tune(zc, f64_from(20000));
+    assert_eq(f64_to(NZone_tune_cents(zc)), 12800, "tune clamps to +12800");
+
+    test_group("zone adsr wiring");
+    var za = n_zone_new(0);
+    var cfg = n_adsr_config_new(10, 20, F64_ONE, 30);
+    za = n_zone_with_adsr(za, cfg);
+    assert_eq(NZone_adsr(za), cfg, "adsr stores the config pointer (Some)");
+    assert_eq(NAdsrConfig_attack_samples(NZone_adsr(za)), 10, "adsr config readable through zone");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,136 @@
+# sample.tcyr -- parity tests for src/sample.cyr (ports rust-old/src/sample.rs #[test]s).
+
+include "src/sample.cyr"
+
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+# push n copies of val (f64 bits) into vec v
+fn push_n(v, val, n) {
+    var i = 0;
+    while (i < n) { vec_push(v, val); i = i + 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var tol = f64_div(F64_ONE, f64_from(100));      # 0.01
+    var half = F64_HALF;
+    var quarter = f64_div(f64_from(1), f64_from(4));
+    var threeq = f64_div(f64_from(3), f64_from(4));
+
+    test_group("sample from_mono");
+    var md = vec_new();
+    push_n(md, half, 100);
+    var sm = n_sample_from_mono(md, 44100);
+    sm = n_sample_with_name(sm, str_from("test"));
+    assert_eq(NSample_channels(sm), 1, "mono channels == 1");
+    assert_eq(NSample_frames(sm), 100, "mono frames == 100");
+    assert_eq(NSample_sample_rate(sm), 44100, "sample_rate == 44100");
+    assert_eq(str_eq(NSample_name(sm), str_from("test")), 1, "name == test");
+
+    test_group("cubic hermite");
+    # linear ramp 0,1,2,3 at t=0.5 -> 1.5
+    assert_eq(approx(n_cubic_hermite(f64_from(0), f64_from(1), f64_from(2), f64_from(3), half),
+        f64_div(f64_from(3), f64_from(2)), tol), 1, "cubic_hermite(0,1,2,3,0.5) ~ 1.5");
+
+    test_group("read_cubic spike");
+    var spike = vec_new();
+    vec_push(spike, f64_from(0));
+    vec_push(spike, f64_from(0));
+    vec_push(spike, F64_ONE);
+    vec_push(spike, f64_from(0));
+    vec_push(spike, f64_from(0));
+    var ss = n_sample_from_mono(spike, 44100);
+    assert_eq(approx(n_sample_read_cubic(ss, f64_from(2)), F64_ONE, tol), 1, "read_cubic(2.0) ~ 1.0 at spike");
+
+    test_group("read_interpolated ramp");
+    var ramp = vec_new();
+    vec_push(ramp, f64_from(0));
+    vec_push(ramp, quarter);
+    vec_push(ramp, half);
+    vec_push(ramp, threeq);
+    vec_push(ramp, F64_ONE);
+    var rs = n_sample_from_mono(ramp, 44100);
+    assert_eq(approx(n_sample_read_interpolated(rs, f64_from(2)), half, tol), 1, "read_interp(2.0) ~ 0.5");
+    assert_eq(approx(n_sample_read_interpolated(rs, f64_div(f64_from(5), f64_from(2))),
+        f64_div(f64_from(625), f64_from(1000)), tol), 1, "read_interp(2.5) ~ 0.625 (linear)");
+
+    test_group("read_stereo_interpolated");
+    var st = vec_new();
+    var q = 0;
+    while (q < 4) { vec_push(st, F64_ONE); vec_push(st, f64_from(0)); q = q + 1; }   # L=1,R=0 x4 frames
+    var sts = n_sample_from_stereo(st, 44100);
+    var out = alloc(16);
+    n_sample_read_stereo_interpolated(sts, f64_div(f64_from(3), f64_from(2)), out);   # 1.5
+    assert_eq(approx(load64(out), F64_ONE, tol), 1, "stereo L ~ 1.0");
+    assert_eq(approx(load64(out + 8), f64_from(0), tol), 1, "stereo R ~ 0.0");
+    # mono duplicated to both channels
+    var mono2 = vec_new();
+    push_n(mono2, half, 4);
+    var ms2 = n_sample_from_mono(mono2, 44100);
+    n_sample_read_stereo_interpolated(ms2, f64_div(f64_from(3), f64_from(2)), out);
+    assert_eq(approx(load64(out), half, tol), 1, "mono->stereo L ~ 0.5");
+    assert_eq(approx(load64(out + 8), half, tol), 1, "mono->stereo R ~ 0.5");
+
+    test_group("sample bank");
+    var bank = n_sample_bank_new();
+    assert_eq(n_sample_bank_is_empty(bank), 1, "new bank is empty");
+    var id = n_sample_bank_add(bank, ss);
+    assert_eq(id, 0, "first add -> id 0");
+    assert_eq(n_sample_bank_len(bank), 1, "bank len 1 after add");
+    assert(n_sample_bank_get(bank, 0) != 0, "get(0) returns a sample");
+    assert_eq(n_sample_bank_get(bank, 5), 0, "get out-of-range -> 0");
+
+    test_group("detect_onsets transient");
+    var big = vec_new();
+    var nine = f64_div(f64_from(9), f64_from(10));       # 0.9
+    var f = 0;
+    while (f < 8000) {
+        if (f >= 4000) {
+            if (f < 4500) { vec_push(big, nine); } else { vec_push(big, f64_from(0)); }
+        } else {
+            vec_push(big, f64_from(0));
+        }
+        f = f + 1;
+    }
+    var bs = n_sample_from_mono(big, 44100);
+    n_sample_detect_onsets(bs, f64_div(F64_ONE, f64_from(10)), 256);   # threshold 0.1
+    var slices = NSample_slices(bs);
+    assert(vec_len(slices) > 0, "detect_onsets finds >=1 transient");
+    var first = vec_get(slices, 0);
+    assert(first >= 3500, "first slice >= 3500");
+    assert(first <= 5000, "first slice <= 5000");
+
+    test_group("detect_onsets edge cases");
+    var sil = vec_new();
+    push_n(sil, f64_from(0), 4000);
+    var sils = n_sample_from_mono(sil, 44100);
+    n_sample_detect_onsets(sils, f64_div(F64_ONE, f64_from(10)), 256);
+    assert_eq(vec_len(NSample_slices(sils)), 0, "silence -> no slices");
+    # very short sample must TERMINATE (no infinite loop)
+    var shortv = vec_new();
+    push_n(shortv, half, 3);
+    var shorts = n_sample_from_mono(shortv, 44100);
+    n_sample_detect_onsets(shorts, f64_div(F64_ONE, f64_from(10)), 1);
+    assert_eq(1, 1, "3-frame detect_onsets terminates");
+
+    test_group("manual slices");
+    var man = vec_new();
+    vec_push(man, 100);
+    vec_push(man, 500);
+    vec_push(man, 800);
+    var sample_m = n_sample_from_mono(vec_new(), 44100);
+    sample_m = n_sample_with_slices(sample_m, man);
+    var msl = NSample_slices(sample_m);
+    assert_eq(vec_get(msl, 0), 100, "slice[0]==100");
+    assert_eq(vec_get(msl, 1), 500, "slice[1]==500");
+    assert_eq(vec_get(msl, 2), 800, "slice[2]==800");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

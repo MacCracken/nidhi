@@ -1,0 +1,270 @@
+# zone.cyr -- Zone config: key/velocity mapping, tuning, filter, envelope, LFO, bus
+# Requires: math (f64_*), loop_mode (LOOP_*), envelope (NAdsrConfig ptrs stored in adsr/fileg)
+#
+# Ports rust-old/src/zone.rs. Every f32 -> f64 bit pattern. Option<AdsrConfig> (adsr, fileg)
+# -> nullable NAdsrConfig pointer (0 == None). The builder setters mutate in place and return
+# the zone pointer so calls chain (z = n_zone_with_x(z, ...)). Clamps are load-bearing.
+
+# --- VelocityCurve (fieldless enum -> tag constants) ---
+var VEL_CURVE_LINEAR  = 0;
+var VEL_CURVE_CONVEX  = 1;
+var VEL_CURVE_CONCAVE = 2;
+var VEL_CURVE_SWITCH  = 3;
+
+# n_velocity_curve_apply(curve, vel) -> gain in 0..1 (f64 bits). vel is raw MIDI 0..127.
+# Linear: v; Convex: sqrt(v); Concave: v*v; Switch: 1.0 if vel>64 else 0.0 (raw vel, not v).
+#inline
+#must_use
+fn n_velocity_curve_apply(curve, vel) {
+    if (curve == VEL_CURVE_SWITCH) {
+        if (vel > 64) { return F64_ONE; }
+        return 0;
+    }
+    var v = f64_div(f64_from(vel), f64_from(127));
+    if (curve == VEL_CURVE_CONVEX) { return f64_sqrt(v); }
+    if (curve == VEL_CURVE_CONCAVE) { return f64_mul(v, v); }
+    return v;
+}
+
+# --- FilterMode (fieldless enum -> tag constants) ---
+var FILTER_LOWPASS  = 0;
+var FILTER_HIGHPASS = 1;
+var FILTER_BANDPASS = 2;
+var FILTER_NOTCH    = 3;
+
+# --- Zone (32 fields; order matches rust-old/src/zone.rs) ---
+#derive(accessors)
+struct NZone {
+    sample_id;
+    key_lo;
+    key_hi;
+    vel_lo;
+    vel_hi;
+    root_note;
+    tune_cents;
+    volume_db;
+    pan;
+    loop_mode;
+    loop_start;
+    loop_end;
+    crossfade_length;
+    sample_offset;
+    sample_end;
+    filter_cutoff;
+    filter_resonance;
+    filter_type;
+    filter_vel_track;
+    group;
+    choke_group;
+    vel_curve;
+    adsr;
+    fileg;
+    fileg_depth;
+    pitchlfo_rate;
+    pitchlfo_depth;
+    fillfo_rate;
+    fillfo_depth;
+    fil_keytrack;
+    time_stretch;
+    output_bus;
+}
+
+# n_zone_new(sample_id) -> Zone with all Rust defaults.
+#must_use
+fn n_zone_new(sample_id) {
+    var z = alloc(sizeof(NZone));
+    NZone_set_sample_id(z, sample_id);
+    NZone_set_key_lo(z, 0);
+    NZone_set_key_hi(z, 127);
+    NZone_set_vel_lo(z, 1);
+    NZone_set_vel_hi(z, 127);
+    NZone_set_root_note(z, 60);
+    NZone_set_tune_cents(z, 0);
+    NZone_set_volume_db(z, 0);
+    NZone_set_pan(z, 0);
+    NZone_set_loop_mode(z, LOOP_ONESHOT);
+    NZone_set_loop_start(z, 0);
+    NZone_set_loop_end(z, 0);
+    NZone_set_crossfade_length(z, 0);
+    NZone_set_sample_offset(z, 0);
+    NZone_set_sample_end(z, 0);
+    NZone_set_filter_cutoff(z, 0);
+    NZone_set_filter_resonance(z, f64_div(f64_from(707), f64_from(1000)));
+    NZone_set_filter_type(z, FILTER_LOWPASS);
+    NZone_set_filter_vel_track(z, 0);
+    NZone_set_group(z, 0);
+    NZone_set_choke_group(z, 0);
+    NZone_set_vel_curve(z, VEL_CURVE_LINEAR);
+    NZone_set_adsr(z, 0);
+    NZone_set_fileg(z, 0);
+    NZone_set_fileg_depth(z, 0);
+    NZone_set_pitchlfo_rate(z, 0);
+    NZone_set_pitchlfo_depth(z, 0);
+    NZone_set_fillfo_rate(z, 0);
+    NZone_set_fillfo_depth(z, 0);
+    NZone_set_fil_keytrack(z, 0);
+    NZone_set_time_stretch(z, 0);
+    NZone_set_output_bus(z, 0);
+    return z;
+}
+
+# --- Builder setters (mutate in place, return z; clamps replicate Rust exactly) ---
+
+fn n_zone_with_key_range(z, lo, hi) {
+    NZone_set_key_lo(z, lo);
+    NZone_set_key_hi(z, hi);
+    return z;
+}
+
+fn n_zone_with_vel_range(z, lo, hi) {
+    NZone_set_vel_lo(z, lo);
+    NZone_set_vel_hi(z, hi);
+    return z;
+}
+
+fn n_zone_with_root_note(z, note) {
+    NZone_set_root_note(z, note);
+    return z;
+}
+
+# tune_cents = clamp(cents, -12800, 12800)
+fn n_zone_with_tune(z, cents) {
+    NZone_set_tune_cents(z, f64_min(f64_max(cents, f64_from(0 - 12800)), f64_from(12800)));
+    return z;
+}
+
+# volume_db: no clamp
+fn n_zone_with_volume(z, db) {
+    NZone_set_volume_db(z, db);
+    return z;
+}
+
+# pan = clamp(pan, -1.0, 1.0)
+fn n_zone_with_pan(z, pan) {
+    NZone_set_pan(z, f64_min(f64_max(pan, f64_neg(F64_ONE)), F64_ONE));
+    return z;
+}
+
+fn n_zone_with_loop(z, mode, start, end) {
+    NZone_set_loop_mode(z, mode);
+    NZone_set_loop_start(z, start);
+    NZone_set_loop_end(z, end);
+    return z;
+}
+
+fn n_zone_with_crossfade(z, length) {
+    NZone_set_crossfade_length(z, length);
+    return z;
+}
+
+fn n_zone_with_sample_offset(z, offset) {
+    NZone_set_sample_offset(z, offset);
+    return z;
+}
+
+fn n_zone_with_sample_end(z, end) {
+    NZone_set_sample_end(z, end);
+    return z;
+}
+
+# filter_cutoff = max(cutoff, 0); filter_vel_track = clamp(vel_track, 0, 1)
+fn n_zone_with_filter(z, cutoff, vel_track) {
+    NZone_set_filter_cutoff(z, f64_max(cutoff, 0));
+    NZone_set_filter_vel_track(z, f64_min(f64_max(vel_track, 0), F64_ONE));
+    return z;
+}
+
+# filter_resonance = max(q, 0.1)
+fn n_zone_with_filter_resonance(z, q) {
+    NZone_set_filter_resonance(z, f64_max(q, f64_div(F64_ONE, f64_from(10))));
+    return z;
+}
+
+fn n_zone_with_filter_type(z, mode) {
+    NZone_set_filter_type(z, mode);
+    return z;
+}
+
+fn n_zone_with_group(z, group) {
+    NZone_set_group(z, group);
+    return z;
+}
+
+fn n_zone_with_choke_group(z, group) {
+    NZone_set_choke_group(z, group);
+    return z;
+}
+
+fn n_zone_with_velocity_curve(z, curve) {
+    NZone_set_vel_curve(z, curve);
+    return z;
+}
+
+# adsr = Some(config): store the NAdsrConfig pointer
+fn n_zone_with_adsr(z, config) {
+    NZone_set_adsr(z, config);
+    return z;
+}
+
+# fileg = Some(config); fileg_depth = clamp(depth_cents, -4800, 4800)
+fn n_zone_with_filter_envelope(z, config, depth_cents) {
+    NZone_set_fileg(z, config);
+    NZone_set_fileg_depth(z, f64_min(f64_max(depth_cents, f64_from(0 - 4800)), f64_from(4800)));
+    return z;
+}
+
+# pitchlfo_rate = max(rate, 0); pitchlfo_depth: no clamp
+fn n_zone_with_pitch_lfo(z, rate_hz, depth_cents) {
+    NZone_set_pitchlfo_rate(z, f64_max(rate_hz, 0));
+    NZone_set_pitchlfo_depth(z, depth_cents);
+    return z;
+}
+
+# fillfo_rate = max(rate, 0); fillfo_depth: no clamp
+fn n_zone_with_filter_lfo(z, rate_hz, depth_cents) {
+    NZone_set_fillfo_rate(z, f64_max(rate_hz, 0));
+    NZone_set_fillfo_depth(z, depth_cents);
+    return z;
+}
+
+# fil_keytrack = clamp(amount, 0, 1)
+fn n_zone_with_key_tracking(z, amount) {
+    NZone_set_fil_keytrack(z, f64_min(f64_max(amount, 0), F64_ONE));
+    return z;
+}
+
+# time_stretch = clamp(ratio, 0, 4)
+fn n_zone_with_time_stretch(z, ratio) {
+    NZone_set_time_stretch(z, f64_min(f64_max(ratio, 0), f64_from(4)));
+    return z;
+}
+
+fn n_zone_with_output_bus(z, bus) {
+    NZone_set_output_bus(z, bus);
+    return z;
+}
+
+# --- Behavioral methods ---
+
+# matches(note, vel) -> 1 if note/vel fall within this zone's inclusive ranges.
+#inline
+#must_use
+fn n_zone_matches(z, note, vel) {
+    if (note < NZone_key_lo(z)) { return 0; }
+    if (note > NZone_key_hi(z)) { return 0; }
+    if (vel < NZone_vel_lo(z)) { return 0; }
+    if (vel > NZone_vel_hi(z)) { return 0; }
+    return 1;
+}
+
+# playback_ratio(note) -> resampling ratio (f64 bits). 1.0 at root, x2 per octave.
+#   semitones = (note - root_note) + tune_cents / 100
+#   ratio     = 2^(semitones / 12)
+#inline
+#must_use
+fn n_zone_playback_ratio(z, note) {
+    var semitones = f64_add(
+        f64_sub(f64_from(note), f64_from(NZone_root_note(z))),
+        f64_div(NZone_tune_cents(z), f64_from(100)));
+    return f64_pow(f64_from(2), f64_div(semitones, f64_from(12)));
+}

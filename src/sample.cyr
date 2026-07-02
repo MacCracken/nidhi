@@ -1,0 +1,273 @@
+# sample.cyr -- Sample data, interpolation, onset detection, SampleBank
+# Requires: alloc, vec (vec_new/push/get/set/len/truncate), math (f64_*), f64_util
+#
+# Ports rust-old/src/sample.rs. Sample buffers are stdlib vecs of f64 bit patterns
+# (interleaved for stereo), matching how naad/shravan carry audio. SampleId is a bare
+# i64 bank index (the Rust newtype wrapper is dropped). The SIMD cubic-hermite path is
+# not ported (it was a bit-exact optimization of the scalar path). detect_onsets is
+# nidhi's own energy-based REX slicer -- naad's detect_onsets is a different
+# (spectral-flux) algorithm, so this is ported directly for feature parity.
+
+# --- Sample ---
+# Fields: data (vec of f64 bits, interleaved), channels (1 or 2), sample_rate (Hz),
+# frames (samples per channel), name (Str ptr or 0), slices (vec of frame indices).
+#derive(accessors)
+struct NSample {
+    data;
+    channels;
+    sample_rate;
+    frames;
+    name;
+    slices;
+}
+
+#must_use
+fn n_sample_from_mono(data, sample_rate) {
+    var s = alloc(sizeof(NSample));
+    NSample_set_data(s, data);
+    NSample_set_channels(s, 1);
+    NSample_set_sample_rate(s, sample_rate);
+    NSample_set_frames(s, vec_len(data));
+    NSample_set_name(s, 0);
+    NSample_set_slices(s, vec_new());
+    return s;
+}
+
+#must_use
+fn n_sample_from_stereo(data, sample_rate) {
+    var s = alloc(sizeof(NSample));
+    NSample_set_data(s, data);
+    NSample_set_channels(s, 2);
+    NSample_set_sample_rate(s, sample_rate);
+    NSample_set_frames(s, vec_len(data) / 2);
+    NSample_set_name(s, 0);
+    NSample_set_slices(s, vec_new());
+    return s;
+}
+
+fn n_sample_with_name(s, name) {
+    NSample_set_name(s, name);
+    return s;
+}
+
+fn n_sample_with_slices(s, slices) {
+    NSample_set_slices(s, slices);
+    return s;
+}
+
+# --- Private frame readers (zero-pad out-of-range for the interpolator edges) ---
+
+# read_mono_frame(idx) -> f64. Stereo folds to mono via (L+R)*0.5.
+#inline
+#must_use
+fn n_sample_read_mono_frame(s, idx) {
+    if (idx < 0) { return 0; }
+    if (idx >= NSample_frames(s)) { return 0; }
+    var data = NSample_data(s);
+    var ch = NSample_channels(s);
+    if (ch == 1) { return vec_get(data, idx); }
+    var l = vec_get(data, idx * ch);
+    var r = vec_get(data, idx * ch + 1);
+    return f64_mul(f64_add(l, r), F64_HALF);
+}
+
+# read_stereo left/right lanes (mono duplicated to both). Zero-pad OOB.
+#inline
+#must_use
+fn n_sample_read_stereo_l(s, idx) {
+    if (idx < 0) { return 0; }
+    if (idx >= NSample_frames(s)) { return 0; }
+    var data = NSample_data(s);
+    var ch = NSample_channels(s);
+    if (ch == 1) { return vec_get(data, idx); }
+    return vec_get(data, idx * ch);
+}
+
+#inline
+#must_use
+fn n_sample_read_stereo_r(s, idx) {
+    if (idx < 0) { return 0; }
+    if (idx >= NSample_frames(s)) { return 0; }
+    var data = NSample_data(s);
+    var ch = NSample_channels(s);
+    if (ch == 1) { return vec_get(data, idx); }
+    return vec_get(data, idx * ch + 1);
+}
+
+# --- Cubic Hermite (Catmull-Rom) interpolation -- the engine's correctness anchor ---
+# a = -0.5*y0 + 1.5*y1 - 1.5*y2 + 0.5*y3
+# b =  y0     - 2.5*y1 + 2.0*y2 - 0.5*y3
+# c = -0.5*y0            + 0.5*y2
+# return ((a*t + b)*t + c)*t + y1     (Horner)
+#inline
+#must_use
+fn n_cubic_hermite(y0, y1, y2, y3, t) {
+    var neg_half = f64_neg(F64_HALF);
+    var c15 = f64_div(f64_from(3), f64_from(2));
+    var neg15 = f64_neg(c15);
+    var c25 = f64_div(f64_from(5), f64_from(2));
+    var neg25 = f64_neg(c25);
+    var a = f64_add(f64_add(f64_add(f64_mul(neg_half, y0), f64_mul(c15, y1)),
+        f64_mul(neg15, y2)), f64_mul(F64_HALF, y3));
+    var b = f64_add(f64_add(f64_add(y0, f64_mul(neg25, y1)),
+        f64_mul(F64_TWO, y2)), f64_mul(neg_half, y3));
+    var c = f64_add(f64_mul(neg_half, y0), f64_mul(F64_HALF, y2));
+    return f64_add(f64_mul(f64_add(f64_mul(f64_add(f64_mul(a, t), b), t), c), t), y1);
+}
+
+# read_cubic(position) -> f64. floor(position) (not trunc) for negative-edge padding.
+#inline
+#must_use
+fn n_sample_read_cubic(s, position) {
+    if (NSample_frames(s) == 0) { return 0; }
+    var idx = f64_to(f64_floor(position));
+    var frac = f64_sub(position, f64_from(idx));
+    var y0 = n_sample_read_mono_frame(s, idx - 1);
+    var y1 = n_sample_read_mono_frame(s, idx);
+    var y2 = n_sample_read_mono_frame(s, idx + 1);
+    var y3 = n_sample_read_mono_frame(s, idx + 2);
+    return n_cubic_hermite(y0, y1, y2, y3, frac);
+}
+
+#inline
+#must_use
+fn n_sample_read_interpolated(s, position) {
+    return n_sample_read_cubic(s, position);
+}
+
+# read_stereo_interpolated(position, out) -> writes out[0]=L, out[1]=R (f64 bits).
+#inline
+fn n_sample_read_stereo_interpolated(s, position, out) {
+    if (NSample_frames(s) == 0) {
+        store64(out, 0);
+        store64(out + 8, 0);
+        return 0;
+    }
+    var idx = f64_to(f64_floor(position));
+    var frac = f64_sub(position, f64_from(idx));
+    var left = n_cubic_hermite(
+        n_sample_read_stereo_l(s, idx - 1), n_sample_read_stereo_l(s, idx),
+        n_sample_read_stereo_l(s, idx + 1), n_sample_read_stereo_l(s, idx + 2), frac);
+    var right = n_cubic_hermite(
+        n_sample_read_stereo_r(s, idx - 1), n_sample_read_stereo_r(s, idx),
+        n_sample_read_stereo_r(s, idx + 1), n_sample_read_stereo_r(s, idx + 2), frac);
+    store64(out, left);
+    store64(out + 8, right);
+    return 0;
+}
+
+# --- detect_onsets: energy-based transient detection, rebuilds s.slices ---
+# window = max(min(512, frames/2), 1); hop = max(window/2, 1) (guards vs infinite loop).
+# Per-window MEAN energy (sum of squares / window), stereo mixed to mono via (L+R)*0.5.
+# Onset when normalized positive energy jump (diff/max_energy) strictly exceeds the
+# clamped [0.01,1.0] threshold AND >= min_slice_frames since the last slice.
+fn n_sample_detect_onsets(s, threshold, min_slice_frames) {
+    var slices = NSample_slices(s);
+    vec_truncate(slices, 0);
+    var frames = NSample_frames(s);
+    if (frames < 2) { return 0; }
+    var data = NSample_data(s);
+    var ch = NSample_channels(s);
+
+    var window = 512;
+    var half_frames = frames / 2;
+    if (half_frames < window) { window = half_frames; }
+    if (window < 1) { window = 1; }
+    var hop = window / 2;
+    if (hop < 1) { hop = 1; }
+    var thr = f64_min(f64_max(threshold, f64_div(F64_ONE, f64_from(100))), F64_ONE);
+
+    var e_frames = vec_new();
+    var e_vals = vec_new();
+    var pos = 0;
+    while (pos + window <= frames) {
+        var energy = 0;
+        var i = pos;
+        var lim = pos + window;
+        while (i < lim) {
+            var sm = 0;
+            if (ch == 1) {
+                sm = vec_get(data, i);
+            } else {
+                sm = f64_mul(f64_add(vec_get(data, i * 2), vec_get(data, i * 2 + 1)), F64_HALF);
+            }
+            energy = f64_add(energy, f64_mul(sm, sm));
+            i = i + 1;
+        }
+        vec_push(e_frames, pos);
+        vec_push(e_vals, f64_div(energy, f64_from(window)));
+        pos = pos + hop;
+    }
+
+    var n = vec_len(e_vals);
+    if (n < 2) { return 0; }
+
+    var max_e = 0;
+    var k = 0;
+    while (k < n) {
+        var e = vec_get(e_vals, k);
+        if (f64_gt(e, max_e) == 1) { max_e = e; }
+        k = k + 1;
+    }
+    var eps = f64_div(F64_ONE, f64_from(10000000000));
+    if (f64_lt(max_e, eps) == 1) { return 0; }
+
+    var last_slice = 0;
+    var idx = 1;
+    while (idx < n) {
+        var frame = vec_get(e_frames, idx);
+        var energy2 = vec_get(e_vals, idx);
+        var prev_energy = vec_get(e_vals, idx - 1);
+        var diff = f64_div(f64_sub(energy2, prev_energy), max_e);
+        if (f64_gt(diff, thr) == 1) {
+            if (frame - last_slice >= min_slice_frames) {
+                vec_push(slices, frame);
+                last_slice = frame;
+            }
+        }
+        idx = idx + 1;
+    }
+    return 0;
+}
+
+# --- SampleBank ---
+#derive(accessors)
+struct NSampleBank {
+    samples;
+}
+
+#must_use
+fn n_sample_bank_new() {
+    var b = alloc(sizeof(NSampleBank));
+    NSampleBank_set_samples(b, vec_new());
+    return b;
+}
+
+# add(sample) -> id (= length BEFORE push). sample is a NSample pointer.
+#must_use
+fn n_sample_bank_add(bank, sample) {
+    var samples = NSampleBank_samples(bank);
+    var id = vec_len(samples);
+    vec_push(samples, sample);
+    return id;
+}
+
+# get(id) -> NSample pointer, or 0 if out of range.
+#must_use
+fn n_sample_bank_get(bank, id) {
+    var samples = NSampleBank_samples(bank);
+    if (id < 0) { return 0; }
+    if (id >= vec_len(samples)) { return 0; }
+    return vec_get(samples, id);
+}
+
+#must_use
+fn n_sample_bank_len(bank) {
+    return vec_len(NSampleBank_samples(bank));
+}
+
+#must_use
+fn n_sample_bank_is_empty(bank) {
+    if (vec_len(NSampleBank_samples(bank)) == 0) { return 1; }
+    return 0;
+}

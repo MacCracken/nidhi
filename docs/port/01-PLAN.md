@@ -55,9 +55,9 @@ docs/port/          this plan + the 13 recon briefs (10-26)
 | 2 | `f64_util.cyr` | lib.rs helper | math | ✅ done (`n_flush_denormal`, N_F32_MIN_POS/EPSILON) |
 | 3 | `loop_mode.cyr` | loop_mode.rs | — | ✅ done |
 | 4 | `envelope.cyr` | envelope.rs | **naad** | ✅ done (envelope.tcyr 19/0). naad-first: no_std fallback/EnvState/tick_no_std deleted; = NAdsrConfig + naad-Adsr builder + thin wrappers |
-| 5 | `zone.cyr` | zone.rs | env, loop_mode | **NEXT**: Zone(32 fields)+VelocityCurve+FilterMode; matches()/playback_ratio() parity tests (brief 20) |
-| 6 | `sample.cyr` | sample.rs | vec, math | NSample/NSampleBank/NSampleId; onset/slice |
-| 7 | `instrument.cyr` | instrument.rs | zone | zone collection, round-robin |
+| 5 | `zone.cyr` | zone.rs | env, loop_mode | ✅ done (zone.tcyr 33/0). 32 fields + VelocityCurve/FilterMode + matches()/playback_ratio() |
+| 6 | `sample.cyr` | sample.rs | vec, math | ✅ done (sample.tcyr 25/0). NSample (vec-of-f64 buffers), cubic-hermite interp, energy detect_onsets (naad's is spectral-flux, different), SampleBank. SampleId = bare i64 |
+| 7 | `instrument.cyr` | instrument.rs | zone | **NEXT**: zone collection, round-robin (u32-wrap counter per group) |
 | 8 | `stretch.cyr` | stretch.rs | vec, math | WSOLA/OLA; hot loops `#inline` |
 | 9 | `effect_chain.cyr` | effect_chain.rs | **naad** | 5-slot chain over naad effects |
 | 10 | `capture.cyr` | capture.rs | vec, math | record/trim/normalize/loop-detect |

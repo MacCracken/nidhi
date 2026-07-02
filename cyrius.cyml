@@ -21,6 +21,8 @@ modules = [
     "src/f64_util.cyr",
     "src/loop_mode.cyr",
     "src/envelope.cyr",
+    "src/zone.cyr",
+    "src/sample.cyr",
 ]
 
 [deps]
