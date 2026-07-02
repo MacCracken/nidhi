@@ -1,0 +1,231 @@
+# sf2.tcyr -- parity tests for src/sf2.cyr (ports rust-old/src/sf2.rs #[test]s).
+# Builds minimal SF2 blobs with a byte-builder (chunk-size backpatching) and parses them.
+
+include "src/loop_mode.cyr"
+include "src/zone.cyr"
+include "src/sample.cyr"
+include "src/instrument.cyr"
+include "src/sf2.cyr"
+
+# --- byte builder (buf + cursor) ---
+fn bb_new(cap) { var b = alloc(16); store64(b, alloc(cap)); store64(b + 8, 0); return b; }
+fn bb_buf(b) { return load64(b); }
+fn bb_len(b) { return load64(b + 8); }
+fn bb_u8(b, v) { store8(bb_buf(b) + bb_len(b), v & 0xFF); store64(b + 8, bb_len(b) + 1); return 0; }
+fn bb_u16(b, v) { bb_u8(b, v); bb_u8(b, v >> 8); return 0; }
+fn bb_i16(b, v) { bb_u16(b, v & 0xFFFF); return 0; }
+fn bb_u32(b, v) { bb_u8(b, v); bb_u8(b, v >> 8); bb_u8(b, v >> 16); bb_u8(b, v >> 24); return 0; }
+fn bb_str4(b, s) { var i = 0; while (i < 4) { bb_u8(b, load8(s + i)); i = i + 1; } return 0; }
+fn bb_fixed_str(b, s, flen) {
+    var slen = strlen(s);
+    var i = 0;
+    while (i < flen) {
+        if (i < slen) { bb_u8(b, load8(s + i)); } else { bb_u8(b, 0); }
+        i = i + 1;
+    }
+    return 0;
+}
+fn bb_chunk_begin(b, id) { bb_str4(b, id); var pos = bb_len(b); bb_u32(b, 0); return pos; }
+fn bb_chunk_end(b, pos) {
+    var content_len = bb_len(b) - (pos + 4);
+    var p = bb_buf(b) + pos;
+    store8(p, content_len & 0xFF);
+    store8(p + 1, (content_len >> 8) & 0xFF);
+    store8(p + 2, (content_len >> 16) & 0xFF);
+    store8(p + 3, (content_len >> 24) & 0xFF);
+    if ((content_len & 1) == 1) { bb_u8(b, 0); }
+    return 0;
+}
+
+fn make_samples(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, F64_HALF); i = i + 1; }
+    return v;
+}
+
+# Build a full valid minimal SF2. Returns the byte-builder.
+fn build_minimal_sf2(preset_name, samples, root_key, key_lo, key_hi, vel_lo, vel_hi, loop_mode, loop_start, loop_end) {
+    var num = vec_len(samples);
+    var b = bb_new(16384);
+
+    var riff = bb_chunk_begin(b, "RIFF");
+    bb_str4(b, "sfbk");
+
+    # sdta LIST { smpl }
+    var sdta = bb_chunk_begin(b, "LIST");
+    bb_str4(b, "sdta");
+    var smpl = bb_chunk_begin(b, "smpl");
+    var si = 0;
+    while (si < num) {
+        var iv = f64_to(f64_round(f64_mul(vec_get(samples, si), f64_from(32767))));
+        if (iv > 32767) { iv = 32767; }
+        if (iv < 0 - 32768) { iv = 0 - 32768; }
+        bb_i16(b, iv);
+        si = si + 1;
+    }
+    bb_chunk_end(b, smpl);
+    bb_chunk_end(b, sdta);
+
+    # pdta LIST { phdr pbag pgen inst ibag igen shdr }
+    var pdta = bb_chunk_begin(b, "LIST");
+    bb_str4(b, "pdta");
+
+    var phdr = bb_chunk_begin(b, "phdr");
+    bb_fixed_str(b, preset_name, 20); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 0);
+    bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_fixed_str(b, "EOP", 20); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 1);
+    bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_chunk_end(b, phdr);
+
+    var pbag = bb_chunk_begin(b, "pbag");
+    bb_u16(b, 0); bb_u16(b, 0);
+    bb_u16(b, 1); bb_u16(b, 0);
+    bb_chunk_end(b, pbag);
+
+    var pgen = bb_chunk_begin(b, "pgen");
+    bb_u16(b, 41); bb_i16(b, 0);
+    bb_u16(b, 0); bb_i16(b, 0);
+    bb_chunk_end(b, pgen);
+
+    var inst = bb_chunk_begin(b, "inst");
+    bb_fixed_str(b, "Instrument", 20); bb_u16(b, 0);
+    bb_fixed_str(b, "EOI", 20); bb_u16(b, 1);
+    bb_chunk_end(b, inst);
+
+    var ibag = bb_chunk_begin(b, "ibag");
+    bb_u16(b, 0); bb_u16(b, 0);
+    bb_u16(b, 4); bb_u16(b, 0);
+    bb_chunk_end(b, ibag);
+
+    var igen = bb_chunk_begin(b, "igen");
+    bb_u16(b, 43); bb_i16(b, key_lo | (key_hi << 8));
+    bb_u16(b, 44); bb_i16(b, vel_lo | (vel_hi << 8));
+    bb_u16(b, 54); bb_i16(b, loop_mode);
+    bb_u16(b, 53); bb_i16(b, 0);
+    bb_u16(b, 0); bb_i16(b, 0);
+    bb_chunk_end(b, igen);
+
+    var shdr = bb_chunk_begin(b, "shdr");
+    bb_fixed_str(b, "Sample", 20);
+    bb_u32(b, 0);
+    bb_u32(b, num);
+    bb_u32(b, loop_start);
+    bb_u32(b, loop_end);
+    bb_u32(b, 44100);
+    bb_u8(b, root_key);
+    bb_u8(b, 0);
+    bb_u16(b, 0);
+    bb_u16(b, 1);
+    bb_fixed_str(b, "EOS", 20);
+    bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_u8(b, 0); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 0);
+    bb_chunk_end(b, shdr);
+
+    bb_chunk_end(b, pdta);
+    bb_chunk_end(b, riff);
+    return b;
+}
+
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+fn store_i16le(buf, off, v) {
+    store8(buf + off, v & 0xFF);
+    store8(buf + off + 1, (v >> 8) & 0xFF);
+    return 0;
+}
+
+fn first_zone(res) {
+    return vec_get(NInstrument_zones(vec_get(Sf2Result_instruments(res), 0)), 0);
+}
+
+fn main() {
+    alloc_init();
+    var tol = f64_div(F64_ONE, f64_from(1000));
+
+    test_group("reject invalid");
+    var small = alloc(4);
+    store8(small, 0); store8(small + 1, 0); store8(small + 2, 0); store8(small + 3, 0);
+    assert(sf2_parse(small, 4) < 0, "too small -> error");
+    var notriff = alloc(12);
+    store8(notriff, 78); store8(notriff + 1, 79); store8(notriff + 2, 84); store8(notriff + 3, 70);
+    var zz = 4; while (zz < 12) { store8(notriff + zz, 0); zz = zz + 1; }
+    assert(sf2_parse(notriff, 12) < 0, "non-RIFF -> error");
+    var wf = alloc(12);
+    store8(wf, 82); store8(wf + 1, 73); store8(wf + 2, 70); store8(wf + 3, 70);
+    store8(wf + 4, 0); store8(wf + 5, 0); store8(wf + 6, 0); store8(wf + 7, 0);
+    store8(wf + 8, 87); store8(wf + 9, 65); store8(wf + 10, 86); store8(wf + 11, 69);
+    assert(sf2_parse(wf, 12) < 0, "wrong form type -> error");
+
+    test_group("parse minimal sf2");
+    var b = build_minimal_sf2("Piano", make_samples(100), 60, 36, 84, 0, 127, 0, 0, 0);
+    var res = sf2_parse(bb_buf(b), bb_len(b));
+    assert(res > 0, "parse succeeded (positive ptr)");
+    assert_eq(vec_len(Sf2Result_presets(res)), 1, "1 preset");
+    assert_eq(vec_len(Sf2Result_instruments(res)), 1, "1 instrument");
+    assert_eq(str_eq(Sf2Preset_name(vec_get(Sf2Result_presets(res), 0)), str_from("Piano")), 1, "preset name Piano");
+    var inst0 = vec_get(Sf2Result_instruments(res), 0);
+    assert_eq(n_instrument_zone_count(inst0), 1, "1 zone");
+    var z0 = first_zone(res);
+    assert_eq(NZone_key_lo(z0), 36, "zone key_lo 36");
+    assert_eq(NZone_key_hi(z0), 84, "zone key_hi 84");
+    assert_eq(NZone_root_note(z0), 60, "zone root_note 60");
+    assert_eq(NZone_loop_mode(z0), LOOP_ONESHOT, "loop OneShot");
+    assert_eq(n_sample_bank_len(Sf2Result_bank(res)), 1, "bank len 1");
+    assert_eq(NSample_frames(n_sample_bank_get(Sf2Result_bank(res), 0)), 100, "sample frames 100");
+
+    test_group("forward loop preserved");
+    var bf = build_minimal_sf2("P", make_samples(200), 60, 0, 127, 0, 127, 1, 50, 150);
+    var rf = sf2_parse(bb_buf(bf), bb_len(bf));
+    var zf = first_zone(rf);
+    assert_eq(NZone_loop_mode(zf), LOOP_FORWARD, "loop Forward");
+    assert_eq(NZone_loop_start(zf), 50, "loop_start 50");
+    assert_eq(NZone_loop_end(zf), 150, "loop_end 150");
+
+    test_group("loop sustain mode 3");
+    var bs = build_minimal_sf2("P", make_samples(200), 60, 0, 127, 0, 127, 3, 10, 90);
+    var zs = first_zone(sf2_parse(bb_buf(bs), bb_len(bs)));
+    assert_eq(NZone_loop_mode(zs), LOOP_SUSTAIN, "loop LoopSustain");
+
+    test_group("velocity range preserved");
+    var bv = build_minimal_sf2("P", make_samples(100), 60, 0, 127, 32, 96, 0, 0, 0);
+    var zv = first_zone(sf2_parse(bb_buf(bv), bb_len(bv)));
+    assert_eq(NZone_vel_lo(zv), 32, "vel_lo 32");
+    assert_eq(NZone_vel_hi(zv), 96, "vel_hi 96");
+
+    test_group("pcm16 conversion");
+    assert_eq(vec_len(sf2_pcm16_to_f32(0, 0, 0, 0)), 0, "empty -> empty");
+    var pcmoob = alloc(2); store8(pcmoob, 0); store8(pcmoob + 1, 0);
+    assert_eq(vec_len(sf2_pcm16_to_f32(pcmoob, 2, 0, 100)), 0, "out of bounds -> empty");
+    var acc = alloc(10);
+    store_i16le(acc, 0, 0);
+    store_i16le(acc, 2, 16384);
+    store_i16le(acc, 4, 0 - 16384);
+    store_i16le(acc, 6, 32767);
+    store_i16le(acc, 8, 0 - 32767);
+    var dec = sf2_pcm16_to_f32(acc, 10, 0, 5);
+    assert_eq(vec_len(dec), 5, "decoded 5 samples");
+    assert_eq(approx(vec_get(dec, 0), f64_from(0), tol), 1, "0.0");
+    assert_eq(approx(vec_get(dec, 1), F64_HALF, tol), 1, "0.5");
+    assert_eq(approx(vec_get(dec, 2), f64_neg(F64_HALF), tol), 1, "-0.5");
+    assert_eq(approx(vec_get(dec, 3), F64_ONE, tol), 1, "~1.0");
+    assert_eq(approx(vec_get(dec, 4), f64_neg(F64_ONE), tol), 1, "~-1.0");
+
+    test_group("reject chunk size overflow");
+    var ov = alloc(24);
+    store8(ov, 82); store8(ov + 1, 73); store8(ov + 2, 70); store8(ov + 3, 70);
+    store8(ov + 4, 0); store8(ov + 5, 0); store8(ov + 6, 0); store8(ov + 7, 0);
+    store8(ov + 8, 115); store8(ov + 9, 102); store8(ov + 10, 98); store8(ov + 11, 107);
+    store8(ov + 12, 76); store8(ov + 13, 73); store8(ov + 14, 83); store8(ov + 15, 84);
+    store8(ov + 16, 255); store8(ov + 17, 255); store8(ov + 18, 255); store8(ov + 19, 255);
+    store8(ov + 20, 0); store8(ov + 21, 0); store8(ov + 22, 0); store8(ov + 23, 0);
+    assert(sf2_parse(ov, 24) < 0, "chunk size overflow -> error (no panic)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

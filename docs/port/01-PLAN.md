@@ -64,7 +64,7 @@ docs/port/          this plan + the 13 recon briefs (10-26)
 **Parity audit (2026-07-02, adversarial workflow across all 9 then-done modules):** 8/9 clean; **1 confirmed bug fixed** — `envelope.cyr n_amp_envelope_new` divided ADSR sample counts by the *clamped* `max(sr,1)` instead of the raw `sample_rate` (Rust's `to_seconds` uses raw; only naad's 5th arg is clamped). Diverged for `sample_rate < 1.0`; invisible to tolerance tests (all used 44100). Fixed + regression test reading back naad `Adsr_attack_time`/`Adsr_release_time`. Re-run the audit workflow (`scratchpad/parity_audit.wf.js`) after new modules land.
 | 10 | `capture.cyr` | capture.rs | vec, math, **naad** | ✅ done (capture.tcyr 17/0). SampleRecorder, trim_silence, normalize_peak/rms→naad, detect_loop_points |
 | 11 | `sfz.cyr` | sfz.rs | str, hashmap | text parser (40+ opcodes); fuzz |
-| 12 | `sf2.cyr` | sf2.rs | vec | RIFF binary parser; fuzz |
+| 12 | `sf2.cyr` | sf2.rs | vec, sample, zone, instrument | ✅ done (sf2.tcyr 29/0). RIFF chunk iter, 7 record parsers, phdr→pbag→pgen→inst→ibag→igen→shdr resolution, PCM16 (÷32768), loop-mode map, preset-range clamp, bounds-safe on hostile input. FourCC packed LE ints |
 | 13 | `io.cyr` | io.rs | **shravan** | ✅ done (io.tcyr 18/0). load_wav_from_memory + load_wav (file_stem) + StreamingWavReader (open/read_chunk/read_all) via shravan wav_decode/decode_file/wav_stream_*. Toolchain pin bumped 6.3.33→6.3.34 |
 | 14 | `engine.cyr` | engine.rs | **naad**, all above | core engine, voice mgmt, render loop — LAST |
 

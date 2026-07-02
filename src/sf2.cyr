@@ -1,0 +1,496 @@
+# sf2.cyr -- SF2 / SoundFont-2 RIFF binary parser
+# Requires: alloc, vec, str (str_new), math (f64_*), byte ops (load8), sample (n_sample_*),
+#           zone (n_zone_*), instrument (n_instrument_*), loop_mode (LOOP_*)
+#
+# Ports rust-old/src/sf2.rs. ALL multi-byte integers are little-endian. Parses an in-memory byte
+# buffer (data ptr + len) into (presets, instruments, SampleBank). Success -> Sf2Result pointer;
+# failure -> a negative error code. Lenient on bad content (skips), strict on structural errors.
+# Every read is bounds-checked (returns 0 past end) so hostile input never reads OOB.
+
+# --- FourCC constants (bytes packed little-endian, byte0 in the low 8 bits) ---
+var CC_RIFF = 0x46464952;
+var CC_SFBK = 0x6B626673;
+var CC_LIST = 0x5453494C;
+var CC_SDTA = 0x61746473;
+var CC_SMPL = 0x6C706D73;
+var CC_PDTA = 0x61746470;
+var CC_PHDR = 0x72646870;
+var CC_PBAG = 0x67616270;
+var CC_PGEN = 0x6E656770;
+var CC_INST = 0x74736E69;
+var CC_IBAG = 0x67616269;
+var CC_IGEN = 0x6E656769;
+var CC_SHDR = 0x72646873;
+
+# --- bounds-checked little-endian byte readers (0 past end) ---
+#inline
+fn sf2_u8(data, len, off) {
+    if (off < 0) { return 0; }
+    if (off >= len) { return 0; }
+    return load8(data + off);
+}
+
+#inline
+fn sf2_u16(data, len, off) {
+    if (off < 0) { return 0; }
+    if (off + 2 > len) { return 0; }
+    return load8(data + off) | (load8(data + off + 1) << 8);
+}
+
+#inline
+fn sf2_i16(data, len, off) {
+    var v = sf2_u16(data, len, off);
+    if (v >= 0x8000) { return v - 0x10000; }
+    return v;
+}
+
+#inline
+fn sf2_u32(data, len, off) {
+    if (off < 0) { return 0; }
+    if (off + 4 > len) { return 0; }
+    return load8(data + off) | (load8(data + off + 1) << 8) | (load8(data + off + 2) << 16) | (load8(data + off + 3) << 24);
+}
+
+# fourcc packed LE (same as u32); compares against CC_* constants.
+#inline
+fn sf2_fourcc(data, len, off) {
+    return sf2_u32(data, len, off);
+}
+
+# read a fixed-width field as a Str, cut at the first NUL (or the field width, or end of data).
+#must_use
+fn sf2_cstr(data, dlen, off, flen) {
+    var slen = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (slen >= flen) {
+            scanning = 0;
+        } else {
+            var idx = off + slen;
+            if (idx >= dlen) {
+                scanning = 0;
+            } else {
+                if (load8(data + idx) == 0) { scanning = 0; } else { slen = slen + 1; }
+            }
+        }
+    }
+    return str_new(data + off, slen);
+}
+
+# range-generator amount: lo = low byte, hi = high byte of the 16-bit amount.
+#inline
+fn sf2_amt_lo(amount) { return amount & 0xFF; }
+#inline
+fn sf2_amt_hi(amount) { return ((amount & 0xFFFF) >> 8) & 0xFF; }
+
+# --- record structs ---
+#derive(accessors)
+struct Sf2Phdr { name; preset; bank; bag_index; }
+#derive(accessors)
+struct Sf2Bag { gen_index; }
+#derive(accessors)
+struct Sf2Gen { oper; amount; }
+#derive(accessors)
+struct Sf2Inst { name; bag_index; }
+#derive(accessors)
+struct Sf2Shdr { name; start; end; loop_start; loop_end; sample_rate; original_pitch; sample_type; }
+
+# public preset descriptor + the 3-list parse result
+#derive(accessors)
+struct Sf2Preset { name; bank; preset_number; }
+#derive(accessors)
+struct Sf2Result { presets; instruments; bank; }
+
+# preset key/vel range passed down to the instrument-bag resolver
+#derive(accessors)
+struct Sf2PRange { pk_lo; pk_hi; have_pk; pv_lo; pv_hi; have_pv; }
+
+# --- record-array parsers (count = chunklen / SIZE, floor) ---
+#must_use
+fn sf2_parse_phdr(data, len) {
+    var out = vec_new();
+    var count = len / 38;
+    var i = 0;
+    while (i < count) {
+        var off = i * 38;
+        var r = alloc(sizeof(Sf2Phdr));
+        Sf2Phdr_set_name(r, sf2_cstr(data, len, off, 20));
+        Sf2Phdr_set_preset(r, sf2_u16(data, len, off + 20));
+        Sf2Phdr_set_bank(r, sf2_u16(data, len, off + 22));
+        Sf2Phdr_set_bag_index(r, sf2_u16(data, len, off + 24));
+        vec_push(out, r);
+        i = i + 1;
+    }
+    return out;
+}
+
+#must_use
+fn sf2_parse_bag(data, len) {
+    var out = vec_new();
+    var count = len / 4;
+    var i = 0;
+    while (i < count) {
+        var r = alloc(sizeof(Sf2Bag));
+        Sf2Bag_set_gen_index(r, sf2_u16(data, len, i * 4));
+        vec_push(out, r);
+        i = i + 1;
+    }
+    return out;
+}
+
+#must_use
+fn sf2_parse_gen(data, len) {
+    var out = vec_new();
+    var count = len / 4;
+    var i = 0;
+    while (i < count) {
+        var off = i * 4;
+        var r = alloc(sizeof(Sf2Gen));
+        Sf2Gen_set_oper(r, sf2_u16(data, len, off));
+        Sf2Gen_set_amount(r, sf2_i16(data, len, off + 2));
+        vec_push(out, r);
+        i = i + 1;
+    }
+    return out;
+}
+
+#must_use
+fn sf2_parse_inst(data, len) {
+    var out = vec_new();
+    var count = len / 22;
+    var i = 0;
+    while (i < count) {
+        var off = i * 22;
+        var r = alloc(sizeof(Sf2Inst));
+        Sf2Inst_set_name(r, sf2_cstr(data, len, off, 20));
+        Sf2Inst_set_bag_index(r, sf2_u16(data, len, off + 20));
+        vec_push(out, r);
+        i = i + 1;
+    }
+    return out;
+}
+
+#must_use
+fn sf2_parse_shdr(data, len) {
+    var out = vec_new();
+    var count = len / 46;
+    var i = 0;
+    while (i < count) {
+        var off = i * 46;
+        var r = alloc(sizeof(Sf2Shdr));
+        Sf2Shdr_set_name(r, sf2_cstr(data, len, off, 20));
+        Sf2Shdr_set_start(r, sf2_u32(data, len, off + 20));
+        Sf2Shdr_set_end(r, sf2_u32(data, len, off + 24));
+        Sf2Shdr_set_loop_start(r, sf2_u32(data, len, off + 28));
+        Sf2Shdr_set_loop_end(r, sf2_u32(data, len, off + 32));
+        Sf2Shdr_set_sample_rate(r, sf2_u32(data, len, off + 36));
+        Sf2Shdr_set_original_pitch(r, sf2_u8(data, len, off + 40));
+        Sf2Shdr_set_sample_type(r, sf2_u16(data, len, off + 44));
+        vec_push(out, r);
+        i = i + 1;
+    }
+    return out;
+}
+
+# pcm16_to_f32: 16-bit LE PCM -> vec of f64 in [-1,1). Divisor 32768. Empty on bad range.
+#must_use
+fn sf2_pcm16_to_f32(data, dlen, start_sample, end_sample) {
+    var out = vec_new();
+    var byte_start = start_sample * 2;
+    var byte_end = end_sample * 2;
+    if (byte_end > dlen) { return out; }
+    if (byte_start > byte_end) { return out; }
+    var num = (byte_end - byte_start) / 2;
+    var i = 0;
+    while (i < num) {
+        var s = sf2_i16(data, dlen, byte_start + i * 2);
+        vec_push(out, f64_div(f64_from(s), f64_from(32768)));
+        i = i + 1;
+    }
+    return out;
+}
+
+# resolve one instrument bag: read igens, apply preset-range clamp, build a zone, add to inst_obj.
+fn sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, prange) {
+    var igen_start = Sf2Bag_gen_index(vec_get(ibags, ib));
+    var igen_end = vec_len(igens);
+    if (ib + 1 < vec_len(ibags)) { igen_end = Sf2Bag_gen_index(vec_get(ibags, ib + 1)); }
+
+    var sample_id = 0 - 1;
+    var kr_lo = 0;
+    var kr_hi = 127;
+    var vr_lo = 0;
+    var vr_hi = 127;
+    var root_override = 0 - 1;
+    var sample_modes = 0;
+
+    var iglim = igen_end;
+    if (vec_len(igens) < iglim) { iglim = vec_len(igens); }
+    var ig = igen_start;
+    while (ig < iglim) {
+        var igr = vec_get(igens, ig);
+        var ioper = Sf2Gen_oper(igr);
+        var iamt = Sf2Gen_amount(igr);
+        if (ioper == 53) { sample_id = iamt & 0xFFFF; }
+        if (ioper == 43) { kr_lo = sf2_amt_lo(iamt); kr_hi = sf2_amt_hi(iamt); }
+        if (ioper == 44) { vr_lo = sf2_amt_lo(iamt); vr_hi = sf2_amt_hi(iamt); }
+        if (ioper == 58) { var k = iamt & 0xFF; if (k <= 127) { root_override = k; } }
+        if (ioper == 54) { sample_modes = iamt & 0xFFFF; }
+        ig = ig + 1;
+    }
+
+    if (sample_id < 0) { return 0; }
+    var shdr_lim = vec_len(shdrs) - 1;
+    if (shdr_lim < 0) { shdr_lim = 0; }
+    if (sample_id >= shdr_lim) { return 0; }
+    var shdr = vec_get(shdrs, sample_id);
+    if ((Sf2Shdr_sample_type(shdr) & 0x8000) != 0) { return 0; }
+
+    var root_key = Sf2Shdr_original_pitch(shdr);
+    if (root_override >= 0) { root_key = root_override; }
+
+    var lm = sample_modes & 3;
+    var loop_mode = LOOP_ONESHOT;
+    if (lm == 1) { loop_mode = LOOP_FORWARD; }
+    if (lm == 2) { loop_mode = LOOP_FORWARD; }
+    if (lm == 3) { loop_mode = LOOP_SUSTAIN; }
+
+    var fk_lo = kr_lo;
+    var fk_hi = kr_hi;
+    if (Sf2PRange_have_pk(prange) == 1) {
+        if (Sf2PRange_pk_lo(prange) > fk_lo) { fk_lo = Sf2PRange_pk_lo(prange); }
+        if (Sf2PRange_pk_hi(prange) < fk_hi) { fk_hi = Sf2PRange_pk_hi(prange); }
+    }
+    var fv_lo = vr_lo;
+    var fv_hi = vr_hi;
+    if (Sf2PRange_have_pv(prange) == 1) {
+        if (Sf2PRange_pv_lo(prange) > fv_lo) { fv_lo = Sf2PRange_pv_lo(prange); }
+        if (Sf2PRange_pv_hi(prange) < fv_hi) { fv_hi = Sf2PRange_pv_hi(prange); }
+    }
+
+    var pcm = sf2_pcm16_to_f32(smpl_ptr, smpl_len, Sf2Shdr_start(shdr), Sf2Shdr_end(shdr));
+    var sample = n_sample_from_mono(pcm, Sf2Shdr_sample_rate(shdr));
+    sample = n_sample_with_name(sample, Sf2Shdr_name(shdr));
+    var sid = n_sample_bank_add(bank, sample);
+
+    var zone = n_zone_new(sid);
+    zone = n_zone_with_key_range(zone, fk_lo, fk_hi);
+    zone = n_zone_with_vel_range(zone, fv_lo, fv_hi);
+    zone = n_zone_with_root_note(zone, root_key);
+    if (loop_mode != LOOP_ONESHOT) {
+        var ls = Sf2Shdr_loop_start(shdr) - Sf2Shdr_start(shdr);
+        if (ls < 0) { ls = 0; }
+        var le = Sf2Shdr_loop_end(shdr) - Sf2Shdr_start(shdr);
+        if (le < 0) { le = 0; }
+        zone = n_zone_with_loop(zone, loop_mode, ls, le);
+    }
+    n_instrument_add_zone(inst_obj, zone);
+    return 0;
+}
+
+# resolve one preset bag: find the referenced instrument + preset ranges, walk its ibags.
+fn sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, bi) {
+    var gen_start = Sf2Bag_gen_index(vec_get(pbags, bi));
+    var gen_end = vec_len(pgens);
+    if (bi + 1 < vec_len(pbags)) { gen_end = Sf2Bag_gen_index(vec_get(pbags, bi + 1)); }
+
+    var inst_index = 0 - 1;
+    var prange = alloc(sizeof(Sf2PRange));
+    Sf2PRange_set_have_pk(prange, 0);
+    Sf2PRange_set_have_pv(prange, 0);
+
+    var glim = gen_end;
+    if (vec_len(pgens) < glim) { glim = vec_len(pgens); }
+    var g = gen_start;
+    while (g < glim) {
+        var pg = vec_get(pgens, g);
+        var oper = Sf2Gen_oper(pg);
+        var amt = Sf2Gen_amount(pg);
+        if (oper == 41) { inst_index = amt & 0xFFFF; }
+        if (oper == 43) {
+            Sf2PRange_set_pk_lo(prange, sf2_amt_lo(amt));
+            Sf2PRange_set_pk_hi(prange, sf2_amt_hi(amt));
+            Sf2PRange_set_have_pk(prange, 1);
+        }
+        if (oper == 44) {
+            Sf2PRange_set_pv_lo(prange, sf2_amt_lo(amt));
+            Sf2PRange_set_pv_hi(prange, sf2_amt_hi(amt));
+            Sf2PRange_set_have_pv(prange, 1);
+        }
+        g = g + 1;
+    }
+
+    if (inst_index < 0) { return 0; }
+    var inst_lim = vec_len(insts) - 1;
+    if (inst_lim < 0) { inst_lim = 0; }
+    if (inst_index >= inst_lim) { return 0; }
+
+    var inst_rec = vec_get(insts, inst_index);
+    var ibag_start = Sf2Inst_bag_index(inst_rec);
+    var ibag_end = Sf2Inst_bag_index(vec_get(insts, inst_index + 1));
+    var ib = ibag_start;
+    while (ib < ibag_end) {
+        if (ib >= vec_len(ibags)) { return 0; }
+        sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, prange);
+        ib = ib + 1;
+    }
+    return 0;
+}
+
+# resolve all presets -> instruments -> zones. Fills the presets/instruments vecs + bank.
+fn sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, presets, instruments, bank) {
+    var ph_lim = vec_len(phdrs) - 1;
+    if (ph_lim < 0) { ph_lim = 0; }
+    var pi = 0;
+    while (pi < ph_lim) {
+        var phdr = vec_get(phdrs, pi);
+        var bag_start = Sf2Phdr_bag_index(phdr);
+        var bag_end = Sf2Phdr_bag_index(vec_get(phdrs, pi + 1));
+        var inst_obj = n_instrument_new(Sf2Phdr_name(phdr));
+
+        var bi = bag_start;
+        var looping = 1;
+        while (looping == 1) {
+            if (bi >= bag_end) {
+                looping = 0;
+            } else {
+                if (bi >= vec_len(pbags)) {
+                    looping = 0;
+                } else {
+                    sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, bi);
+                    bi = bi + 1;
+                }
+            }
+        }
+
+        if (n_instrument_zone_count(inst_obj) > 0) {
+            var preset = alloc(sizeof(Sf2Preset));
+            Sf2Preset_set_name(preset, Sf2Phdr_name(phdr));
+            Sf2Preset_set_bank(preset, Sf2Phdr_bank(phdr));
+            Sf2Preset_set_preset_number(preset, Sf2Phdr_preset(phdr));
+            vec_push(presets, preset);
+            vec_push(instruments, inst_obj);
+        }
+        pi = pi + 1;
+    }
+    return 0;
+}
+
+# parse(data, len) -> Sf2Result pointer, or a negative error code.
+#must_use
+fn sf2_parse(data, len) {
+    if (len < 12) { return 0 - 1; }
+    if (sf2_fourcc(data, len, 0) != CC_RIFF) { return 0 - 2; }
+    if (sf2_fourcc(data, len, 8) != CC_SFBK) { return 0 - 3; }
+
+    var smpl_ptr = 0;
+    var smpl_len = 0;
+    var smpl_found = 0;
+    var pdta_ptr = 0;
+    var pdta_len = 0;
+    var pdta_found = 0;
+
+    # top-level chunk scan over data[12..]
+    var off = 12;
+    while (off + 8 <= len) {
+        var cid = sf2_fourcc(data, len, off);
+        var csize = sf2_u32(data, len, off + 4);
+        var cdata_start = off + 8;
+        var cdata_end = cdata_start + csize;
+        if (cdata_end > len) { return 0 - 6; }
+        if (cid == CC_LIST) {
+            if (csize >= 4) {
+                var list_type = sf2_fourcc(data, len, cdata_start);
+                if (list_type == CC_SDTA) {
+                    var soff = cdata_start + 4;
+                    var subscan = 1;
+                    while (subscan == 1) {
+                        if (soff + 8 > cdata_end) {
+                            subscan = 0;
+                        } else {
+                            var sid = sf2_fourcc(data, len, soff);
+                            var ssize = sf2_u32(data, len, soff + 4);
+                            var sdstart = soff + 8;
+                            var sdend = sdstart + ssize;
+                            if (sdend > cdata_end) {
+                                subscan = 0;
+                            } else {
+                                if (sid == CC_SMPL) {
+                                    smpl_ptr = data + sdstart;
+                                    smpl_len = ssize;
+                                    smpl_found = 1;
+                                }
+                                soff = sdend + (ssize & 1);
+                            }
+                        }
+                    }
+                }
+                if (list_type == CC_PDTA) {
+                    pdta_ptr = data + cdata_start + 4;
+                    pdta_len = csize - 4;
+                    pdta_found = 1;
+                }
+            }
+        }
+        off = cdata_end + (csize & 1);
+    }
+
+    if (smpl_found == 0) { return 0 - 7; }
+    if (pdta_found == 0) { return 0 - 8; }
+
+    # pdta sub-chunk scan
+    var phdr_ptr = 0; var phdr_len = 0; var phdr_found = 0;
+    var pbag_ptr = 0; var pbag_len = 0; var pbag_found = 0;
+    var pgen_ptr = 0; var pgen_len = 0; var pgen_found = 0;
+    var inst_ptr = 0; var inst_len = 0; var inst_found = 0;
+    var ibag_ptr = 0; var ibag_len = 0; var ibag_found = 0;
+    var igen_ptr = 0; var igen_len = 0; var igen_found = 0;
+    var shdr_ptr = 0; var shdr_len = 0; var shdr_found = 0;
+
+    var poff = 0;
+    while (poff + 8 <= pdta_len) {
+        var pid = sf2_fourcc(pdta_ptr, pdta_len, poff);
+        var psize = sf2_u32(pdta_ptr, pdta_len, poff + 4);
+        var pdstart = poff + 8;
+        var pdend = pdstart + psize;
+        if (pdend > pdta_len) {
+            poff = pdta_len;
+        } else {
+            if (pid == CC_PHDR) { phdr_ptr = pdta_ptr + pdstart; phdr_len = psize; phdr_found = 1; }
+            if (pid == CC_PBAG) { pbag_ptr = pdta_ptr + pdstart; pbag_len = psize; pbag_found = 1; }
+            if (pid == CC_PGEN) { pgen_ptr = pdta_ptr + pdstart; pgen_len = psize; pgen_found = 1; }
+            if (pid == CC_INST) { inst_ptr = pdta_ptr + pdstart; inst_len = psize; inst_found = 1; }
+            if (pid == CC_IBAG) { ibag_ptr = pdta_ptr + pdstart; ibag_len = psize; ibag_found = 1; }
+            if (pid == CC_IGEN) { igen_ptr = pdta_ptr + pdstart; igen_len = psize; igen_found = 1; }
+            if (pid == CC_SHDR) { shdr_ptr = pdta_ptr + pdstart; shdr_len = psize; shdr_found = 1; }
+            poff = pdend + (psize & 1);
+        }
+    }
+
+    if (phdr_found == 0) { return 0 - 9; }
+    if (pbag_found == 0) { return 0 - 10; }
+    if (pgen_found == 0) { return 0 - 11; }
+    if (inst_found == 0) { return 0 - 12; }
+    if (ibag_found == 0) { return 0 - 13; }
+    if (igen_found == 0) { return 0 - 14; }
+    if (shdr_found == 0) { return 0 - 15; }
+
+    var phdrs = sf2_parse_phdr(phdr_ptr, phdr_len);
+    var pbags = sf2_parse_bag(pbag_ptr, pbag_len);
+    var pgens = sf2_parse_gen(pgen_ptr, pgen_len);
+    var insts = sf2_parse_inst(inst_ptr, inst_len);
+    var ibags = sf2_parse_bag(ibag_ptr, ibag_len);
+    var igens = sf2_parse_gen(igen_ptr, igen_len);
+    var shdrs = sf2_parse_shdr(shdr_ptr, shdr_len);
+
+    var presets = vec_new();
+    var instruments = vec_new();
+    var bank = n_sample_bank_new();
+    sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, presets, instruments, bank);
+
+    var result = alloc(sizeof(Sf2Result));
+    Sf2Result_set_presets(result, presets);
+    Sf2Result_set_instruments(result, instruments);
+    Sf2Result_set_bank(result, bank);
+    return result;
+}
