@@ -1,0 +1,109 @@
+# envelope.cyr -- ADSR config + naad-backed amplitude envelope
+# Requires: math (f64_*), f64_util (N_F32_EPSILON), naad (envelope_adsr_*,
+#           naad_is_err, ENV_STATE_RELEASE)
+#
+# "Use naad fully": nidhi's Rust std AmpEnvelope simply wrapped naad::envelope::Adsr;
+# the no_std linear ADSR was only a fallback for when naad was absent. In Cyrius naad
+# is always present, so AmpEnvelope IS a naad Adsr and the entire fallback (tick_no_std,
+# EnvState, level/pos fields) collapses. What survives is NAdsrConfig -- the sample-based,
+# SFZ-mappable per-zone envelope config -- plus a builder that converts it to a naad Adsr.
+# Envelope stages map to naad's ENV_STATE_IDLE/ATTACK/DECAY/SUSTAIN/RELEASE.
+
+# --- NAdsrConfig: all durations in samples (mirrors Rust AdsrConfig) ---
+# Fields: attack_samples (i64), decay_samples (i64), sustain_level (f64 bits, 0..1),
+# release_samples (i64).
+#derive(accessors)
+struct NAdsrConfig {
+    attack_samples;
+    decay_samples;
+    sustain_level;
+    release_samples;
+}
+
+# Default: attack=0, decay=0, sustain=1.0, release=441 (~10ms @ 44.1k).
+#must_use
+fn n_adsr_config_default() {
+    var c = alloc(sizeof(NAdsrConfig));
+    NAdsrConfig_set_attack_samples(c, 0);
+    NAdsrConfig_set_decay_samples(c, 0);
+    NAdsrConfig_set_sustain_level(c, F64_ONE);
+    NAdsrConfig_set_release_samples(c, 441);
+    return c;
+}
+
+#must_use
+fn n_adsr_config_new(attack_samples, decay_samples, sustain_level, release_samples) {
+    var c = alloc(sizeof(NAdsrConfig));
+    NAdsrConfig_set_attack_samples(c, attack_samples);
+    NAdsrConfig_set_decay_samples(c, decay_samples);
+    NAdsrConfig_set_sustain_level(c, sustain_level);
+    NAdsrConfig_set_release_samples(c, release_samples);
+    return c;
+}
+
+# from_seconds: samples = (secs * sample_rate), truncated toward zero, with
+# max(0) on attack/decay and max(1) on release. sustain clamped to [0,1].
+# All args are f64 bit patterns.
+#must_use
+fn n_adsr_config_from_seconds(attack, decay, sustain, release, sample_rate) {
+    var a = f64_to(f64_max(f64_mul(attack, sample_rate), 0));
+    var d = f64_to(f64_max(f64_mul(decay, sample_rate), 0));
+    var s = f64_min(f64_max(sustain, 0), F64_ONE);
+    var r = f64_to(f64_max(f64_mul(release, sample_rate), F64_ONE));
+    return n_adsr_config_new(a, d, s, r);
+}
+
+# is_default_sfz: true when the config is the SFZ "no explicit envelope" default
+# (attack==0, decay==0, sustain~=1.0, release <= ~1ms). sample_rate is f64 bits.
+#must_use
+fn n_adsr_config_is_default_sfz(config, sample_rate) {
+    if (NAdsrConfig_attack_samples(config) != 0) { return 0; }
+    if (NAdsrConfig_decay_samples(config) != 0) { return 0; }
+    if (f64_lt(f64_abs(f64_sub(NAdsrConfig_sustain_level(config), F64_ONE)), N_F32_EPSILON) == 0) {
+        return 0;
+    }
+    var thresh = f64_to(f64_mul(sample_rate, f64_div(F64_ONE, f64_from(1000))));
+    if (NAdsrConfig_release_samples(config) > thresh) { return 0; }
+    return 1;
+}
+
+# --- AmpEnvelope: a naad Adsr built from an NAdsrConfig ---
+# n_amp_envelope_new(config, sample_rate) -> naad Adsr pointer. Mirrors the Rust std
+# path: to_seconds -> Adsr::with_sample_rate(a.max0, d.max0, s.clamp01, r.max0, sr.max1)
+# with a hardcoded-valid fallback (0,0,1.0,0.01,44100) if validation fails.
+# sample_rate is an f64 bit pattern (Hz).
+#must_use
+fn n_amp_envelope_new(config, sample_rate) {
+    var sr = f64_max(sample_rate, F64_ONE);
+    var a = f64_max(f64_div(f64_from(NAdsrConfig_attack_samples(config)), sr), 0);
+    var d = f64_max(f64_div(f64_from(NAdsrConfig_decay_samples(config)), sr), 0);
+    var s = f64_min(f64_max(NAdsrConfig_sustain_level(config), 0), F64_ONE);
+    var rel = f64_max(f64_div(f64_from(NAdsrConfig_release_samples(config)), sr), 0);
+    var env = envelope_adsr_with_sample_rate(a, d, s, rel, sr);
+    if (naad_is_err(env) == 1) {
+        # fallback: 0.0 attack, 0.0 decay, 1.0 sustain, 0.01s release, 44100 Hz -- always valid
+        env = envelope_adsr_with_sample_rate(0, 0, F64_ONE, f64_div(F64_ONE, f64_from(100)), f64_from(44100));
+    }
+    return env;
+}
+
+# Lifecycle wrappers over naad (thin -- keep nidhi's envelope vocabulary).
+#inline
+fn n_amp_envelope_trigger(env) { return envelope_adsr_gate_on(env); }
+
+#inline
+fn n_amp_envelope_release(env) { return envelope_adsr_gate_off(env); }
+
+#inline
+fn n_amp_envelope_tick(env) { return envelope_adsr_next_value(env); }
+
+#inline
+#must_use
+fn n_amp_envelope_is_active(env) { return envelope_adsr_is_active(env); }
+
+#inline
+#must_use
+fn n_amp_envelope_is_releasing(env) {
+    if (envelope_adsr_state(env) == ENV_STATE_RELEASE) { return 1; }
+    return 0;
+}

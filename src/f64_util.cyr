@@ -1,0 +1,27 @@
+# f64_util.cyr -- nidhi f64 helpers (self-contained, no naad dependency)
+# Requires: math (f64_abs, f64_lt)
+#
+# f64 values are IEEE-754 bit patterns in i64 slots. nidhi's Rust is written in
+# f32 but Cyrius has only f64 (ADR-002: everything is i64) -- every f32 becomes an
+# f64 bit-pattern here, matching how naad/shravan store audio samples (vecs of f64).
+# Symbols are `n_`-prefixed so they never collide with naad's `flush_denormal` in
+# the flat concatenated bundle namespace.
+
+# f32::MIN_POSITIVE (smallest positive normal f32 = 2^-126) as an f64 bit pattern.
+# Used as the denormal-flush threshold to match the Rust crate-root helper exactly.
+var N_F32_MIN_POS = 0x3810000000000000;
+
+# f32::EPSILON (2^-23 ~= 1.1920929e-7) as an f64 bit pattern. Shared tolerance for
+# "approximately equal" checks that the Rust code did against f32::EPSILON.
+var N_F32_EPSILON = 0x3E80000000000000;
+
+# n_flush_denormal -- flush subnormal-magnitude values to +0.0 to avoid the 10-100x
+# x86 slowdown on denormals. Mirrors Rust `flush_denormal`:
+#   if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x }
+# (+0.0 has bit pattern 0, so `return 0` is the correct f64 zero.)
+#inline
+#must_use
+fn n_flush_denormal(x) {
+    if (f64_lt(f64_abs(x), N_F32_MIN_POS) == 1) { return 0; }
+    return x;
+}

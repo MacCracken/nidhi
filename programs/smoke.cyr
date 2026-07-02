@@ -1,0 +1,17 @@
+# nidhi -- library smoke build entry.
+# Proves the [lib] module include-chain compiles and links end-to-end. Stdlib is
+# auto-resolved from cyrius.cyml [deps]. This is the [build].entry target; it is
+# NOT part of the library bundle (dist/nidhi.cyr).
+
+include "src/error.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+
+fn main() {
+    alloc_init();
+    println("nidhi 0.1.0 (cyrius port) -- foundation ok");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

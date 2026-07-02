@@ -1,0 +1,90 @@
+# envelope.tcyr -- parity tests for src/envelope.cyr (ports rust-old/src/envelope.rs #[test]s).
+# naad-backed AmpEnvelope, so behavior matches naad's Adsr (== the Rust std path).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/error.cyr"
+include "src/f64_util.cyr"
+include "src/envelope.cyr"
+
+# 1 if |a - b| < tol (all f64 bits).
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    var sr = f64_from(44100);
+
+    test_group("adsr from_seconds");
+    # from_seconds(0.01, 0.05, 0.7, 0.1, 44100) -> 441, 2205, 0.7, 4410
+    var cfg = n_adsr_config_from_seconds(
+        f64_div(f64_from(1), f64_from(100)),
+        f64_div(f64_from(5), f64_from(100)),
+        f64_div(f64_from(7), f64_from(10)),
+        f64_div(f64_from(1), f64_from(10)),
+        sr);
+    assert_eq(NAdsrConfig_attack_samples(cfg), 441, "attack_samples == 441");
+    assert_eq(NAdsrConfig_decay_samples(cfg), 2205, "decay_samples == 2205");
+    assert_eq(NAdsrConfig_release_samples(cfg), 4410, "release_samples == 4410");
+    assert_eq(approx(NAdsrConfig_sustain_level(cfg), f64_div(f64_from(7), f64_from(10)),
+        f64_div(F64_ONE, f64_from(1000))), 1, "sustain_level ~= 0.7");
+
+    test_group("adsr defaults");
+    var cd = n_adsr_config_default();
+    assert_eq(NAdsrConfig_attack_samples(cd), 0, "default attack 0");
+    assert_eq(NAdsrConfig_release_samples(cd), 441, "default release 441");
+    assert_eq(f64_to(NAdsrConfig_sustain_level(cd)), 1, "default sustain 1.0");
+    # Default release is 441 (~10ms) > sample_rate*0.001 (44), so NOT SFZ-default (matches Rust).
+    assert_eq(n_adsr_config_is_default_sfz(cd, sr), 0, "default cfg (441 release) is NOT SFZ-default");
+    var czero = n_adsr_config_new(0, 0, F64_ONE, 0);
+    assert_eq(n_adsr_config_is_default_sfz(czero, sr), 1, "zero-release/attack/decay cfg IS SFZ-default");
+    var cexpl = n_adsr_config_new(100, 0, F64_ONE, 100);
+    assert_eq(n_adsr_config_is_default_sfz(cexpl, sr), 0, "explicit attack -> not SFZ-default");
+
+    test_group("amp envelope idle");
+    var e0 = n_amp_envelope_new(cd, sr);
+    assert(e0 != 0, "envelope constructed");
+    assert_eq(n_amp_envelope_is_active(e0), 0, "idle envelope is inactive");
+    assert_eq(n_amp_envelope_tick(e0), 0, "idle tick yields 0.0");
+
+    test_group("amp envelope trigger/sustain/release");
+    var half = f64_div(f64_from(5), f64_from(10));
+    var cfg2 = n_adsr_config_new(4, 4, half, 4);
+    var e = n_amp_envelope_new(cfg2, sr);
+    assert_eq(n_amp_envelope_is_active(e), 0, "inactive before trigger");
+    n_amp_envelope_trigger(e);
+    assert_eq(n_amp_envelope_is_active(e), 1, "active after trigger");
+    # advance well past attack+decay -> should sit at sustain ~0.5
+    var i = 0;
+    while (i < 100) { n_amp_envelope_tick(e); i = i + 1; }
+    var lvl = n_amp_envelope_tick(e);
+    assert_eq(approx(lvl, half, f64_div(f64_from(5), f64_from(100))), 1, "holds at sustain ~0.5");
+    # release ramps to inactive
+    n_amp_envelope_release(e);
+    assert_eq(n_amp_envelope_is_releasing(e), 1, "is_releasing after release");
+    var j = 0;
+    while (j < 10000) {
+        n_amp_envelope_tick(e);
+        if (n_amp_envelope_is_active(e) == 0) { j = 10000; } else { j = j + 1; }
+    }
+    assert_eq(n_amp_envelope_is_active(e), 0, "inactive after release completes");
+
+    test_group("amp envelope attack ramps up");
+    var cfg3 = n_adsr_config_new(100, 0, F64_ONE, 100);
+    var e2 = n_amp_envelope_new(cfg3, sr);
+    n_amp_envelope_trigger(e2);
+    var first = n_amp_envelope_tick(e2);
+    var k = 0;
+    while (k < 49) { n_amp_envelope_tick(e2); k = k + 1; }
+    var mid = n_amp_envelope_tick(e2);
+    assert_eq(f64_gt(mid, first), 1, "attack level rises (mid > first)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

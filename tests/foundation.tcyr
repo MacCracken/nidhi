@@ -1,0 +1,37 @@
+# foundation.tcyr -- parity tests for nidhi's core modules (error, f64_util, loop_mode).
+# Include order == dependency order. Run: cyrius test tests/foundation.tcyr
+
+include "src/error.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("error codes");
+    assert_eq(ERR_NONE, 0, "ERR_NONE is 0");
+    assert_eq(n_is_err(ERR_SAMPLE_NOT_FOUND), 1, "SAMPLE_NOT_FOUND is an error");
+    assert_eq(n_is_err(ERR_IMPORT), 1, "IMPORT is an error");
+    assert_eq(n_is_err(0), 0, "ERR_NONE is not an error");
+    assert_eq(n_is_err(5), 0, "a positive result is not an error");
+    assert_eq(ERR_IMPORT, 0 - 5, "ImportError maps to -5");
+
+    test_group("loop modes");
+    assert_eq(n_loop_mode_default(), 0, "default LoopMode is OneShot(0)");
+    assert_eq(LOOP_FORWARD, 1, "Forward is 1");
+    assert_eq(LOOP_SUSTAIN, 4, "LoopSustain is 4");
+    assert_eq(n_loop_mode_valid(4), 1, "tag 4 is valid");
+    assert_eq(n_loop_mode_valid(5), 0, "tag 5 is invalid");
+    assert_eq(n_loop_mode_valid(0 - 1), 0, "tag -1 is invalid");
+
+    test_group("flush_denormal");
+    # a normal-magnitude value passes through unchanged
+    assert_eq(f64_to(n_flush_denormal(f64_from(5))), 5, "normal 5.0 passes through");
+    # +0.0 (bit pattern 0) stays 0
+    assert_eq(n_flush_denormal(0), 0, "zero stays zero");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

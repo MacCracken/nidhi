@@ -1,0 +1,27 @@
+# naad_link.tcyr -- proves nidhi can link and call naad (its DSP backbone).
+# First-party dep bundles are included explicitly in dependency order; stdlib auto-resolves.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("naad dsp helpers");
+    # 0 dB -> unity gain; check finiteness (avoid exact float compares)
+    assert_eq(naad_is_finite(db_to_amplitude(f64_from(0))), 1, "db_to_amplitude(0) finite");
+    assert_eq(naad_is_finite(amplitude_to_db(F64_ONE)), 1, "amplitude_to_db(1) finite");
+
+    test_group("naad adsr");
+    var env = envelope_adsr_new(f64_from(0), f64_from(0), F64_ONE, f64_from(0));
+    assert(env != 0, "adsr constructed (non-null)");
+    envelope_adsr_gate_on(env);
+    var v = envelope_adsr_next_value(env);
+    assert_eq(naad_is_finite(v), 1, "adsr next_value is finite");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

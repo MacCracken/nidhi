@@ -1,0 +1,45 @@
+[package]
+name = "nidhi"
+version = "${file:VERSION}"
+description = "nidhi — Sample playback engine (Cyrius port): key/velocity zones, loop modes, time-stretching, SFZ/SF2 import"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/nidhi"
+language = "cyrius"
+cyrius = "6.3.33"
+
+[build]
+entry = "programs/smoke.cyr"
+output = "build/nidhi-smoke"
+
+# [lib].modules is dependency-ordered. The dist bundle (dist/nidhi.cyr, built by
+# `cyrius distlib`) is a plain concatenation, so any module may reference symbols
+# from a module listed above it. Ported so far: error, f64_util, loop_mode.
+# Full target order tracked in docs/port/01-PLAN.md.
+[lib]
+modules = [
+    "src/error.cyr",
+    "src/f64_util.cyr",
+    "src/loop_mode.cyr",
+    "src/envelope.cyr",
+]
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "bench", "tagged", "result", "fnptr", "math", "ganita", "hashmap", "bayan"]
+
+# nidhi uses naad fully for DSP (ADSR, filters, LFOs, effects, voice mgmt,
+# interpolation, onset/normalize). naad transitively references hisab + goonj, and
+# shravan references sankoch — declared here so the flat bundle resolves.
+[deps.naad]
+git = "https://github.com/MacCracken/naad.git"
+tag = "2.1.0"
+modules = ["dist/naad.cyr"]
+
+[deps.hisab]
+git = "https://github.com/MacCracken/hisab.git"
+tag = "2.6.7"
+modules = ["dist/hisab.cyr"]
+
+[deps.shravan]
+git = "https://github.com/MacCracken/shravan.git"
+tag = "2.5.12"
+modules = ["dist/shravan.cyr"]

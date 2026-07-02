@@ -1,0 +1,31 @@
+# loop_mode.cyr -- LoopMode tags
+# Requires: (nothing)
+#
+# Ports the Rust fieldless `LoopMode` enum. Tag order == Rust declaration order;
+# the #[default] variant is OneShot(0), so the zero value is a valid default.
+#
+#   0 LOOP_ONESHOT   -- play once, stop (default)
+#   1 LOOP_FORWARD   -- start->end, jump to loop_start, repeat
+#   2 LOOP_PINGPONG  -- forward then backward within the loop region
+#   3 LOOP_REVERSE   -- play backwards
+#   4 LOOP_SUSTAIN   -- loop while held, play through to end on release
+
+var LOOP_ONESHOT  = 0;
+var LOOP_FORWARD  = 1;
+var LOOP_PINGPONG = 2;
+var LOOP_REVERSE  = 3;
+var LOOP_SUSTAIN  = 4;
+
+# n_loop_mode_default -- the #[default] variant (OneShot).
+#must_use
+fn n_loop_mode_default() {
+    return LOOP_ONESHOT;
+}
+
+# n_loop_mode_valid -- 1 if `m` is a defined LoopMode tag (0..=4), else 0.
+#must_use
+fn n_loop_mode_valid(m) {
+    if (m < 0) { return 0; }
+    if (m > 4) { return 0; }
+    return 1;
+}

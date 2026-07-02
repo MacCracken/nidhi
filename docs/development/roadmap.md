@@ -1,46 +1,36 @@
-# nidhi — Post-1.0 Roadmap
+# nidhi — Roadmap
 
-nidhi is the standalone sampler crate in the AGNOS ecosystem, replacing
-`shruti-instruments::sampler`. Published to crates.io at 1.0.0.
+> Milestone plan through v1.0. State lives in [`state.md`](state.md);
+> this file is the sequencing — what ships, in what order, against
+> what dependency gates.
 
-## v1.1.0 — Performance + real-time safety ✓
+## v1.0 criteria
 
-Zero-allocation render path, SIMD, and caching optimizations. Released 2026-03-28.
+_Define before tagging v0.1.0:_
 
-- [x] Benchmark suite: voice count scaling, buffer fill throughput, interpolation cost
-- [x] Pre-allocated voice buffers (zero allocation in render path)
-- [x] Fix per-sample Vec allocation in `fill_buses_stereo`
-- [x] Per-voice buffer accumulation (batch render into temp buffer, then SIMD mix-down)
-- [x] Filter coefficient caching (epsilon check on cutoff, skip recompute when unchanged)
-- [x] Envelope stage duration caching (no-op — already cheap, naad handles internally)
-- [x] Denormal flushing via `flush_denormal()` in no_std filter feedback + envelope release
-- [x] Parameter smoothing via `naad::smoothing::ParamSmoother` (filter cutoff modulation)
-- [x] SIMD-accelerated stereo mixing (`core::arch` SSE2/NEON, behind `simd` feature)
-- [x] SIMD-accelerated cubic Hermite interpolation (L/R in f32x4, behind `simd` feature)
+- [ ] Rust → Cyrius surface parity verified (function-level diff against `rust-old/`)
+- [ ] Test coverage adequate for the surface area
+- [ ] Benchmarks captured in `docs/benchmarks.md`
+- [ ] At least one downstream consumer green
+- [ ] CHANGELOG complete from v0.1.0 onward
+- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
 
-## v1.2.0 — Advanced modulation + expression
+## Milestones
 
-Full modulation matrix and richer voice expression.
+### M0 — Port scaffold (v0.1.0) — ✅ shipped 2026-07-02
 
-- [ ] Modulation matrix via `naad::mod_matrix::ModMatrix` (8x8 source→destination routing)
-- [ ] Feed LFO/envelope/velocity/mod wheel/aftertouch/pitch bend as mod sources
-- [ ] Per-voice pitch envelope (separate from amp ADSR)
-- [ ] Amplitude LFO (tremolo) via zone config
-- [ ] Random/sequence round-robin modes
-- [ ] Portamento (glide between notes in mono/legato mode)
+- `cyrius port` scaffold landed
+- Rust source moved to `rust-old/`
+- Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 
-## v1.3.0 — Advanced time-stretching + grain
+### M1 — Surface parity (v0.2.0)
 
-Real-time granular playback and FFT-based stretching.
+_Pick a parseable Rust subset and verify the Cyrius port matches it function-for-function. Specify the dep gates and the acceptance criteria._
 
-- [ ] Integrate TimeStretcher into engine (real-time grain mode)
-- [ ] Grain size configuration (10–100ms, configurable overlap)
-- [ ] Phase vocoder time-stretching (FFT-based, replace WSOLA fallback)
-- [ ] Pitch-independent time-stretch in render loop (0.25x–4.0x)
-- [ ] Granular freeze mode (sustain a single grain position)
+### M2 — _Title_ (v0.3.0)
 
-## Backlog
+_…_
 
-- [x] ~~Incorporate shravan~~ — done in 1.0.1 (replaced hound with shravan 1.0.1)
-- [ ] dhvani integration tested end-to-end (shruti consuming nidhi via dhvani)
-- [ ] FLAC/AIFF/OGG loading helpers in `io` module (shravan now provides codecs)
+## Out of scope (for v1.0)
+
+_Capture what's deliberately NOT in scope for v1.0._

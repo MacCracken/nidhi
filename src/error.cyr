@@ -1,0 +1,30 @@
+# error.cyr -- nidhi error codes
+# Requires: (nothing -- pure integer constants + a predicate)
+#
+# Ports the Rust `NidhiError` enum to negative integer error codes, matching the
+# naad/hisab/shravan ecosystem convention (functions return 0/ERR_NONE or a valid
+# pointer on success, a negative ERR_* on failure). The Rust variants' String
+# payloads are dropped -- the code IS the error. Config/data types that need a
+# faithful serde round-trip use `#derive(Serialize)` instead (see zone.cyr etc.).
+#
+# Rust variant           -> code
+#   (ok)                 ->  ERR_NONE            = 0
+#   SampleNotFound(id)   ->  ERR_SAMPLE_NOT_FOUND = -1
+#   InvalidZone(msg)     ->  ERR_INVALID_ZONE     = -2
+#   InvalidParameter{..} ->  ERR_INVALID_PARAMETER = -3
+#   Playback(msg)        ->  ERR_PLAYBACK         = -4
+#   ImportError(msg)     ->  ERR_IMPORT           = -5
+
+var ERR_NONE              = 0;
+var ERR_SAMPLE_NOT_FOUND  = (0 - 1);
+var ERR_INVALID_ZONE      = (0 - 2);
+var ERR_INVALID_PARAMETER = (0 - 3);
+var ERR_PLAYBACK          = (0 - 4);
+var ERR_IMPORT            = (0 - 5);
+
+# n_is_err -- 1 if `code` is a nidhi error (negative), else 0.
+#must_use
+fn n_is_err(code) {
+    if (code < 0) { return 1; }
+    return 0;
+}
