@@ -15,6 +15,15 @@ var N_F32_MIN_POS = 0x3810000000000000;
 # "approximately equal" checks that the Rust code did against f32::EPSILON.
 var N_F32_EPSILON = 0x3E80000000000000;
 
+# n_is_finite(x) -- 1 if the f64 bit pattern x is finite (not +/-Inf, not NaN), else 0.
+# Non-finite <=> the 11 exponent bits are all set (0x7FF).
+#inline
+#must_use
+fn n_is_finite(x) {
+    if ((x & 0x7FF0000000000000) == 0x7FF0000000000000) { return 0; }
+    return 1;
+}
+
 # n_flush_denormal -- flush subnormal-magnitude values to +0.0 to avoid the 10-100x
 # x86 slowdown on denormals. Mirrors Rust `flush_denormal`:
 #   if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x }

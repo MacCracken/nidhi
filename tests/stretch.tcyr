@@ -1,0 +1,113 @@
+# stretch.tcyr -- parity tests for src/stretch.cyr (ports rust-old/src/stretch.rs #[test]s).
+
+include "src/f64_util.cyr"
+include "src/stretch.cyr"
+
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+fn all_finite(v) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (n_is_finite(vec_get(v, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn make_sine(freq, sr, n) {
+    var out = vec_new();
+    var i = 0;
+    while (i < n) {
+        var ph = f64_div(f64_mul(f64_mul(F64_TAU, f64_from(freq)), f64_from(i)), f64_from(sr));
+        vec_push(out, f64_sin(ph));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn main() {
+    alloc_init();
+
+    var n_in = 4410;
+    var sine = make_sine(440, 44100, n_in);
+    var st = n_stretcher_new(sine, f64_from(44100));
+    var ratio15 = f64_div(f64_from(3), f64_from(2));
+
+    test_group("length ratios");
+    var r1 = n_stretch(st, F64_ONE);
+    assert(vec_len(r1) >= (n_in * 98) / 100, "ratio 1.0 length >= 98% input");
+    assert(vec_len(r1) <= (n_in * 102) / 100, "ratio 1.0 length <= 102% input");
+    var r2 = n_stretch(st, f64_from(2));
+    assert(vec_len(r2) >= (n_in * 2 * 95) / 100, "ratio 2.0 ~ 2x (>=95%)");
+    assert(vec_len(r2) <= (n_in * 2 * 105) / 100, "ratio 2.0 ~ 2x (<=105%)");
+    var rh = n_stretch(st, F64_HALF);
+    assert(vec_len(rh) >= (n_in * 95) / 200, "ratio 0.5 ~ half (>=95%)");
+    assert(vec_len(rh) <= (n_in * 105) / 200, "ratio 0.5 ~ half (<=105%)");
+
+    test_group("finite output");
+    var wo = n_stretch(st, ratio15);
+    assert(vec_len(wo) > 0, "wsola output non-empty");
+    assert_eq(all_finite(wo), 1, "wsola output all finite");
+    var oo = n_stretch_ola(st, ratio15);
+    assert(vec_len(oo) > 0, "ola output non-empty");
+    assert_eq(all_finite(oo), 1, "ola output all finite");
+
+    test_group("empty + invalid ratios");
+    var empty_st = n_stretcher_new(vec_new(), f64_from(44100));
+    assert_eq(vec_len(n_stretch(empty_st, f64_from(2))), 0, "empty input -> empty (wsola)");
+    assert_eq(vec_len(n_stretch_ola(empty_st, f64_from(2))), 0, "empty input -> empty (ola)");
+    assert_eq(vec_len(n_stretch(st, f64_from(0))), 0, "ratio 0 -> empty");
+    assert_eq(vec_len(n_stretch(st, f64_neg(F64_ONE))), 0, "ratio -1 -> empty");
+    assert_eq(vec_len(n_stretch(st, 0x7FF8000000000000)), 0, "ratio NaN -> empty");
+    assert_eq(vec_len(n_stretch(st, 0x7FF0000000000000)), 0, "ratio +Inf -> empty");
+
+    test_group("very short input (stretch_short)");
+    var shortv = vec_new();
+    vec_push(shortv, F64_HALF);
+    vec_push(shortv, f64_div(f64_from(3), f64_from(10)));
+    vec_push(shortv, f64_div(f64_from(1), f64_from(10)));
+    var short_st = n_stretcher_new(shortv, f64_from(44100));
+    var sw = n_stretch(short_st, f64_from(2));
+    assert(vec_len(sw) > 0, "short wsola non-empty");
+    assert_eq(all_finite(sw), 1, "short wsola finite");
+    assert(vec_len(n_stretch_ola(short_st, f64_from(2))) > 0, "short ola non-empty");
+
+    test_group("stretch_with_mode dispatch");
+    var mo = n_stretch_with_mode(st, ratio15, SM_OLA);
+    var mw = n_stretch_with_mode(st, ratio15, SM_WSOLA);
+    var mp = n_stretch_with_mode(st, ratio15, SM_PHASE_VOCODER);
+    assert(vec_len(mo) > 0, "mode OLA non-empty");
+    assert(vec_len(mw) > 0, "mode WSOLA non-empty");
+    assert(vec_len(mp) > 0, "mode PhaseVocoder non-empty");
+    assert_eq(vec_len(mw), vec_len(mp), "PhaseVocoder length == WSOLA length");
+
+    test_group("cross_correlate");
+    var cc = vec_new();
+    var ci = 0;
+    while (ci < 128) { vec_push(cc, f64_from(ci)); ci = ci + 1; }
+    assert_eq(n_cross_correlate(cc, cc, 64), 0, "identical -> lag 0");
+    assert_eq(n_cross_correlate(vec_new(), cc, 64), 0, "empty a -> 0");
+    assert_eq(n_cross_correlate(cc, vec_new(), 64), 0, "empty b -> 0");
+
+    test_group("hann window");
+    var hw = n_hann_window(256);
+    assert_eq(vec_len(hw), 256, "hann len 256");
+    var t2 = f64_div(f64_from(2), f64_from(100));
+    assert_eq(approx(vec_get(hw, 0), f64_from(0), t2), 1, "hann[0] ~ 0");
+    assert_eq(approx(vec_get(hw, 255), f64_from(0), t2), 1, "hann[255] ~ 0");
+    assert_eq(approx(vec_get(hw, 127), F64_ONE, t2), 1, "hann[127] ~ 1.0");
+
+    test_group("builder");
+    var bs = n_stretcher_new(vec_new(), f64_from(44100));
+    bs = n_stretcher_with_frame_size(bs, 512);
+    assert_eq(NTimeStretcher_frame_size(bs), 512, "with_frame_size sets 512");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

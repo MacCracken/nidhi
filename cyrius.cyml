@@ -25,6 +25,7 @@ modules = [
     "src/sample.cyr",
     "src/instrument.cyr",
     "src/capture.cyr",
+    "src/stretch.cyr",
 ]
 
 [deps]

@@ -58,8 +58,8 @@ docs/port/          this plan + the 13 recon briefs (10-26)
 | 5 | `zone.cyr` | zone.rs | env, loop_mode | ✅ done (zone.tcyr 33/0). 32 fields + VelocityCurve/FilterMode + matches()/playback_ratio() |
 | 6 | `sample.cyr` | sample.rs | vec, math | ✅ done (sample.tcyr 25/0). NSample (vec-of-f64 buffers), cubic-hermite interp, energy detect_onsets (naad's is spectral-flux, different), SampleBank. SampleId = bare i64 |
 | 7 | `instrument.cyr` | instrument.rs | zone | ✅ done (instrument.tcyr 13/0). find_zones + round-robin (u32-wrap counter per group) |
-| 8 | `stretch.cyr` | stretch.rs | vec, math | **NEXT**: WSOLA/OLA; hot loops `#inline` |
-| 9 | `effect_chain.cyr` | effect_chain.rs | **naad** | 5-slot chain over naad effects |
+| 8 | `stretch.cyr` | stretch.rs | vec, math, f64_util | ✅ done (stretch.tcyr 31/0). WSOLA + OLA + cross_correlate + hann + stretch_short; NaN/Inf guards via bit patterns |
+| 9 | `effect_chain.cyr` | effect_chain.rs | **naad** | **NEXT**: 5-slot serial chain over naad effects (Reverb/Delay/Chorus/Compressor/Limiter); bug-for-bug Reverb::new arg order per brief 22 §2.4 |
 | 10 | `capture.cyr` | capture.rs | vec, math, **naad** | ✅ done (capture.tcyr 17/0). SampleRecorder, trim_silence, normalize_peak/rms→naad, detect_loop_points |
 | 11 | `sfz.cyr` | sfz.rs | str, hashmap | text parser (40+ opcodes); fuzz |
 | 12 | `sf2.cyr` | sf2.rs | vec | RIFF binary parser; fuzz |
