@@ -30,6 +30,7 @@ modules = [
     "src/io.cyr",
     "src/sf2.cyr",
     "src/sfz.cyr",
+    "src/engine.cyr",
 ]
 
 [deps]

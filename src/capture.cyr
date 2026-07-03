@@ -236,27 +236,33 @@ fn n_detect_loop_points(sample, min_loop_frames) {
         if (vec_len(c_starts) > 100) { ci = ncross; } else { ci = ci + 1; }
     }
 
-    # 4. selection sort by score DESCENDING
+    # 4. STABLE insertion sort by score DESCENDING (ties keep insertion order, matching
+    #    Rust's stable sort_by). Element a2 shifts left past strictly-smaller scores only.
     var ncand = vec_len(c_starts);
-    var a2 = 0;
+    var a2 = 1;
     while (a2 < ncand) {
-        var best = a2;
-        var b2 = a2 + 1;
-        while (b2 < ncand) {
-            if (f64_gt(vec_get(c_scores, b2), vec_get(c_scores, best)) == 1) { best = b2; }
-            b2 = b2 + 1;
+        var ks = vec_get(c_starts, a2);
+        var ke = vec_get(c_ends, a2);
+        var ksc = vec_get(c_scores, a2);
+        var b2 = a2 - 1;
+        var shifting = 1;
+        while (shifting == 1) {
+            if (b2 < 0) {
+                shifting = 0;
+            } else {
+                if (f64_lt(vec_get(c_scores, b2), ksc) == 1) {
+                    vec_set(c_starts, b2 + 1, vec_get(c_starts, b2));
+                    vec_set(c_ends, b2 + 1, vec_get(c_ends, b2));
+                    vec_set(c_scores, b2 + 1, vec_get(c_scores, b2));
+                    b2 = b2 - 1;
+                } else {
+                    shifting = 0;
+                }
+            }
         }
-        if (best != a2) {
-            var ts = vec_get(c_starts, a2);
-            vec_set(c_starts, a2, vec_get(c_starts, best));
-            vec_set(c_starts, best, ts);
-            var te = vec_get(c_ends, a2);
-            vec_set(c_ends, a2, vec_get(c_ends, best));
-            vec_set(c_ends, best, te);
-            var tsc = vec_get(c_scores, a2);
-            vec_set(c_scores, a2, vec_get(c_scores, best));
-            vec_set(c_scores, best, tsc);
-        }
+        vec_set(c_starts, b2 + 1, ks);
+        vec_set(c_ends, b2 + 1, ke);
+        vec_set(c_scores, b2 + 1, ksc);
         a2 = a2 + 1;
     }
 

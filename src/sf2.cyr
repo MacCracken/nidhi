@@ -413,7 +413,7 @@ fn sf2_parse(data, len) {
                             var sdstart = soff + 8;
                             var sdend = sdstart + ssize;
                             if (sdend > cdata_end) {
-                                subscan = 0;
+                                return 0 - 6;
                             } else {
                                 if (sid == CC_SMPL) {
                                     smpl_ptr = data + sdstart;
@@ -454,7 +454,7 @@ fn sf2_parse(data, len) {
         var pdstart = poff + 8;
         var pdend = pdstart + psize;
         if (pdend > pdta_len) {
-            poff = pdta_len;
+            return 0 - 6;
         } else {
             if (pid == CC_PHDR) { phdr_ptr = pdta_ptr + pdstart; phdr_len = psize; phdr_found = 1; }
             if (pid == CC_PBAG) { pbag_ptr = pdta_ptr + pdstart; pbag_len = psize; pbag_found = 1; }

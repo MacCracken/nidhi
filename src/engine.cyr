@@ -1,0 +1,611 @@
+# engine.cyr -- SamplerEngine: voice management + per-sample render loop
+# Requires: alloc, vec, math (f64_*, f64_pow, f64_floor), sample, zone, instrument, envelope,
+#           loop_mode, naad (filter_svf_*, SvfOutput_*, modulation_lfo_*, smoothing_*,
+#           voice_manager_*, POLY_MODE_*, STEAL_MODE_*, MODULATION_LFO_SINE, naad_is_err)
+#
+# Ports rust-old/src/engine.rs (std path). "Use naad fully": the SVF filter, LFOs, cutoff
+# smoother, and VoiceManager are naad's own. The engine never ticks the VoiceManager, so naad
+# ages stay 0 -> Oldest steals the highest active index -- exactly the Rust parity behavior.
+# Options -> null pointer (0) / -1 sentinel. All f32 -> f64. fill_buffer_stereo is rendered
+# per-frame (output-identical to the Rust per-voice block render).
+
+# PolyMode / StealMode: reuse naad's constants (POLY_MODE_POLY=0/MONO=1/LEGATO=2,
+# STEAL_MODE_OLDEST=0/QUIETEST=1/LOWEST=2/NONE=3).
+
+# --- VoiceFilter: stereo pair of naad SVFs ---
+#derive(accessors)
+struct NVoiceFilter { active; last_cutoff; filter_l; filter_r; mode; }
+
+#must_use
+fn nvf_bypass() {
+    var vf = alloc(sizeof(NVoiceFilter));
+    NVoiceFilter_set_active(vf, 0);
+    NVoiceFilter_set_last_cutoff(vf, 0);
+    NVoiceFilter_set_filter_l(vf, 0);
+    NVoiceFilter_set_filter_r(vf, 0);
+    NVoiceFilter_set_mode(vf, FILTER_LOWPASS);
+    return vf;
+}
+
+#must_use
+fn nvf_new(cutoff, resonance, mode, vel_track, velocity, sample_rate) {
+    if (f64_le(cutoff, 0) == 1) { return nvf_bypass(); }
+    var vel_norm = f64_div(f64_from(velocity), f64_from(127));
+    var ec = f64_mul(cutoff, f64_sub(F64_ONE, f64_mul(vel_track, f64_sub(F64_ONE, vel_norm))));
+    var hi = f64_mul(sample_rate, f64_div(f64_from(49), f64_from(100)));
+    ec = f64_min(f64_max(ec, f64_from(20)), hi);
+    var q = f64_max(resonance, f64_div(F64_ONE, f64_from(10)));
+    var fl = filter_svf_new(ec, q, sample_rate);
+    if (naad_is_err(fl) == 1) { fl = 0; }
+    var fr = filter_svf_new(ec, q, sample_rate);
+    if (naad_is_err(fr) == 1) { fr = 0; }
+    var vf = alloc(sizeof(NVoiceFilter));
+    var active = 0;
+    if (fl != 0) { active = 1; }
+    NVoiceFilter_set_active(vf, active);
+    NVoiceFilter_set_last_cutoff(vf, ec);
+    NVoiceFilter_set_filter_l(vf, fl);
+    NVoiceFilter_set_filter_r(vf, fr);
+    NVoiceFilter_set_mode(vf, mode);
+    return vf;
+}
+
+#inline
+fn nvf_pick(svfout, mode) {
+    if (mode == FILTER_HIGHPASS) { return SvfOutput_high_pass(svfout); }
+    if (mode == FILTER_BANDPASS) { return SvfOutput_band_pass(svfout); }
+    if (mode == FILTER_NOTCH) { return SvfOutput_notch(svfout); }
+    return SvfOutput_low_pass(svfout);
+}
+
+fn nvf_set_cutoff(vf, cutoff, sample_rate) {
+    if (NVoiceFilter_active(vf) == 0) { return 0; }
+    var hi = f64_mul(sample_rate, f64_div(f64_from(49), f64_from(100)));
+    var c = f64_min(f64_max(cutoff, f64_from(20)), hi);
+    if (f64_lt(f64_abs(f64_sub(c, NVoiceFilter_last_cutoff(vf))), f64_div(F64_ONE, f64_from(2))) == 1) { return 0; }
+    NVoiceFilter_set_last_cutoff(vf, c);
+    var fl = NVoiceFilter_filter_l(vf);
+    if (fl != 0) { filter_svf_set_params(fl, c, filter_svf_q(fl)); }
+    var fr = NVoiceFilter_filter_r(vf);
+    if (fr != 0) { filter_svf_set_params(fr, c, filter_svf_q(fr)); }
+    return 0;
+}
+
+fn nvf_process_stereo(vf, left, right, out2) {
+    if (NVoiceFilter_active(vf) == 0) { store64(out2, left); store64(out2 + 8, right); return 0; }
+    var mode = NVoiceFilter_mode(vf);
+    var l = left;
+    var fl = NVoiceFilter_filter_l(vf);
+    if (fl != 0) { l = nvf_pick(filter_svf_process_sample(fl, left), mode); }
+    var r = right;
+    var fr = NVoiceFilter_filter_r(vf);
+    if (fr != 0) { r = nvf_pick(filter_svf_process_sample(fr, right), mode); }
+    store64(out2, l);
+    store64(out2 + 8, r);
+    return 0;
+}
+
+# --- SamplerVoice ---
+#derive(accessors)
+struct NSamplerVoice {
+    active;
+    zone_index;
+    position;
+    speed;
+    amplitude;
+    note;
+    age;
+    forward;
+    amp_env;
+    filter_env;
+    filter_env_depth;
+    base_cutoff;
+    filter;
+    pitch_bend;
+    pressure;
+    brightness;
+    choke_group;
+    pitch_lfo;
+    pitch_lfo_depth;
+    filter_lfo;
+    filter_lfo_depth;
+    fil_keytrack;
+    cutoff_smoother;
+}
+
+#must_use
+fn n_voice_new(sample_rate) {
+    var v = alloc(sizeof(NSamplerVoice));
+    NSamplerVoice_set_active(v, 0);
+    NSamplerVoice_set_zone_index(v, 0);
+    NSamplerVoice_set_position(v, 0);
+    NSamplerVoice_set_speed(v, F64_ONE);
+    NSamplerVoice_set_amplitude(v, F64_ONE);
+    NSamplerVoice_set_note(v, 0);
+    NSamplerVoice_set_age(v, 0);
+    NSamplerVoice_set_forward(v, 1);
+    NSamplerVoice_set_amp_env(v, n_amp_envelope_new(n_adsr_config_default(), sample_rate));
+    NSamplerVoice_set_filter_env(v, 0);
+    NSamplerVoice_set_filter_env_depth(v, 0);
+    NSamplerVoice_set_base_cutoff(v, 0);
+    NSamplerVoice_set_filter(v, nvf_bypass());
+    NSamplerVoice_set_pitch_bend(v, 0);
+    NSamplerVoice_set_pressure(v, 0);
+    NSamplerVoice_set_brightness(v, F64_HALF);
+    NSamplerVoice_set_choke_group(v, 0);
+    NSamplerVoice_set_pitch_lfo(v, 0);
+    NSamplerVoice_set_pitch_lfo_depth(v, 0);
+    NSamplerVoice_set_filter_lfo(v, 0);
+    NSamplerVoice_set_filter_lfo_depth(v, 0);
+    NSamplerVoice_set_fil_keytrack(v, 0);
+    NSamplerVoice_set_cutoff_smoother(v, smoothing_new(f64_div(f64_from(5), f64_from(1000)), sample_rate, 0));
+    return v;
+}
+
+#inline
+#must_use
+fn n_voice_is_active(v) { return NSamplerVoice_active(v); }
+#inline
+#must_use
+fn n_voice_note(v) { return NSamplerVoice_note(v); }
+
+# --- SamplerEngine ---
+#derive(accessors)
+struct NSamplerEngine {
+    voices;
+    instrument;
+    bank;
+    sample_rate;
+    default_adsr;
+    pitch_bend_range;
+    scratch_buf;
+    voice_mgr;
+}
+
+#must_use
+fn n_engine_new(max_voices, sample_rate) {
+    var e = alloc(sizeof(NSamplerEngine));
+    var voices = vec_new();
+    var i = 0;
+    while (i < max_voices) { vec_push(voices, n_voice_new(sample_rate)); i = i + 1; }
+    NSamplerEngine_set_voices(e, voices);
+    NSamplerEngine_set_instrument(e, 0);
+    NSamplerEngine_set_bank(e, n_sample_bank_new());
+    NSamplerEngine_set_sample_rate(e, sample_rate);
+    var rel = f64_to(f64_max(f64_mul(sample_rate, f64_div(F64_ONE, f64_from(100))), F64_ONE));
+    NSamplerEngine_set_default_adsr(e, n_adsr_config_new(0, 0, F64_ONE, rel));
+    NSamplerEngine_set_pitch_bend_range(e, f64_from(2));
+    var scratch = vec_new();
+    var z = 0;
+    while (z < 2048) { vec_push(scratch, 0); z = z + 1; }
+    NSamplerEngine_set_scratch_buf(e, scratch);
+    NSamplerEngine_set_voice_mgr(e, voice_manager_new(max_voices, POLY_MODE_POLY, STEAL_MODE_OLDEST));
+    return e;
+}
+
+fn n_engine_set_instrument(e, inst) { NSamplerEngine_set_instrument(e, inst); return 0; }
+fn n_engine_set_bank(e, bank) { NSamplerEngine_set_bank(e, bank); return 0; }
+#must_use
+fn n_engine_bank(e) { return NSamplerEngine_bank(e); }
+fn n_engine_set_adsr(e, cfg) { NSamplerEngine_set_default_adsr(e, cfg); return 0; }
+fn n_engine_set_release_ms(e, ms) {
+    var cfg = NSamplerEngine_default_adsr(e);
+    var rel = f64_to(f64_max(f64_div(f64_mul(NSamplerEngine_sample_rate(e), ms), f64_from(1000)), F64_ONE));
+    NAdsrConfig_set_release_samples(cfg, rel);
+    return 0;
+}
+fn n_engine_set_pitch_bend_range(e, semitones) { NSamplerEngine_set_pitch_bend_range(e, f64_max(semitones, 0)); return 0; }
+fn n_engine_set_steal_mode(e, mode) { VoiceManager_set_steal_mode(NSamplerEngine_voice_mgr(e), mode); return 0; }
+fn n_engine_set_poly_mode(e, mode) { VoiceManager_set_poly_mode(NSamplerEngine_voice_mgr(e), mode); return 0; }
+
+fn n_engine_apply_pitch_bend(e, note, bend) {
+    var bs = f64_mul(bend, NSamplerEngine_pitch_bend_range(e));
+    var voices = NSamplerEngine_voices(e);
+    var nv = vec_len(voices);
+    var i = 0;
+    while (i < nv) {
+        var v = vec_get(voices, i);
+        if (NSamplerVoice_active(v) == 1) { if (NSamplerVoice_note(v) == note) { NSamplerVoice_set_pitch_bend(v, bs); } }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn n_engine_apply_pressure(e, note, pressure) {
+    var p = f64_min(f64_max(pressure, 0), F64_ONE);
+    var voices = NSamplerEngine_voices(e);
+    var nv = vec_len(voices);
+    var i = 0;
+    while (i < nv) {
+        var v = vec_get(voices, i);
+        if (NSamplerVoice_active(v) == 1) { if (NSamplerVoice_note(v) == note) { NSamplerVoice_set_pressure(v, p); } }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn n_engine_apply_brightness(e, note, brightness) {
+    var b = f64_min(f64_max(brightness, 0), F64_ONE);
+    var voices = NSamplerEngine_voices(e);
+    var nv = vec_len(voices);
+    var i = 0;
+    while (i < nv) {
+        var v = vec_get(voices, i);
+        if (NSamplerVoice_active(v) == 1) { if (NSamplerVoice_note(v) == note) { NSamplerVoice_set_brightness(v, b); } }
+        i = i + 1;
+    }
+    return 0;
+}
+
+#must_use
+fn n_engine_active_voice_count(e) {
+    var voices = NSamplerEngine_voices(e);
+    var nv = vec_len(voices);
+    var c = 0;
+    var i = 0;
+    while (i < nv) { if (NSamplerVoice_active(vec_get(voices, i)) == 1) { c = c + 1; } i = i + 1; }
+    return c;
+}
+
+# test helper: 1 if some active voice currently plays `note`, else 0.
+#must_use
+fn n_engine_has_active_note(e, note) {
+    var voices = NSamplerEngine_voices(e);
+    var nv = vec_len(voices);
+    var i = 0;
+    while (i < nv) {
+        var v = vec_get(voices, i);
+        if (NSamplerVoice_active(v) == 1) { if (NSamplerVoice_note(v) == note) { return 1; } }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# note_on(note, velocity) -> voice index, or -1.
+fn n_engine_note_on(e, note, velocity) {
+    var inst = NSamplerEngine_instrument(e);
+    if (inst == 0) { return 0 - 1; }
+    var matching = n_instrument_find_zones(inst, note, velocity);
+    if (vec_len(matching) == 0) { return 0 - 1; }
+    var zones = NInstrument_zones(inst);
+    var zone = vec_get(matching, 0);
+    var zone_idx = 0;
+    var nz = vec_len(zones);
+    var zi = 0;
+    while (zi < nz) {
+        if (vec_get(zones, zi) == zone) { zone_idx = zi; zi = nz; } else { zi = zi + 1; }
+    }
+
+    var sr = NSamplerEngine_sample_rate(e);
+    var speed = n_zone_playback_ratio(zone, note);
+    var amp = n_velocity_curve_apply(NZone_vel_curve(zone), velocity);
+    var f_cutoff = NZone_filter_cutoff(zone);
+    var f_res = NZone_filter_resonance(zone);
+    var f_type = NZone_filter_type(zone);
+    var f_vel = NZone_filter_vel_track(zone);
+    var adsr_config = NZone_adsr(zone);
+    if (adsr_config == 0) { adsr_config = NSamplerEngine_default_adsr(e); }
+    var choke = NZone_choke_group(zone);
+    var sample_offset = NZone_sample_offset(zone);
+    var fileg_config = NZone_fileg(zone);
+    var fileg_depth = NZone_fileg_depth(zone);
+    var plfo_rate = NZone_pitchlfo_rate(zone);
+    var plfo_depth = NZone_pitchlfo_depth(zone);
+    var flfo_rate = NZone_fillfo_rate(zone);
+    var flfo_depth = NZone_fillfo_depth(zone);
+    var keytrack = NZone_fil_keytrack(zone);
+
+    var voice_filter = nvf_new(f_cutoff, f_res, f_type, f_vel, velocity, sr);
+
+    # choke: hard-cut active voices in the same choke group (before allocation)
+    if (choke > 0) {
+        var voices0 = NSamplerEngine_voices(e);
+        var nv0 = vec_len(voices0);
+        var ci = 0;
+        while (ci < nv0) {
+            var cv = vec_get(voices0, ci);
+            if (NSamplerVoice_active(cv) == 1) { if (NSamplerVoice_choke_group(cv) == choke) { NSamplerVoice_set_active(cv, 0); } }
+            ci = ci + 1;
+        }
+    }
+
+    var vidx = voice_manager_note_on(NSamplerEngine_voice_mgr(e), note, f64_div(f64_from(velocity), f64_from(127)));
+    if (vidx < 0) { return 0 - 1; }
+
+    var voice = vec_get(NSamplerEngine_voices(e), vidx);
+    NSamplerVoice_set_active(voice, 1);
+    NSamplerVoice_set_zone_index(voice, zone_idx);
+    NSamplerVoice_set_position(voice, f64_from(sample_offset));
+    NSamplerVoice_set_speed(voice, speed);
+    NSamplerVoice_set_amplitude(voice, amp);
+    NSamplerVoice_set_note(voice, note);
+    NSamplerVoice_set_age(voice, 0);
+    NSamplerVoice_set_forward(voice, 1);
+    NSamplerVoice_set_filter(voice, voice_filter);
+    NSamplerVoice_set_base_cutoff(voice, f_cutoff);
+    NSamplerVoice_set_pitch_bend(voice, 0);
+    NSamplerVoice_set_pressure(voice, 0);
+    NSamplerVoice_set_brightness(voice, F64_HALF);
+    NSamplerVoice_set_choke_group(voice, choke);
+
+    if (fileg_config != 0) {
+        var fenv = n_amp_envelope_new(fileg_config, sr);
+        n_amp_envelope_trigger(fenv);
+        NSamplerVoice_set_filter_env(voice, fenv);
+        NSamplerVoice_set_filter_env_depth(voice, fileg_depth);
+    } else {
+        NSamplerVoice_set_filter_env(voice, 0);
+        NSamplerVoice_set_filter_env_depth(voice, 0);
+    }
+
+    var plfo = 0;
+    if (f64_gt(plfo_rate, 0) == 1) {
+        if (plfo_depth != 0) {
+            plfo = modulation_lfo_new(MODULATION_LFO_SINE, plfo_rate, sr);
+            if (naad_is_err(plfo) == 1) { plfo = 0; }
+        }
+    }
+    NSamplerVoice_set_pitch_lfo(voice, plfo);
+    var flfo = 0;
+    if (f64_gt(flfo_rate, 0) == 1) {
+        if (flfo_depth != 0) {
+            flfo = modulation_lfo_new(MODULATION_LFO_SINE, flfo_rate, sr);
+            if (naad_is_err(flfo) == 1) { flfo = 0; }
+        }
+    }
+    NSamplerVoice_set_filter_lfo(voice, flfo);
+    NSamplerVoice_set_pitch_lfo_depth(voice, plfo_depth);
+    NSamplerVoice_set_filter_lfo_depth(voice, flfo_depth);
+    NSamplerVoice_set_fil_keytrack(voice, keytrack);
+
+    var aenv = n_amp_envelope_new(adsr_config, sr);
+    n_amp_envelope_trigger(aenv);
+    NSamplerVoice_set_amp_env(voice, aenv);
+
+    return vidx;
+}
+
+fn n_engine_note_off(e, note) {
+    voice_manager_note_off(NSamplerEngine_voice_mgr(e), note);
+    var voices = NSamplerEngine_voices(e);
+    var nv = vec_len(voices);
+    var i = 0;
+    while (i < nv) {
+        var v = vec_get(voices, i);
+        if (NSamplerVoice_active(v) == 1) {
+            if (NSamplerVoice_note(v) == note) {
+                if (n_amp_envelope_is_active(NSamplerVoice_amp_env(v)) == 1) {
+                    n_amp_envelope_release(NSamplerVoice_amp_env(v));
+                    if (NSamplerVoice_filter_env(v) != 0) { n_amp_envelope_release(NSamplerVoice_filter_env(v)); }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn n_engine_all_notes_off(e) {
+    voice_manager_all_notes_off(NSamplerEngine_voice_mgr(e));
+    var voices = NSamplerEngine_voices(e);
+    var nv = vec_len(voices);
+    var i = 0;
+    while (i < nv) {
+        var v = vec_get(voices, i);
+        if (NSamplerVoice_active(v) == 1) {
+            if (n_amp_envelope_is_active(NSamplerVoice_amp_env(v)) == 1) {
+                n_amp_envelope_release(NSamplerVoice_amp_env(v));
+                if (NSamplerVoice_filter_env(v) != 0) { n_amp_envelope_release(NSamplerVoice_filter_env(v)); }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# advance_position -> 1 to keep the voice, 0 to deactivate. speed here is the effective (bent) speed.
+fn n_advance_position(voice, loop_mode, loop_start, loop_end, frames, released) {
+    var eff_end = f64_from(frames);
+    if (loop_end > 0) { eff_end = f64_from(loop_end); }
+    var speed = NSamplerVoice_speed(voice);
+    var pos = NSamplerVoice_position(voice);
+    if (loop_mode == LOOP_ONESHOT) {
+        pos = f64_add(pos, speed);
+        NSamplerVoice_set_position(voice, pos);
+        if (f64_ge(pos, f64_from(frames)) == 1) { return 0; }
+        return 1;
+    }
+    if (loop_mode == LOOP_FORWARD) {
+        pos = f64_add(pos, speed);
+        if (f64_ge(pos, eff_end) == 1) { pos = f64_from(loop_start); }
+        NSamplerVoice_set_position(voice, pos);
+        return 1;
+    }
+    if (loop_mode == LOOP_PINGPONG) {
+        if (NSamplerVoice_forward(voice) == 1) {
+            pos = f64_add(pos, speed);
+            if (f64_ge(pos, eff_end) == 1) { NSamplerVoice_set_forward(voice, 0); }
+        } else {
+            pos = f64_sub(pos, speed);
+            if (f64_le(pos, f64_from(loop_start)) == 1) { NSamplerVoice_set_forward(voice, 1); }
+        }
+        NSamplerVoice_set_position(voice, pos);
+        return 1;
+    }
+    if (loop_mode == LOOP_REVERSE) {
+        pos = f64_sub(pos, speed);
+        NSamplerVoice_set_position(voice, pos);
+        if (f64_lt(pos, 0) == 1) { return 0; }
+        return 1;
+    }
+    # LOOP_SUSTAIN
+    pos = f64_add(pos, speed);
+    NSamplerVoice_set_position(voice, pos);
+    if (released == 1) {
+        if (f64_ge(pos, f64_from(frames)) == 1) { return 0; }
+    } else {
+        if (f64_ge(pos, eff_end) == 1) { NSamplerVoice_set_position(voice, f64_from(loop_start)); }
+    }
+    return 1;
+}
+
+# render one active voice, adding its stereo contribution to accum2 (2 f64 slots).
+fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscratch) {
+    NSamplerVoice_set_age(voice, NSamplerVoice_age(voice) + 1);
+    var zone = vec_get(zones, NSamplerVoice_zone_index(voice));
+    var sample = n_sample_bank_get(bank, NZone_sample_id(zone));
+    if (sample == 0) { NSamplerVoice_set_active(voice, 0); return 0; }
+    var frames = NSample_frames(sample);
+    var eff_frames = frames;
+    if (NZone_sample_end(zone) > 0) { if (NZone_sample_end(zone) < eff_frames) { eff_frames = NZone_sample_end(zone); } }
+
+    # pitch modulation
+    var pitch_mod_cents = f64_mul(NSamplerVoice_pitch_bend(voice), f64_from(100));
+    var plfo = NSamplerVoice_pitch_lfo(voice);
+    if (plfo != 0) {
+        pitch_mod_cents = f64_add(pitch_mod_cents, f64_mul(modulation_lfo_next_value(plfo), NSamplerVoice_pitch_lfo_depth(voice)));
+    }
+    var eff_speed = NSamplerVoice_speed(voice);
+    if (pitch_mod_cents != 0) {
+        eff_speed = f64_mul(NSamplerVoice_speed(voice), f64_pow(f64_from(2), f64_div(pitch_mod_cents, f64_from(1200))));
+    }
+
+    # read interpolated source
+    n_sample_read_stereo_interpolated(sample, NSamplerVoice_position(voice), scratch);
+    var sl = load64(scratch);
+    var srr = load64(scratch + 8);
+
+    # loop crossfade (Forward / LoopSustain, crossfade_length > 0)
+    var xfade = NZone_crossfade_length(zone);
+    if (xfade > 0) {
+        var lm0 = NZone_loop_mode(zone);
+        var do_xf = 0;
+        if (lm0 == LOOP_FORWARD) { do_xf = 1; }
+        if (lm0 == LOOP_SUSTAIN) { do_xf = 1; }
+        if (do_xf == 1) {
+            var loop_end_f = f64_from(eff_frames);
+            if (NZone_loop_end(zone) > 0) { loop_end_f = f64_from(NZone_loop_end(zone)); }
+            var xfade_f = f64_from(xfade);
+            var dist = f64_sub(loop_end_f, NSamplerVoice_position(voice));
+            if (f64_ge(dist, 0) == 1) {
+                if (f64_lt(dist, xfade_f) == 1) {
+                    var t = f64_div(dist, xfade_f);
+                    var xfade_pos = f64_add(f64_from(NZone_loop_start(zone)), f64_sub(xfade_f, dist));
+                    n_sample_read_stereo_interpolated(sample, xfade_pos, xscratch);
+                    sl = f64_add(f64_mul(sl, t), f64_mul(load64(xscratch), f64_sub(F64_ONE, t)));
+                    srr = f64_add(f64_mul(srr, t), f64_mul(load64(xscratch + 8), f64_sub(F64_ONE, t)));
+                }
+            }
+        }
+    }
+
+    # filter cutoff modulation (only when base_cutoff > 0)
+    if (f64_gt(NSamplerVoice_base_cutoff(voice), 0) == 1) {
+        var cutoff = NSamplerVoice_base_cutoff(voice);
+        if (f64_gt(NSamplerVoice_fil_keytrack(voice), 0) == 1) {
+            var semis = f64_from(NSamplerVoice_note(voice) - 60);
+            var kt_cents = f64_mul(f64_mul(semis, f64_from(100)), NSamplerVoice_fil_keytrack(voice));
+            cutoff = f64_mul(cutoff, f64_pow(f64_from(2), f64_div(kt_cents, f64_from(1200))));
+        }
+        var fenv = NSamplerVoice_filter_env(voice);
+        if (fenv != 0) {
+            var mod_cents = f64_mul(NSamplerVoice_filter_env_depth(voice), n_amp_envelope_tick(fenv));
+            cutoff = f64_mul(cutoff, f64_pow(f64_from(2), f64_div(mod_cents, f64_from(1200))));
+        }
+        var flfo = NSamplerVoice_filter_lfo(voice);
+        if (flfo != 0) {
+            var lfo_cents = f64_mul(modulation_lfo_next_value(flfo), NSamplerVoice_filter_lfo_depth(voice));
+            cutoff = f64_mul(cutoff, f64_pow(f64_from(2), f64_div(lfo_cents, f64_from(1200))));
+        }
+        cutoff = f64_mul(cutoff, f64_add(F64_HALF, f64_mul(NSamplerVoice_brightness(voice), F64_HALF)));
+        var smoother = NSamplerVoice_cutoff_smoother(voice);
+        smoothing_set_target(smoother, cutoff);
+        cutoff = smoothing_next_value(smoother);
+        nvf_set_cutoff(NSamplerVoice_filter(voice), cutoff, sr);
+    }
+
+    # stereo filter
+    nvf_process_stereo(NSamplerVoice_filter(voice), sl, srr, fscratch);
+    sl = load64(fscratch);
+    srr = load64(fscratch + 8);
+
+    # amplitude envelope
+    var env = n_amp_envelope_tick(NSamplerVoice_amp_env(voice));
+    if (n_amp_envelope_is_active(NSamplerVoice_amp_env(voice)) == 0) {
+        NSamplerVoice_set_active(voice, 0);
+        return 0;
+    }
+
+    # pressure, gain, pan
+    var pressure_mod = f64_add(F64_ONE, f64_mul(f64_sub(NSamplerVoice_pressure(voice), F64_HALF), f64_div(f64_from(4), f64_from(10))));
+    var amp = f64_mul(f64_mul(NSamplerVoice_amplitude(voice), env), pressure_mod);
+    var pan = NZone_pan(zone);
+    var pan_l = f64_mul(f64_sub(F64_ONE, pan), F64_HALF);
+    var pan_r = f64_mul(f64_add(F64_ONE, pan), F64_HALF);
+    store64(accum2, f64_add(load64(accum2), f64_mul(f64_mul(sl, amp), pan_l)));
+    store64(accum2 + 8, f64_add(load64(accum2 + 8), f64_mul(f64_mul(srr, amp), pan_r)));
+
+    # advance read cursor with the pitch-bent speed
+    var saved_speed = NSamplerVoice_speed(voice);
+    NSamplerVoice_set_speed(voice, eff_speed);
+    var released = n_amp_envelope_is_releasing(NSamplerVoice_amp_env(voice));
+    if (n_advance_position(voice, NZone_loop_mode(zone), NZone_loop_start(zone), NZone_loop_end(zone), eff_frames, released) == 0) {
+        NSamplerVoice_set_active(voice, 0);
+    }
+    NSamplerVoice_set_speed(voice, saved_speed);
+    return 0;
+}
+
+# next_sample_stereo -> writes out2[0]=L, out2[1]=R.
+fn n_engine_next_sample_stereo(e, out2) {
+    store64(out2, 0);
+    store64(out2 + 8, 0);
+    var inst = NSamplerEngine_instrument(e);
+    if (inst == 0) { return 0; }
+    var zones = NInstrument_zones(inst);
+    var bank = NSamplerEngine_bank(e);
+    var sr = NSamplerEngine_sample_rate(e);
+    var scratch = alloc(16);
+    var xscratch = alloc(16);
+    var fscratch = alloc(16);
+    var voices = NSamplerEngine_voices(e);
+    var nv = vec_len(voices);
+    var vi = 0;
+    while (vi < nv) {
+        var voice = vec_get(voices, vi);
+        if (NSamplerVoice_active(voice) == 1) {
+            n_engine_render_voice(voice, zones, bank, sr, out2, scratch, xscratch, fscratch);
+        }
+        vi = vi + 1;
+    }
+    return 0;
+}
+
+#must_use
+fn n_engine_next_sample(e) {
+    var o = alloc(16);
+    n_engine_next_sample_stereo(e, o);
+    return f64_mul(f64_add(load64(o), load64(o + 8)), F64_HALF);
+}
+
+# fill_buffer(buf vec, n): mono, each element = next_sample.
+fn n_engine_fill_buffer(e, buf, n) {
+    var i = 0;
+    while (i < n) { vec_set(buf, i, n_engine_next_sample(e)); i = i + 1; }
+    return 0;
+}
+
+# fill_buffer_stereo(buf vec, len): interleaved stereo, rendered per-frame (output-identical
+# to the Rust per-voice block render).
+fn n_engine_fill_buffer_stereo(e, buf, len) {
+    var frames = len / 2;
+    var o = alloc(16);
+    var f = 0;
+    while (f < frames) {
+        n_engine_next_sample_stereo(e, o);
+        vec_set(buf, f * 2, load64(o));
+        vec_set(buf, f * 2 + 1, load64(o + 8));
+        f = f + 1;
+    }
+    return 0;
+}

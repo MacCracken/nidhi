@@ -28,14 +28,17 @@ fn sfz_starts(s, cstr) {
     return str_starts_with(s, str_from(cstr));
 }
 
-# parse a signed decimal integer from a Str. Returns 1 + writes to out, or 0 (unparseable).
+# parse a signed decimal integer from a Str (Rust i32/i64 FromStr: optional leading +/-).
+# Returns 1 + writes to out, or 0 (unparseable).
 fn sfz_int(s, out) {
     var data = str_data(s);
     var len = str_len(s);
     if (len == 0) { return 0; }
     var i = 0;
     var neg = 0;
-    if (load8(data) == 45) { neg = 1; i = 1; }
+    var c0 = load8(data);
+    if (c0 == 45) { neg = 1; i = 1; }
+    if (c0 == 43) { i = 1; }
     var val = 0;
     var any = 0;
     while (i < len) {
@@ -49,6 +52,35 @@ fn sfz_int(s, out) {
     if (any == 0) { return 0; }
     if (neg == 1) { val = 0 - val; }
     store64(out, val);
+    return 1;
+}
+
+# parse an unsigned decimal integer (Rust u32/usize FromStr: optional leading +, rejects -).
+fn sfz_uint(s, out) {
+    var data = str_data(s);
+    var len = str_len(s);
+    if (len == 0) { return 0; }
+    var i = 0;
+    if (load8(data) == 43) { i = 1; }
+    var val = 0;
+    var any = 0;
+    while (i < len) {
+        var c = load8(data + i);
+        if (c < 48) { return 0; }
+        if (c > 57) { return 0; }
+        val = val * 10 + (c - 48);
+        any = 1;
+        i = i + 1;
+    }
+    if (any == 0) { return 0; }
+    store64(out, val);
+    return 1;
+}
+
+# parse a u8 (Rust parse::<u8>: unsigned, 0..=255). Returns 0 (unparseable) if out of range.
+fn sfz_u8(s, out) {
+    if (sfz_uint(s, out) == 0) { return 0; }
+    if (load64(out) > 255) { return 0; }
     return 1;
 }
 
@@ -253,20 +285,20 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "lokey") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_lokey(r, n); } return 0; }
     if (str_eq_cstr(key, "hikey") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_hikey(r, n); } return 0; }
     if (str_eq_cstr(key, "key") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_key(r, n); } return 0; }
-    if (str_eq_cstr(key, "lovel") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_lovel(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "hivel") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_hivel(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "lovel") == 1) { if (sfz_u8(value, o) == 1) { NSfzRegion_set_lovel(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "hivel") == 1) { if (sfz_u8(value, o) == 1) { NSfzRegion_set_hivel(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "pitch_keycenter") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_pitch_keycenter(r, n); } return 0; }
     if (str_eq_cstr(key, "tune") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_tune(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "volume") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_volume(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "pan") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pan(r, f64_min(f64_max(load64(o), f64_neg(f64_from(100))), f64_from(100))); } return 0; }
     if (str_eq_cstr(key, "loop_mode") == 1) { NSfzRegion_set_loop_mode(r, value); return 0; }
     if (str_eq_cstr(key, "loopmode") == 1) { NSfzRegion_set_loop_mode(r, value); return 0; }
-    if (str_eq_cstr(key, "loop_start") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loopstart") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loop_end") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loopend") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "seq_position") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "group") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loop_start") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loopstart") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loop_end") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loopend") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "seq_position") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "group") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "ampeg_attack") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_attack(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "ampeg_decay") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_decay(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "ampeg_sustain") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_sustain(r, f64_min(f64_max(load64(o), 0), f64_from(100))); } return 0; }
@@ -279,8 +311,8 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "fileg_release") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_release(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fileg_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_depth(r, f64_min(f64_max(load64(o), f64_neg(f64_from(9600))), f64_from(9600))); } return 0; }
     if (str_eq_cstr(key, "transpose") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_transpose(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "offset") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_offset(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "end") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "offset") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_offset(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "end") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_end(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fil_resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fil_type") == 1) { NSfzRegion_set_fil_type(r, value); return 0; }
@@ -290,7 +322,7 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "fillfo_freq") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fillfo_freq(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fillfo_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fillfo_depth(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "fil_keytrack") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fil_keytrack(r, f64_min(f64_max(load64(o), 0), f64_from(1200))); } return 0; }
-    if (str_eq_cstr(key, "output") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_output(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "output") == 1) { if (sfz_u8(value, o) == 1) { NSfzRegion_set_output(r, load64(o)); } return 0; }
 
     # CC modulation fallback: key contains "_oncc"
     var pos = str_index_of_cstr(key, "_oncc");
@@ -298,7 +330,7 @@ fn n_sfz_apply_opcode(r, key, value) {
         var param = str_substr(key, 0, pos);
         var cc_str = str_substr(key, pos + 5, str_len(key));
         var cc_out = alloc(8);
-        if (sfz_int(cc_str, cc_out) == 1) {
+        if (sfz_u8(cc_str, cc_out) == 1) {
             if (sfz_f64(value, o) == 1) {
                 var m = alloc(sizeof(NSfzCC));
                 NSfzCC_set_param(m, param);

@@ -1,0 +1,240 @@
+# engine.tcyr -- parity tests for src/engine.cyr (ports rust-old/src/engine.rs #[test]s).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+include "src/envelope.cyr"
+include "src/zone.cyr"
+include "src/sample.cyr"
+include "src/instrument.cyr"
+include "src/engine.cyr"
+
+fn make_sine(freq, n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        var ph = f64_div(f64_mul(f64_mul(F64_TAU, f64_from(freq)), f64_from(i)), f64_from(44100));
+        vec_push(v, f64_sin(ph));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn make_engine_n(max) {
+    var sr = f64_from(44100);
+    var bank = n_sample_bank_new();
+    var id = n_sample_bank_add(bank, n_sample_from_mono(make_sine(440, 44100), 44100));
+    var zone = n_zone_new(id);
+    zone = n_zone_with_key_range(zone, 0, 127);
+    zone = n_zone_with_root_note(zone, 69);
+    var inst = n_instrument_new(str_from("t"));
+    n_instrument_add_zone(inst, zone);
+    var e = n_engine_new(max, sr);
+    n_engine_set_bank(e, bank);
+    n_engine_set_instrument(e, inst);
+    return e;
+}
+
+fn make_engine() { return make_engine_n(8); }
+
+fn make_engine_with_zone(zone) {
+    var sr = f64_from(44100);
+    var bank = n_sample_bank_new();
+    var id = n_sample_bank_add(bank, n_sample_from_mono(make_sine(440, 44100), 44100));
+    NZone_set_sample_id(zone, id);
+    var inst = n_instrument_new(str_from("t"));
+    n_instrument_add_zone(inst, zone);
+    var e = n_engine_new(8, sr);
+    n_engine_set_bank(e, bank);
+    n_engine_set_instrument(e, inst);
+    return e;
+}
+
+fn sum_abs(e, n) {
+    var s = 0;
+    var i = 0;
+    while (i < n) { s = f64_add(s, f64_abs(n_engine_next_sample(e))); i = i + 1; }
+    return s;
+}
+
+fn run_samples(e, n) {
+    var i = 0;
+    while (i < n) { n_engine_next_sample(e); i = i + 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    var eps = f64_div(F64_ONE, f64_from(100));
+    var tenth = f64_div(F64_ONE, f64_from(10));
+
+    test_group("note_on produces output");
+    var e1 = make_engine();
+    assert(n_engine_note_on(e1, 69, 100) >= 0, "note_on returns index");
+    assert_eq(n_engine_active_voice_count(e1), 1, "1 active voice");
+    assert_eq(f64_gt(sum_abs(e1, 4410), 0), 1, "nonzero output");
+
+    test_group("note_off releases");
+    var e2 = make_engine();
+    n_engine_note_on(e2, 69, 100);
+    n_engine_note_off(e2, 69);
+    run_samples(e2, 44100);
+    assert_eq(n_engine_active_voice_count(e2), 0, "voice released");
+
+    test_group("pitch shift");
+    var e3 = make_engine();
+    n_engine_note_on(e3, 81, 100);
+    var buf3 = vec_new();
+    var z3 = 0; while (z3 < 4410) { vec_push(buf3, 0); z3 = z3 + 1; }
+    n_engine_fill_buffer(e3, buf3, 4410);
+    var any3 = 0; var i3 = 0;
+    while (i3 < 4410) { if (f64_gt(f64_abs(vec_get(buf3, i3)), tenth) == 1) { any3 = 1; i3 = 4410; } else { i3 = i3 + 1; } }
+    assert_eq(any3, 1, "pitch-shifted output non-trivial");
+
+    test_group("no instrument silent");
+    var e4 = n_engine_new(8, f64_from(44100));
+    assert_eq(n_engine_note_on(e4, 60, 100), 0 - 1, "note_on -> -1 (no instrument)");
+    assert_eq(n_engine_next_sample(e4), 0, "silent");
+
+    test_group("adsr shapes output");
+    var e5 = make_engine();
+    n_engine_set_adsr(e5, n_adsr_config_new(100, 100, F64_HALF, 100));
+    n_engine_note_on(e5, 69, 127);
+    var first5 = f64_abs(n_engine_next_sample(e5));
+    run_samples(e5, 49);
+    var mid5 = f64_abs(n_engine_next_sample(e5));
+    assert_eq(f64_gt(mid5, first5), 1, "envelope rising during attack");
+
+    test_group("stereo pan hard right");
+    var zp = n_zone_new(0);
+    zp = n_zone_with_key_range(zp, 0, 127);
+    zp = n_zone_with_root_note(zp, 69);
+    zp = n_zone_with_pan(zp, F64_ONE);
+    var e6 = make_engine_with_zone(zp);
+    n_engine_note_on(e6, 69, 127);
+    var suml = 0; var sumr = 0; var o6 = alloc(16); var i6 = 0;
+    while (i6 < 1000) {
+        n_engine_next_sample_stereo(e6, o6);
+        suml = f64_add(suml, f64_abs(load64(o6)));
+        sumr = f64_add(sumr, f64_abs(load64(o6 + 8)));
+        i6 = i6 + 1;
+    }
+    assert_eq(f64_lt(suml, eps), 1, "hard-right: left ~ 0");
+    assert_eq(f64_gt(sumr, F64_ONE), 1, "hard-right: right > 1.0");
+
+    test_group("filter reduces brightness");
+    var sq = vec_new();
+    var qi = 0;
+    while (qi < 44100) {
+        if (qi % 2 == 0) { vec_push(sq, F64_ONE); } else { vec_push(sq, f64_neg(F64_ONE)); }
+        qi = qi + 1;
+    }
+    var srf = f64_from(44100);
+    var banka = n_sample_bank_new();
+    var ida = n_sample_bank_add(banka, n_sample_from_mono(sq, 44100));
+    var za = n_zone_new(ida); za = n_zone_with_key_range(za, 0, 127); za = n_zone_with_root_note(za, 69);
+    var insta = n_instrument_new(str_from("a")); n_instrument_add_zone(insta, za);
+    var ea = n_engine_new(1, srf); n_engine_set_bank(ea, banka); n_engine_set_instrument(ea, insta);
+    var bankb = n_sample_bank_new();
+    var idb = n_sample_bank_add(bankb, n_sample_from_mono(sq, 44100));
+    var zb = n_zone_new(idb); zb = n_zone_with_key_range(zb, 0, 127); zb = n_zone_with_root_note(zb, 69);
+    zb = n_zone_with_filter(zb, f64_from(100), 0);
+    var instb = n_instrument_new(str_from("b")); n_instrument_add_zone(instb, zb);
+    var eb = n_engine_new(1, srf); n_engine_set_bank(eb, bankb); n_engine_set_instrument(eb, instb);
+    n_engine_note_on(ea, 69, 127);
+    n_engine_note_on(eb, 69, 127);
+    var sum_un = sum_abs(ea, 1000);
+    var sum_fil = sum_abs(eb, 1000);
+    assert_eq(f64_lt(sum_fil, sum_un), 1, "LP filter reduces energy");
+
+    test_group("fill_buffer_stereo");
+    var e8 = make_engine();
+    n_engine_note_on(e8, 69, 100);
+    var buf8 = vec_new(); var z8 = 0; while (z8 < 200) { vec_push(buf8, 0); z8 = z8 + 1; }
+    n_engine_fill_buffer_stereo(e8, buf8, 200);
+    var any8 = 0; var i8 = 0;
+    while (i8 < 200) { if (f64_gt(f64_abs(vec_get(buf8, i8)), eps) == 1) { any8 = 1; i8 = 200; } else { i8 = i8 + 1; } }
+    assert_eq(any8, 1, "block render produces output");
+
+    test_group("all_notes_off");
+    var e9 = make_engine();
+    n_engine_note_on(e9, 69, 100);
+    n_engine_note_on(e9, 72, 100);
+    assert_eq(n_engine_active_voice_count(e9), 2, "2 voices");
+    n_engine_all_notes_off(e9);
+    run_samples(e9, 44100);
+    assert_eq(n_engine_active_voice_count(e9), 0, "all released");
+
+    test_group("per-zone adsr overrides default");
+    var z10 = n_zone_new(0);
+    z10 = n_zone_with_key_range(z10, 0, 127);
+    z10 = n_zone_with_root_note(z10, 69);
+    z10 = n_zone_with_adsr(z10, n_adsr_config_new(500, 0, F64_ONE, 100));
+    var e10 = make_engine_with_zone(z10);
+    n_engine_note_on(e10, 69, 127);
+    var first10 = f64_abs(n_engine_next_sample(e10));
+    run_samples(e10, 249);
+    var mid10 = f64_abs(n_engine_next_sample(e10));
+    assert_eq(f64_gt(mid10, first10), 1, "slow per-zone attack still rising at ~250");
+
+    test_group("choke group");
+    var srh = f64_from(44100);
+    var bankh = n_sample_bank_new();
+    var idh = n_sample_bank_add(bankh, n_sample_from_mono(make_sine(440, 44100), 44100));
+    var zha = n_zone_new(idh); zha = n_zone_with_key_range(zha, 42, 42); zha = n_zone_with_choke_group(zha, 1);
+    var zhb = n_zone_new(idh); zhb = n_zone_with_key_range(zhb, 46, 46); zhb = n_zone_with_choke_group(zhb, 1);
+    var insth = n_instrument_new(str_from("hh")); n_instrument_add_zone(insth, zha); n_instrument_add_zone(insth, zhb);
+    var eh = n_engine_new(8, srh); n_engine_set_bank(eh, bankh); n_engine_set_instrument(eh, insth);
+    n_engine_note_on(eh, 46, 100);
+    assert_eq(n_engine_active_voice_count(eh), 1, "open hh: 1 voice");
+    n_engine_note_on(eh, 42, 100);
+    assert_eq(n_engine_active_voice_count(eh), 1, "closed hh chokes open: still 1");
+
+    test_group("pitch bend");
+    var e12 = make_engine();
+    n_engine_note_on(e12, 69, 100);
+    run_samples(e12, 100);
+    n_engine_apply_pitch_bend(e12, 69, F64_ONE);
+    var sum12 = 0; var j12 = 0;
+    while (j12 < 100) { sum12 = f64_add(sum12, n_engine_next_sample(e12)); j12 = j12 + 1; }
+    assert_eq(n_is_finite(sum12), 1, "bent output finite");
+
+    test_group("steal mode none");
+    var e13 = make_engine_n(2);
+    n_engine_set_steal_mode(e13, STEAL_MODE_NONE);
+    n_engine_note_on(e13, 60, 100);
+    n_engine_note_on(e13, 64, 100);
+    assert_eq(n_engine_active_voice_count(e13), 2, "2 voices full");
+    assert_eq(n_engine_note_on(e13, 67, 100), 0 - 1, "none rejects when full");
+    assert_eq(n_engine_active_voice_count(e13), 2, "still 2");
+
+    test_group("steal mode oldest");
+    var e14 = make_engine_n(2);
+    n_engine_set_steal_mode(e14, STEAL_MODE_OLDEST);
+    n_engine_note_on(e14, 60, 100);
+    run_samples(e14, 100);
+    n_engine_note_on(e14, 64, 100);
+    assert_eq(n_engine_active_voice_count(e14), 2, "2 voices");
+    n_engine_note_on(e14, 67, 100);
+    assert_eq(n_engine_active_voice_count(e14), 2, "still 2 after steal");
+    assert_eq(n_engine_has_active_note(e14, 67), 1, "note 67 active");
+
+    test_group("steal mode lowest");
+    var e15 = make_engine_n(2);
+    n_engine_set_steal_mode(e15, STEAL_MODE_LOWEST);
+    n_engine_note_on(e15, 60, 100);
+    n_engine_note_on(e15, 72, 100);
+    assert_eq(n_engine_active_voice_count(e15), 2, "2 voices");
+    n_engine_note_on(e15, 66, 100);
+    assert_eq(n_engine_active_voice_count(e15), 2, "still 2");
+    assert_eq(n_engine_has_active_note(e15, 60), 0, "lowest note 60 stolen");
+    assert_eq(n_engine_has_active_note(e15, 66), 1, "note 66 active");
+    assert_eq(n_engine_has_active_note(e15, 72), 1, "note 72 active");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

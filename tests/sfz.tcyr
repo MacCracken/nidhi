@@ -141,6 +141,18 @@ fn main() {
     assert_eq(NZone_key_lo(NSfzZoneFile_zone(vec_get(zs19, 1))), 48, "region 1 -> group 1 lokey 48");
     assert_eq(NZone_key_lo(NSfzZoneFile_zone(vec_get(zs19, 2))), 48, "region 2 -> group 1 lokey 48");
 
+    test_group("integer parse strictness (parity audit fixes)");
+    var reg_u8 = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav lovel=300 output=999\n")), 0);
+    assert_eq(NSfzRegion_lovel(reg_u8), 1, "lovel=300 (>255) rejected -> default 1");
+    assert_eq(NSfzRegion_output(reg_u8), 0, "output=999 (>255) rejected -> default 0");
+    var reg_neg = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav group=-1 offset=-10\n")), 0);
+    assert_eq(NSfzRegion_group(reg_neg), 0, "group=-1 (unsigned) rejected -> default 0");
+    assert_eq(NSfzRegion_offset(reg_neg), 0, "offset=-10 (unsigned) rejected -> default 0");
+    var reg_plus = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav tune=+5\n")), 0);
+    assert_eq(NSfzRegion_tune(reg_plus), 5, "tune=+5 (leading +) accepted -> 5");
+    var reg_cc = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav volume_oncc300=6\n")), 0);
+    assert_eq(vec_len(NSfzRegion_cc_modulations(reg_cc)), 0, "cc#300 (>255) rejected -> no cc modulation");
+
     return assert_summary();
 }
 

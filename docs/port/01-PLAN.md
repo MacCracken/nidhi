@@ -66,7 +66,11 @@ docs/port/          this plan + the 13 recon briefs (10-26)
 | 11 | `sfz.cyr` | sfz.rs | str, sample, zone, instrument, envelope | ✅ done (sfz.tcyr 57/0). note parsing, 37-field region, ~40 opcodes, global→group→region inheritance, key shorthand, dedup, default_path, includes, cc modulation, to_zones/to_instrument. Uses stdlib str_* + f64_parse_ok |
 | 12 | `sf2.cyr` | sf2.rs | vec, sample, zone, instrument | ✅ done (sf2.tcyr 29/0). RIFF chunk iter, 7 record parsers, phdr→pbag→pgen→inst→ibag→igen→shdr resolution, PCM16 (÷32768), loop-mode map, preset-range clamp, bounds-safe on hostile input. FourCC packed LE ints |
 | 13 | `io.cyr` | io.rs | **shravan** | ✅ done (io.tcyr 18/0). load_wav_from_memory + load_wav (file_stem) + StreamingWavReader (open/read_chunk/read_all) via shravan wav_decode/decode_file/wav_stream_*. Toolchain pin bumped 6.3.33→6.3.34 |
-| 14 | `engine.cyr` | engine.rs | **naad**, all above | core engine, voice mgmt, render loop — LAST |
+| 14 | `engine.cyr` | engine.rs | **naad**, all above | ✅ done (engine.tcyr 29/0). SamplerEngine/Voice/VoiceFilter, note_on + choke + naad VoiceManager allocation (all steal modes), per-sample render loop (pitch/interp/crossfade/filter/env/pan), advance_position per LoopMode, naad SVF/LFO/smoother. fill_buffer_stereo per-frame (output-identical to Rust block render) |
+
+## ✅ PORT COMPLETE (2026-07-02)
+
+All **14 modules ported**, **14/14 test suites green (~321 assertions, 0 failures)** on cyrius 6.3.34. `dist/nidhi.cyr` bundles via `cyrius distlib` (3611 lines). Remaining polish (not blocking): triage the re-run parity audit (all 14 modules); add fuzz never-crash drivers (`tests/*.fcyr`) for sfz/sf2; build the 7 parity benchmarks (`tests/*.bcyr`, docs/port/26 §2) + bench-history.csv for Rust-vs-Cyrius comparison; reconcile the port-template CLAUDE.md with nidhi specifics; CHANGELOG/VERSION.
 
 ## Parity test/bench/fuzz suites to build (mirror hisab's split)
 
