@@ -1,21 +1,207 @@
-# nidhi benchmarks
-# Stdlib auto-included via cyrius.cyml
-#
-# Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.
-# For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
-# (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
-# the full overhead-vs-batching guidance.
+# nidhi benchmarks -- mirrors the Rust criterion suite for Rust-vs-Cyrius parity comparison.
+# The 7 benchmarks from benches/benchmarks.rs (see docs/port/26 section 2):
+#   1 voice_count_scaling {1,4,8,16,32,64}   2 fill_buffer_stereo {1,8,16}
+#   3 fill_buffer_per_sample {1,8,16}         4 interpolation_cubic
+#   5 interpolation_stereo                    6 fill_buffer_stereo_filtered_8v
+#   7 wsola_1sec_2x
+# Run: cyrius bench tests/nidhi.bcyr
 
-fn bench_noop(): i64 { return 0; }
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+include "src/envelope.cyr"
+include "src/zone.cyr"
+include "src/sample.cyr"
+include "src/instrument.cyr"
+include "src/stretch.cyr"
+include "src/engine.cyr"
+
+fn make_sine(freq, n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, f64_from(freq)), f64_from(i)), f64_from(44100))));
+        i = i + 1;
+    }
+    return v;
+}
+
+# engine: 1s 440 Hz mono sine, one zone (key 0..127, root 60, Forward loop), max_voices.
+fn make_bench_engine(max_voices) {
+    var sr = f64_from(44100);
+    var bank = n_sample_bank_new();
+    var frames = 44100;
+    var id = n_sample_bank_add(bank, n_sample_from_mono(make_sine(440, frames), 44100));
+    var zone = n_zone_new(id);
+    zone = n_zone_with_key_range(zone, 0, 127);
+    zone = n_zone_with_root_note(zone, 60);
+    zone = n_zone_with_loop(zone, LOOP_FORWARD, 0, frames - 1);
+    var inst = n_instrument_new(str_from("bench"));
+    n_instrument_add_zone(inst, zone);
+    var e = n_engine_new(max_voices, sr);
+    n_engine_set_bank(e, bank);
+    n_engine_set_instrument(e, inst);
+    return e;
+}
+
+# spread `count` notes across MIDI 36..96.
+fn trigger_notes(e, count) {
+    var step = 0;
+    if (count > 1) { step = 60 / (count - 1); }
+    var i = 0;
+    while (i < count) {
+        var note = 36 + i * step;
+        if (note > 96) { note = 96; }
+        n_engine_note_on(e, note, 100);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn zeros(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(v, 0); i = i + 1; }
+    return v;
+}
+
+# 1. voice_count_scaling: per-call cost of next_sample_stereo at `nvoices` active voices.
+fn bench_voice_count(name, nvoices, out2) {
+    var e = make_bench_engine(64);
+    trigger_notes(e, nvoices);
+    var b = bench_new(name);
+    bench_batch_start(b);
+    var i = 0;
+    while (i < 4410) { n_engine_next_sample_stereo(e, out2); i = i + 1; }
+    bench_batch_stop(b, 4410);
+    bench_report(b);
+    return 0;
+}
+
+# 2. fill_buffer_stereo: block render of a 512-frame (1024-sample) buffer.
+fn bench_fill_stereo(name, nvoices) {
+    var e = make_bench_engine(64);
+    trigger_notes(e, nvoices);
+    var buf = zeros(1024);
+    var b = bench_new(name);
+    bench_batch_start(b);
+    var i = 0;
+    while (i < 40) { n_engine_fill_buffer_stereo(e, buf, 1024); i = i + 1; }
+    bench_batch_stop(b, 40);
+    bench_report(b);
+    return 0;
+}
+
+# 3. fill_buffer_per_sample: same 512-frame buffer filled via a per-sample loop.
+fn bench_fill_persample(name, nvoices, out2) {
+    var e = make_bench_engine(64);
+    trigger_notes(e, nvoices);
+    var buf = zeros(1024);
+    var b = bench_new(name);
+    bench_batch_start(b);
+    var i = 0;
+    while (i < 40) {
+        var f = 0;
+        while (f < 512) {
+            n_engine_next_sample_stereo(e, out2);
+            vec_set(buf, f * 2, load64(out2));
+            vec_set(buf, f * 2 + 1, load64(out2 + 8));
+            f = f + 1;
+        }
+        i = i + 1;
+    }
+    bench_batch_stop(b, 40);
+    bench_report(b);
+    return 0;
+}
 
 fn main(): i64 {
     alloc_init();
-    var b = bench_new("noop");
-    bench_batch_start(b);
-    var i = 0;
-    while (i < 1000000) { bench_noop(); i = i + 1; }
-    bench_batch_stop(b, 1000000);
-    bench_report(b);
+    var out2 = alloc(16);
+    var c073 = f64_div(f64_from(73), f64_from(100));
+
+    bench_voice_count("voice_count_scaling/1", 1, out2);
+    bench_voice_count("voice_count_scaling/4", 4, out2);
+    bench_voice_count("voice_count_scaling/8", 8, out2);
+    bench_voice_count("voice_count_scaling/16", 16, out2);
+    bench_voice_count("voice_count_scaling/32", 32, out2);
+    bench_voice_count("voice_count_scaling/64", 64, out2);
+
+    bench_fill_stereo("fill_buffer_stereo/1", 1);
+    bench_fill_stereo("fill_buffer_stereo/8", 8);
+    bench_fill_stereo("fill_buffer_stereo/16", 16);
+
+    bench_fill_persample("fill_buffer_per_sample/1", 1, out2);
+    bench_fill_persample("fill_buffer_per_sample/8", 8, out2);
+    bench_fill_persample("fill_buffer_per_sample/16", 16, out2);
+
+    # 4. interpolation_cubic: read_cubic on a 1s mono sample (positions i*0.73+100, kept in-bounds).
+    var mono = n_sample_from_mono(make_sine(440, 44100), 44100);
+    var bic = bench_new("interpolation_cubic");
+    bench_batch_start(bic);
+    var i4 = 0;
+    while (i4 < 44100) {
+        n_sample_read_cubic(mono, f64_add(f64_mul(f64_from(i4 % 20000), c073), f64_from(100)));
+        i4 = i4 + 1;
+    }
+    bench_batch_stop(bic, 44100);
+    bench_report(bic);
+
+    # 5. interpolation_stereo: read_stereo_interpolated on a 1s stereo sample.
+    var sdata = vec_new();
+    var i5 = 0;
+    while (i5 < 44100) {
+        var sv = f64_sin(f64_div(f64_mul(f64_mul(F64_TAU, f64_from(440)), f64_from(i5)), f64_from(44100)));
+        vec_push(sdata, sv);
+        vec_push(sdata, sv);
+        i5 = i5 + 1;
+    }
+    var stereo = n_sample_from_stereo(sdata, 44100);
+    var bis = bench_new("interpolation_stereo");
+    bench_batch_start(bis);
+    var j5 = 0;
+    while (j5 < 44100) {
+        n_sample_read_stereo_interpolated(stereo, f64_add(f64_mul(f64_from(j5 % 20000), c073), f64_from(100)), out2);
+        j5 = j5 + 1;
+    }
+    bench_batch_stop(bis, 44100);
+    bench_report(bis);
+
+    # 6. fill_buffer_stereo_filtered_8v: 8-voice filtered block render (cutoff 2000, vel_track 0.7).
+    var srf = f64_from(44100);
+    var bankf = n_sample_bank_new();
+    var idf = n_sample_bank_add(bankf, n_sample_from_mono(make_sine(440, 44100), 44100));
+    var zf = n_zone_new(idf);
+    zf = n_zone_with_key_range(zf, 0, 127);
+    zf = n_zone_with_root_note(zf, 60);
+    zf = n_zone_with_loop(zf, LOOP_FORWARD, 0, 44099);
+    zf = n_zone_with_filter(zf, f64_from(2000), f64_div(f64_from(7), f64_from(10)));
+    zf = n_zone_with_filter_type(zf, FILTER_LOWPASS);
+    var instf = n_instrument_new(str_from("bench"));
+    n_instrument_add_zone(instf, zf);
+    var ef = n_engine_new(16, srf);
+    n_engine_set_bank(ef, bankf);
+    n_engine_set_instrument(ef, instf);
+    trigger_notes(ef, 8);
+    var buff = zeros(1024);
+    var bf = bench_new("fill_buffer_stereo_filtered_8v");
+    bench_batch_start(bf);
+    var i6 = 0;
+    while (i6 < 40) { n_engine_fill_buffer_stereo(ef, buff, 1024); i6 = i6 + 1; }
+    bench_batch_stop(bf, 40);
+    bench_report(bf);
+
+    # 7. wsola_1sec_2x: WSOLA time-stretch(2.0) on a 1s mono sine.
+    var st = n_stretcher_new(make_sine(440, 44100), f64_from(44100));
+    var bw = bench_new("wsola_1sec_2x");
+    bench_batch_start(bw);
+    var i7 = 0;
+    while (i7 < 2) { n_stretch(st, f64_from(2)); i7 = i7 + 1; }
+    bench_batch_stop(bw, 2);
+    bench_report(bw);
+
     return 0;
 }
 
