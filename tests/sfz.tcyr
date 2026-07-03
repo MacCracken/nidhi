@@ -1,0 +1,148 @@
+# sfz.tcyr -- parity tests for src/sfz.cyr (ports rust-old/src/sfz.rs #[test]s).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+include "src/envelope.cyr"
+include "src/zone.cyr"
+include "src/sample.cyr"
+include "src/instrument.cyr"
+include "src/sfz.cyr"
+
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
+
+fn zone0(f, sr) {
+    return NSfzZoneFile_zone(vec_get(n_sfz_to_zones(f, sr), 0));
+}
+
+fn main() {
+    alloc_init();
+    var sr = f64_from(44100);
+    var tol = f64_div(F64_ONE, f64_from(1000));
+
+    test_group("note parsing");
+    assert_eq(n_sfz_note_or_num(str_from("60")), 60, "60 -> 60");
+    assert_eq(n_sfz_note_or_num(str_from("c4")), 60, "c4 -> 60");
+    assert_eq(n_sfz_note_or_num(str_from("C4")), 60, "C4 -> 60");
+    assert_eq(n_sfz_note_or_num(str_from("f#3")), 54, "f#3 -> 54");
+    assert_eq(n_sfz_note_or_num(str_from("eb4")), 63, "eb4 -> 63");
+    assert_eq(n_sfz_note_or_num(str_from("b4")), 71, "b4 -> 71");
+    assert_eq(n_sfz_note_or_num(str_from("c-1")), 0, "c-1 -> 0");
+    assert_eq(n_sfz_note_or_num(str_from("g9")), 127, "g9 -> 127");
+    assert_eq(n_sfz_note_or_num(str_from("")), 0 - 1, "empty -> None");
+    assert_eq(n_sfz_note_or_num(str_from("xyz")), 0 - 1, "xyz -> None");
+
+    test_group("parse single region");
+    var f = n_sfz_parse("<region> sample=kick.wav lokey=36 hikey=48\n");
+    assert_eq(vec_len(NSfzFile_regions(f)), 1, "1 region");
+    var reg0 = vec_get(NSfzFile_regions(f), 0);
+    assert_eq(str_eq_cstr(NSfzRegion_sample(reg0), "kick.wav"), 1, "sample kick.wav");
+    assert_eq(NSfzRegion_lokey(reg0), 36, "lokey 36");
+    assert_eq(NSfzRegion_hikey(reg0), 48, "hikey 48");
+
+    test_group("key shorthand");
+    var z = zone0(n_sfz_parse("<region> sample=a.wav key=60\n"), sr);
+    assert_eq(NZone_key_lo(z), 60, "key -> lo 60");
+    assert_eq(NZone_key_hi(z), 60, "key -> hi 60");
+    assert_eq(NZone_root_note(z), 60, "key -> root 60");
+
+    test_group("round trip pan/tune/volume");
+    var z3 = zone0(n_sfz_parse("<region> sample=a.wav pan=50 tune=5 volume=-3\n"), sr);
+    assert_eq(approx(NZone_pan(z3), F64_HALF, tol), 1, "pan 50 -> 0.5");
+    assert_eq(approx(NZone_tune_cents(z3), f64_from(5), tol), 1, "tune 5 cents");
+    assert_eq(approx(NZone_volume_db(z3), f64_neg(f64_from(3)), tol), 1, "volume -3 dB");
+
+    test_group("transpose adds to tune");
+    var z4 = zone0(n_sfz_parse("<region> sample=a.wav tune=10 transpose=2\n"), sr);
+    assert_eq(approx(NZone_tune_cents(z4), f64_from(210), tol), 1, "tune 10 + transpose 2 -> 210");
+
+    test_group("global + group inheritance");
+    var z5 = zone0(n_sfz_parse("<global> volume=-6\n<group> lokey=40\n<region> sample=a.wav\n"), sr);
+    assert_eq(approx(NZone_volume_db(z5), f64_neg(f64_from(6)), tol), 1, "inherits global volume -6");
+    assert_eq(NZone_key_lo(z5), 40, "inherits group lokey 40");
+
+    test_group("region overrides group overrides global");
+    var z6 = zone0(n_sfz_parse("<global> volume=-10 pan=25\n<group> volume=-5\n<region> sample=a.wav volume=-2\n"), sr);
+    assert_eq(approx(NZone_volume_db(z6), f64_neg(f64_from(2)), tol), 1, "region volume -2 wins");
+    assert_eq(approx(NZone_pan(z6), f64_div(f64_from(25), f64_from(100)), tol), 1, "pan inherited 25 -> 0.25");
+
+    test_group("loop mode mapping");
+    assert_eq(NZone_loop_mode(zone0(n_sfz_parse("<region> sample=a.wav loop_mode=loop_continuous\n"), sr)), LOOP_FORWARD, "loop_continuous -> Forward");
+    assert_eq(NZone_loop_mode(zone0(n_sfz_parse("<region> sample=a.wav loop_mode=loop_sustain\n"), sr)), LOOP_SUSTAIN, "loop_sustain -> LoopSustain");
+
+    test_group("region without sample skipped");
+    assert_eq(vec_len(n_sfz_to_zones(n_sfz_parse("<region> lokey=36\n<region> sample=a.wav\n"), sr)), 1, "no-sample region skipped");
+
+    test_group("to_instrument dedup");
+    var ir = n_sfz_to_instrument(n_sfz_parse("<region> sample=a.wav\n<region> sample=a.wav\n<region> sample=b.wav\n"), str_from("test"), sr);
+    var inst = NSfzInstResult_instrument(ir);
+    assert_eq(n_instrument_zone_count(inst), 3, "3 zones");
+    assert_eq(vec_len(NSfzInstResult_sample_files(ir)), 2, "2 sample files");
+    var zones = NInstrument_zones(inst);
+    assert_eq(NZone_sample_id(vec_get(zones, 0)), 0, "zone0 id 0");
+    assert_eq(NZone_sample_id(vec_get(zones, 1)), 0, "zone1 id 0 (dedup)");
+    assert_eq(NZone_sample_id(vec_get(zones, 2)), 1, "zone2 id 1");
+
+    test_group("default_path");
+    var pr = n_sfz_to_zones(n_sfz_parse("<control> default_path=samples/piano/\n<region> sample=c4.wav\n"), sr);
+    assert_eq(str_eq_cstr(NSfzZoneFile_filename(vec_get(pr, 0)), "samples/piano/c4.wav"), 1, "default_path prepended");
+
+    test_group("includes");
+    var f11 = n_sfz_parse("#include \"a.sfz\"\n#include \"b.sfz\"\n");
+    assert_eq(vec_len(NSfzFile_includes(f11)), 2, "2 includes");
+    assert_eq(str_eq_cstr(vec_get(NSfzFile_includes(f11), 0), "a.sfz"), 1, "include 0 quotes stripped");
+
+    test_group("cc modulation");
+    var reg12 = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav volume_oncc1=6\n")), 0);
+    var ccs = NSfzRegion_cc_modulations(reg12);
+    assert_eq(vec_len(ccs), 1, "1 cc mod");
+    var cc0 = vec_get(ccs, 0);
+    assert_eq(str_eq_cstr(NSfzCC_param(cc0), "volume"), 1, "cc param volume");
+    assert_eq(NSfzCC_cc(cc0), 1, "cc number 1");
+    assert_eq(approx(NSfzCC_depth(cc0), f64_from(6), tol), 1, "cc depth 6");
+
+    test_group("filter opcodes");
+    var z13 = zone0(n_sfz_parse("<region> sample=a.wav cutoff=2000 fil_veltrack=4800 fil_type=hpf_2p\n"), sr);
+    assert_eq(approx(NZone_filter_cutoff(z13), f64_from(2000), tol), 1, "cutoff 2000");
+    assert_eq(approx(NZone_filter_vel_track(z13), F64_HALF, tol), 1, "fil_veltrack 4800/9600 = 0.5");
+    assert_eq(NZone_filter_type(z13), FILTER_HIGHPASS, "hpf_2p -> HighPass");
+
+    test_group("ampeg wired");
+    var z14 = zone0(n_sfz_parse("<region> sample=a.wav ampeg_attack=0.01 ampeg_release=0.5\n"), sr);
+    assert(NZone_adsr(z14) != 0, "adsr set (Some)");
+    assert_eq(NAdsrConfig_attack_samples(NZone_adsr(z14)), 441, "adsr attack 441 samples");
+
+    test_group("fileg wired");
+    var z15 = zone0(n_sfz_parse("<region> sample=a.wav fileg_attack=0.02 fileg_depth=1200\n"), sr);
+    assert(NZone_fileg(z15) != 0, "fileg set (Some)");
+    assert_eq(approx(NZone_fileg_depth(z15), f64_from(1200), tol), 1, "fileg_depth 1200");
+
+    test_group("comments and blanks");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse("// comment\n\n<region> sample=a.wav\n// another\n"))), 1, "comments/blanks skipped");
+
+    test_group("offset/end/output/keytrack");
+    var z17 = zone0(n_sfz_parse("<region> sample=a.wav offset=100 end=5000 output=2 fil_keytrack=600\n"), sr);
+    assert_eq(NZone_sample_offset(z17), 100, "offset 100");
+    assert_eq(NZone_sample_end(z17), 5000, "end 5000");
+    assert_eq(NZone_output_bus(z17), 2, "output bus 2");
+    assert_eq(approx(NZone_fil_keytrack(z17), F64_HALF, tol), 1, "fil_keytrack 600/1200 = 0.5");
+
+    test_group("multiple groups");
+    var f19 = n_sfz_parse("<group> lokey=36\n<region> sample=a.wav\n<group> lokey=48\n<region> sample=b.wav\n<region> sample=c.wav\n");
+    assert_eq(vec_len(NSfzFile_groups(f19)), 2, "2 groups");
+    assert_eq(vec_len(NSfzFile_regions(f19)), 3, "3 regions");
+    var zs19 = n_sfz_to_zones(f19, sr);
+    assert_eq(NZone_key_lo(NSfzZoneFile_zone(vec_get(zs19, 0))), 36, "region 0 -> group 0 lokey 36");
+    assert_eq(NZone_key_lo(NSfzZoneFile_zone(vec_get(zs19, 1))), 48, "region 1 -> group 1 lokey 48");
+    assert_eq(NZone_key_lo(NSfzZoneFile_zone(vec_get(zs19, 2))), 48, "region 2 -> group 1 lokey 48");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

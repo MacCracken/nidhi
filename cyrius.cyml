@@ -29,6 +29,7 @@ modules = [
     "src/effect_chain.cyr",
     "src/io.cyr",
     "src/sf2.cyr",
+    "src/sfz.cyr",
 ]
 
 [deps]

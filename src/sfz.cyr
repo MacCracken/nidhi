@@ -1,0 +1,651 @@
+# sfz.cyr -- SFZ text parser (v1 + v2 subset)
+# Requires: alloc, vec, str (str_*), string, math (f64_*, f64_parse_ok), byte ops (load8),
+#           sample, zone (n_zone_*), instrument (n_instrument_*), envelope (n_adsr_config_from_seconds),
+#           loop_mode (LOOP_*)
+#
+# Ports rust-old/src/sfz.rs. Line-based, whitespace-tokenized, key=value opcodes. Unknown opcodes
+# and malformed tokens are silently ignored. Strings are stdlib Str objects. Option<String> ->
+# null pointer (0 = None); Option<u8> -> -1 sentinel. parse is infallible (always returns a file).
+
+var SFZ_HDR_NONE    = 0 - 1;
+var SFZ_HDR_CONTROL = 0;
+var SFZ_HDR_GLOBAL  = 1;
+var SFZ_HDR_GROUP   = 2;
+var SFZ_HDR_REGION  = 3;
+var SFZ_HDR_CURVE   = 4;
+
+# --- small helpers ---
+#inline
+fn sfz_is_ws(c) {
+    if (c == 32) { return 1; }
+    if (c == 9) { return 1; }
+    if (c == 13) { return 1; }
+    if (c == 10) { return 1; }
+    return 0;
+}
+
+fn sfz_starts(s, cstr) {
+    return str_starts_with(s, str_from(cstr));
+}
+
+# parse a signed decimal integer from a Str. Returns 1 + writes to out, or 0 (unparseable).
+fn sfz_int(s, out) {
+    var data = str_data(s);
+    var len = str_len(s);
+    if (len == 0) { return 0; }
+    var i = 0;
+    var neg = 0;
+    if (load8(data) == 45) { neg = 1; i = 1; }
+    var val = 0;
+    var any = 0;
+    while (i < len) {
+        var c = load8(data + i);
+        if (c < 48) { return 0; }
+        if (c > 57) { return 0; }
+        val = val * 10 + (c - 48);
+        any = 1;
+        i = i + 1;
+    }
+    if (any == 0) { return 0; }
+    if (neg == 1) { val = 0 - val; }
+    store64(out, val);
+    return 1;
+}
+
+# parse a Str as f64. Returns 1 + writes bits to out, or 0.
+fn sfz_f64(s, out) {
+    return f64_parse_ok(str_cstr(s), out);
+}
+
+# strip a single leading/trailing double-quote from a Str (trim_matches('"')).
+fn sfz_trim_quotes(s) {
+    var len = str_len(s);
+    var data = str_data(s);
+    var start = 0;
+    var end = len;
+    if (end > start) { if (load8(data + start) == 34) { start = start + 1; } }
+    if (end > start) { if (load8(data + end - 1) == 34) { end = end - 1; } }
+    return str_substr(s, start, end);
+}
+
+# split a Str into a vec of line Strs (on '\n'; no trailing empty after a final newline).
+fn sfz_lines(s) {
+    var out = vec_new();
+    var data = str_data(s);
+    var len = str_len(s);
+    var start = 0;
+    var i = 0;
+    while (i < len) {
+        if (load8(data + i) == 10) {
+            vec_push(out, str_new(data + start, i - start));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (start < len) { vec_push(out, str_new(data + start, len - start)); }
+    return out;
+}
+
+# split a Str into a vec of token Strs on whitespace runs (no empties).
+fn sfz_tokenize(s) {
+    var out = vec_new();
+    var data = str_data(s);
+    var len = str_len(s);
+    var i = 0;
+    while (i < len) {
+        if (sfz_is_ws(load8(data + i)) == 1) {
+            i = i + 1;
+        } else {
+            var start = i;
+            var scanning = 1;
+            while (scanning == 1) {
+                if (i >= len) { scanning = 0; }
+                else { if (sfz_is_ws(load8(data + i)) == 1) { scanning = 0; } else { i = i + 1; } }
+            }
+            vec_push(out, str_new(data + start, i - start));
+        }
+    }
+    return out;
+}
+
+# --- parse_note_or_number(s) -> MIDI 0..127, or -1 (None) ---
+#must_use
+fn n_sfz_note_or_num(value) {
+    var out = alloc(8);
+    if (sfz_int(value, out) == 1) {
+        var v = load64(out);
+        if (v >= 0) { if (v <= 255) { return v; } }
+    }
+    var data = str_data(value);
+    var len = str_len(value);
+    if (len == 0) { return 0 - 1; }
+    var c0 = load8(data);
+    if (c0 >= 65) { if (c0 <= 90) { c0 = c0 + 32; } }
+    var base = 0 - 1;
+    if (c0 == 99) { base = 0; }
+    if (c0 == 100) { base = 2; }
+    if (c0 == 101) { base = 4; }
+    if (c0 == 102) { base = 5; }
+    if (c0 == 103) { base = 7; }
+    if (c0 == 97) { base = 9; }
+    if (c0 == 98) { base = 11; }
+    if (base < 0) { return 0 - 1; }
+    var idx = 1;
+    var accidental = 0;
+    if (idx < len) {
+        var c1 = load8(data + idx);
+        if (c1 == 35) { accidental = 1; idx = idx + 1; }
+        else {
+            if (c1 == 115) { accidental = 1; idx = idx + 1; }
+            else {
+                if (c1 == 98) {
+                    if (idx + 1 < len) {
+                        var c2 = load8(data + idx + 1);
+                        if (c2 >= 48) { if (c2 <= 57) { accidental = 0 - 1; idx = idx + 1; } }
+                    }
+                }
+            }
+        }
+    }
+    var octave_str = str_substr(value, idx, len);
+    if (sfz_int(octave_str, out) == 0) { return 0 - 1; }
+    var octave = load64(out);
+    var midi = (octave + 1) * 12 + base + accidental;
+    if (midi < 0) { return 0 - 1; }
+    if (midi > 127) { return 0 - 1; }
+    return midi;
+}
+
+# --- SfzRegion (37 fields) ---
+#derive(accessors)
+struct NSfzRegion {
+    sample;
+    lokey;
+    hikey;
+    lovel;
+    hivel;
+    pitch_keycenter;
+    tune;
+    volume;
+    pan;
+    loop_mode;
+    loop_start;
+    loop_end;
+    group;
+    ampeg_attack;
+    ampeg_decay;
+    ampeg_sustain;
+    ampeg_release;
+    cutoff;
+    fil_veltrack;
+    fileg_attack;
+    fileg_decay;
+    fileg_sustain;
+    fileg_release;
+    fileg_depth;
+    transpose;
+    offset;
+    end;
+    resonance;
+    fil_type;
+    key;
+    pitchlfo_freq;
+    pitchlfo_depth;
+    fillfo_freq;
+    fillfo_depth;
+    fil_keytrack;
+    output;
+    cc_modulations;
+}
+
+# a cc modulation entry: (param Str, cc int, depth f64)
+#derive(accessors)
+struct NSfzCC { param; cc; depth; }
+
+#must_use
+fn n_sfz_region_new() {
+    var r = alloc(sizeof(NSfzRegion));
+    var f100 = f64_from(100);
+    NSfzRegion_set_sample(r, 0);
+    NSfzRegion_set_lokey(r, 0);
+    NSfzRegion_set_hikey(r, 127);
+    NSfzRegion_set_lovel(r, 1);
+    NSfzRegion_set_hivel(r, 127);
+    NSfzRegion_set_pitch_keycenter(r, 60);
+    NSfzRegion_set_tune(r, 0);
+    NSfzRegion_set_volume(r, 0);
+    NSfzRegion_set_pan(r, 0);
+    NSfzRegion_set_loop_mode(r, 0);
+    NSfzRegion_set_loop_start(r, 0);
+    NSfzRegion_set_loop_end(r, 0);
+    NSfzRegion_set_group(r, 0);
+    NSfzRegion_set_ampeg_attack(r, 0);
+    NSfzRegion_set_ampeg_decay(r, 0);
+    NSfzRegion_set_ampeg_sustain(r, f100);
+    NSfzRegion_set_ampeg_release(r, 0);
+    NSfzRegion_set_cutoff(r, 0);
+    NSfzRegion_set_fil_veltrack(r, 0);
+    NSfzRegion_set_fileg_attack(r, 0);
+    NSfzRegion_set_fileg_decay(r, 0);
+    NSfzRegion_set_fileg_sustain(r, f100);
+    NSfzRegion_set_fileg_release(r, 0);
+    NSfzRegion_set_fileg_depth(r, 0);
+    NSfzRegion_set_transpose(r, 0);
+    NSfzRegion_set_offset(r, 0);
+    NSfzRegion_set_end(r, 0);
+    NSfzRegion_set_resonance(r, 0);
+    NSfzRegion_set_fil_type(r, 0);
+    NSfzRegion_set_key(r, 0 - 1);
+    NSfzRegion_set_pitchlfo_freq(r, 0);
+    NSfzRegion_set_pitchlfo_depth(r, 0);
+    NSfzRegion_set_fillfo_freq(r, 0);
+    NSfzRegion_set_fillfo_depth(r, 0);
+    NSfzRegion_set_fil_keytrack(r, 0);
+    NSfzRegion_set_output(r, 0);
+    NSfzRegion_set_cc_modulations(r, vec_new());
+    return r;
+}
+
+# apply one opcode (key, value are Str). Numeric parse failure leaves the field unchanged.
+fn n_sfz_apply_opcode(r, key, value) {
+    var o = alloc(8);
+    if (str_eq_cstr(key, "sample") == 1) { NSfzRegion_set_sample(r, value); return 0; }
+    if (str_eq_cstr(key, "lokey") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_lokey(r, n); } return 0; }
+    if (str_eq_cstr(key, "hikey") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_hikey(r, n); } return 0; }
+    if (str_eq_cstr(key, "key") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_key(r, n); } return 0; }
+    if (str_eq_cstr(key, "lovel") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_lovel(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "hivel") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_hivel(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "pitch_keycenter") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_pitch_keycenter(r, n); } return 0; }
+    if (str_eq_cstr(key, "tune") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_tune(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "volume") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_volume(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "pan") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pan(r, f64_min(f64_max(load64(o), f64_neg(f64_from(100))), f64_from(100))); } return 0; }
+    if (str_eq_cstr(key, "loop_mode") == 1) { NSfzRegion_set_loop_mode(r, value); return 0; }
+    if (str_eq_cstr(key, "loopmode") == 1) { NSfzRegion_set_loop_mode(r, value); return 0; }
+    if (str_eq_cstr(key, "loop_start") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loopstart") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loop_end") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loopend") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "seq_position") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "group") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "ampeg_attack") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_attack(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "ampeg_decay") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_decay(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "ampeg_sustain") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_sustain(r, f64_min(f64_max(load64(o), 0), f64_from(100))); } return 0; }
+    if (str_eq_cstr(key, "ampeg_release") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_release(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "cutoff") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_cutoff(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "fil_veltrack") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fil_veltrack(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "fileg_attack") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_attack(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "fileg_decay") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_decay(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "fileg_sustain") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_sustain(r, f64_min(f64_max(load64(o), 0), f64_from(100))); } return 0; }
+    if (str_eq_cstr(key, "fileg_release") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_release(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "fileg_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_depth(r, f64_min(f64_max(load64(o), f64_neg(f64_from(9600))), f64_from(9600))); } return 0; }
+    if (str_eq_cstr(key, "transpose") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_transpose(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "offset") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_offset(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "end") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "fil_resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "fil_type") == 1) { NSfzRegion_set_fil_type(r, value); return 0; }
+    if (str_eq_cstr(key, "filtype") == 1) { NSfzRegion_set_fil_type(r, value); return 0; }
+    if (str_eq_cstr(key, "pitchlfo_freq") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pitchlfo_freq(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "pitchlfo_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pitchlfo_depth(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "fillfo_freq") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fillfo_freq(r, f64_max(load64(o), 0)); } return 0; }
+    if (str_eq_cstr(key, "fillfo_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fillfo_depth(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "fil_keytrack") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fil_keytrack(r, f64_min(f64_max(load64(o), 0), f64_from(1200))); } return 0; }
+    if (str_eq_cstr(key, "output") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_output(r, load64(o)); } return 0; }
+
+    # CC modulation fallback: key contains "_oncc"
+    var pos = str_index_of_cstr(key, "_oncc");
+    if (pos >= 0) {
+        var param = str_substr(key, 0, pos);
+        var cc_str = str_substr(key, pos + 5, str_len(key));
+        var cc_out = alloc(8);
+        if (sfz_int(cc_str, cc_out) == 1) {
+            if (sfz_f64(value, o) == 1) {
+                var m = alloc(sizeof(NSfzCC));
+                NSfzCC_set_param(m, param);
+                NSfzCC_set_cc(m, load64(cc_out));
+                NSfzCC_set_depth(m, load64(o));
+                vec_push(NSfzRegion_cc_modulations(r), m);
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+# inherit a numeric field from parent when self is at `def` and parent differs.
+#inline
+fn sfz_inh(self_v, parent_v, def) {
+    if (self_v == def) { if (parent_v != def) { return parent_v; } }
+    return self_v;
+}
+
+# inherit_from(parent): global->group->region. Self keeps any non-default it already has.
+fn n_sfz_inherit_from(self, parent) {
+    var f100 = f64_from(100);
+    # Option/pointer fields
+    if (NSfzRegion_sample(self) == 0) { NSfzRegion_set_sample(self, NSfzRegion_sample(parent)); }
+    if (NSfzRegion_loop_mode(self) == 0) { NSfzRegion_set_loop_mode(self, NSfzRegion_loop_mode(parent)); }
+    if (NSfzRegion_fil_type(self) == 0) { NSfzRegion_set_fil_type(self, NSfzRegion_fil_type(parent)); }
+    if (NSfzRegion_key(self) < 0) { NSfzRegion_set_key(self, NSfzRegion_key(parent)); }
+    if (vec_len(NSfzRegion_cc_modulations(self)) == 0) {
+        if (vec_len(NSfzRegion_cc_modulations(parent)) > 0) {
+            NSfzRegion_set_cc_modulations(self, NSfzRegion_cc_modulations(parent));
+        }
+    }
+    # numeric fields
+    NSfzRegion_set_lokey(self, sfz_inh(NSfzRegion_lokey(self), NSfzRegion_lokey(parent), 0));
+    NSfzRegion_set_hikey(self, sfz_inh(NSfzRegion_hikey(self), NSfzRegion_hikey(parent), 127));
+    NSfzRegion_set_lovel(self, sfz_inh(NSfzRegion_lovel(self), NSfzRegion_lovel(parent), 1));
+    NSfzRegion_set_hivel(self, sfz_inh(NSfzRegion_hivel(self), NSfzRegion_hivel(parent), 127));
+    NSfzRegion_set_pitch_keycenter(self, sfz_inh(NSfzRegion_pitch_keycenter(self), NSfzRegion_pitch_keycenter(parent), 60));
+    NSfzRegion_set_tune(self, sfz_inh(NSfzRegion_tune(self), NSfzRegion_tune(parent), 0));
+    NSfzRegion_set_volume(self, sfz_inh(NSfzRegion_volume(self), NSfzRegion_volume(parent), 0));
+    NSfzRegion_set_pan(self, sfz_inh(NSfzRegion_pan(self), NSfzRegion_pan(parent), 0));
+    NSfzRegion_set_loop_start(self, sfz_inh(NSfzRegion_loop_start(self), NSfzRegion_loop_start(parent), 0));
+    NSfzRegion_set_loop_end(self, sfz_inh(NSfzRegion_loop_end(self), NSfzRegion_loop_end(parent), 0));
+    NSfzRegion_set_group(self, sfz_inh(NSfzRegion_group(self), NSfzRegion_group(parent), 0));
+    NSfzRegion_set_ampeg_attack(self, sfz_inh(NSfzRegion_ampeg_attack(self), NSfzRegion_ampeg_attack(parent), 0));
+    NSfzRegion_set_ampeg_decay(self, sfz_inh(NSfzRegion_ampeg_decay(self), NSfzRegion_ampeg_decay(parent), 0));
+    NSfzRegion_set_ampeg_sustain(self, sfz_inh(NSfzRegion_ampeg_sustain(self), NSfzRegion_ampeg_sustain(parent), f100));
+    NSfzRegion_set_ampeg_release(self, sfz_inh(NSfzRegion_ampeg_release(self), NSfzRegion_ampeg_release(parent), 0));
+    NSfzRegion_set_cutoff(self, sfz_inh(NSfzRegion_cutoff(self), NSfzRegion_cutoff(parent), 0));
+    NSfzRegion_set_fil_veltrack(self, sfz_inh(NSfzRegion_fil_veltrack(self), NSfzRegion_fil_veltrack(parent), 0));
+    NSfzRegion_set_fileg_attack(self, sfz_inh(NSfzRegion_fileg_attack(self), NSfzRegion_fileg_attack(parent), 0));
+    NSfzRegion_set_fileg_decay(self, sfz_inh(NSfzRegion_fileg_decay(self), NSfzRegion_fileg_decay(parent), 0));
+    NSfzRegion_set_fileg_sustain(self, sfz_inh(NSfzRegion_fileg_sustain(self), NSfzRegion_fileg_sustain(parent), f100));
+    NSfzRegion_set_fileg_release(self, sfz_inh(NSfzRegion_fileg_release(self), NSfzRegion_fileg_release(parent), 0));
+    NSfzRegion_set_fileg_depth(self, sfz_inh(NSfzRegion_fileg_depth(self), NSfzRegion_fileg_depth(parent), 0));
+    NSfzRegion_set_transpose(self, sfz_inh(NSfzRegion_transpose(self), NSfzRegion_transpose(parent), 0));
+    NSfzRegion_set_offset(self, sfz_inh(NSfzRegion_offset(self), NSfzRegion_offset(parent), 0));
+    NSfzRegion_set_end(self, sfz_inh(NSfzRegion_end(self), NSfzRegion_end(parent), 0));
+    NSfzRegion_set_resonance(self, sfz_inh(NSfzRegion_resonance(self), NSfzRegion_resonance(parent), 0));
+    NSfzRegion_set_pitchlfo_freq(self, sfz_inh(NSfzRegion_pitchlfo_freq(self), NSfzRegion_pitchlfo_freq(parent), 0));
+    NSfzRegion_set_pitchlfo_depth(self, sfz_inh(NSfzRegion_pitchlfo_depth(self), NSfzRegion_pitchlfo_depth(parent), 0));
+    NSfzRegion_set_fillfo_freq(self, sfz_inh(NSfzRegion_fillfo_freq(self), NSfzRegion_fillfo_freq(parent), 0));
+    NSfzRegion_set_fillfo_depth(self, sfz_inh(NSfzRegion_fillfo_depth(self), NSfzRegion_fillfo_depth(parent), 0));
+    NSfzRegion_set_fil_keytrack(self, sfz_inh(NSfzRegion_fil_keytrack(self), NSfzRegion_fil_keytrack(parent), 0));
+    NSfzRegion_set_output(self, sfz_inh(NSfzRegion_output(self), NSfzRegion_output(parent), 0));
+    return 0;
+}
+
+# --- SfzFile ---
+#derive(accessors)
+struct NSfzFile { global; groups; regions; group_indices; default_path; includes; }
+
+fn n_sfz_parse_header(token) {
+    var len = str_len(token);
+    if (len < 2) { return SFZ_HDR_NONE; }
+    var data = str_data(token);
+    if (load8(data) != 60) { return SFZ_HDR_NONE; }
+    if (load8(data + len - 1) != 62) { return SFZ_HDR_NONE; }
+    var inner = str_substr(token, 1, len - 1);
+    if (str_eq_cstr(inner, "control") == 1) { return SFZ_HDR_CONTROL; }
+    if (str_eq_cstr(inner, "global") == 1) { return SFZ_HDR_GLOBAL; }
+    if (str_eq_cstr(inner, "group") == 1) { return SFZ_HDR_GROUP; }
+    if (str_eq_cstr(inner, "region") == 1) { return SFZ_HDR_REGION; }
+    if (str_eq_cstr(inner, "curve") == 1) { return SFZ_HDR_CURVE; }
+    return SFZ_HDR_NONE;
+}
+
+# parse(input_cstr) -> NSfzFile pointer (never fails).
+#must_use
+fn n_sfz_parse(input_cstr) {
+    var input = str_from(input_cstr);
+    var global = n_sfz_region_new();
+    var groups = vec_new();
+    var regions = vec_new();
+    var group_indices = vec_new();
+    var default_path = 0;
+    var includes = vec_new();
+    var current_header = SFZ_HDR_NONE;
+    var current_group_idx = 0 - 1;
+
+    var lines = sfz_lines(input);
+    var nl = vec_len(lines);
+    var li = 0;
+    while (li < nl) {
+        var line = str_trim(vec_get(lines, li));
+        li = li + 1;
+        if (str_len(line) == 0) {
+            # skip
+        } else {
+            if (sfz_starts(line, "//") == 1) {
+                # comment, skip
+            } else {
+                if (sfz_starts(line, "#include") == 1) {
+                    var rest = sfz_trim_quotes(str_trim(str_substr(line, 8, str_len(line))));
+                    if (str_len(rest) > 0) { vec_push(includes, rest); }
+                } else {
+                    var tokens = sfz_tokenize(line);
+                    var nt = vec_len(tokens);
+                    var ti = 0;
+                    while (ti < nt) {
+                        var token = vec_get(tokens, ti);
+                        ti = ti + 1;
+                        var hk = n_sfz_parse_header(token);
+                        if (hk != SFZ_HDR_NONE) {
+                            current_header = hk;
+                            if (hk == SFZ_HDR_GROUP) {
+                                vec_push(groups, n_sfz_region_new());
+                                current_group_idx = vec_len(groups) - 1;
+                            }
+                            if (hk == SFZ_HDR_REGION) {
+                                vec_push(regions, n_sfz_region_new());
+                                vec_push(group_indices, current_group_idx);
+                            }
+                        } else {
+                            var eq = str_index_of(token, 61);
+                            if (eq > 0) {
+                                var k = str_substr(token, 0, eq);
+                                var v = str_substr(token, eq + 1, str_len(token));
+                                if (str_len(k) > 0) {
+                                    if (str_len(v) > 0) {
+                                        if (current_header == SFZ_HDR_CONTROL) {
+                                            if (str_eq_cstr(k, "default_path") == 1) { default_path = v; }
+                                        } else {
+                                            if (current_header == SFZ_HDR_GLOBAL) { n_sfz_apply_opcode(global, k, v); }
+                                            else {
+                                                if (current_header == SFZ_HDR_GROUP) { n_sfz_apply_opcode(vec_get(groups, vec_len(groups) - 1), k, v); }
+                                                else {
+                                                    if (current_header == SFZ_HDR_REGION) { n_sfz_apply_opcode(vec_get(regions, vec_len(regions) - 1), k, v); }
+                                                    else {
+                                                        if (current_header == SFZ_HDR_NONE) { n_sfz_apply_opcode(global, k, v); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    var f = alloc(sizeof(NSfzFile));
+    NSfzFile_set_global(f, global);
+    NSfzFile_set_groups(f, groups);
+    NSfzFile_set_regions(f, regions);
+    NSfzFile_set_group_indices(f, group_indices);
+    NSfzFile_set_default_path(f, default_path);
+    NSfzFile_set_includes(f, includes);
+    return f;
+}
+
+# --- mapping helpers ---
+#must_use
+fn n_sfz_map_loop_mode(s) {
+    if (s == 0) { return LOOP_ONESHOT; }
+    if (str_eq_cstr(s, "loop_continuous") == 1) { return LOOP_FORWARD; }
+    if (str_eq_cstr(s, "loop_sustain") == 1) { return LOOP_SUSTAIN; }
+    return LOOP_ONESHOT;
+}
+
+#must_use
+fn n_sfz_map_fil_type(s) {
+    if (s == 0) { return FILTER_LOWPASS; }
+    if (str_eq_cstr(s, "hpf_1p") == 1) { return FILTER_HIGHPASS; }
+    if (str_eq_cstr(s, "hpf_2p") == 1) { return FILTER_HIGHPASS; }
+    if (str_eq_cstr(s, "bpf_2p") == 1) { return FILTER_BANDPASS; }
+    if (str_eq_cstr(s, "brf_2p") == 1) { return FILTER_NOTCH; }
+    return FILTER_LOWPASS;
+}
+
+# map_fil_veltrack(cents) = clamp(cents / 9600, 0, 1)
+#must_use
+fn n_sfz_map_fil_veltrack(cents) {
+    return f64_min(f64_max(f64_div(cents, f64_from(9600)), 0), F64_ONE);
+}
+
+# a (zone, filename) pair produced by to_zones
+#derive(accessors)
+struct NSfzZoneFile { zone; filename; }
+
+# to_zones(sfzfile, sample_rate f64 bits) -> vec of NSfzZoneFile.
+#must_use
+fn n_sfz_to_zones(f, sample_rate) {
+    var out = vec_new();
+    var regions = NSfzFile_regions(f);
+    var groups = NSfzFile_groups(f);
+    var group_indices = NSfzFile_group_indices(f);
+    var global = NSfzFile_global(f);
+    var default_path = NSfzFile_default_path(f);
+    var nreg = vec_len(regions);
+    var i = 0;
+    while (i < nreg) {
+        # merged = clone of region (shallow copy of the struct fields is enough here)
+        var merged = n_sfz_clone_region(vec_get(regions, i));
+        var gi = vec_get(group_indices, i);
+        if (gi >= 0) {
+            if (gi < vec_len(groups)) { n_sfz_inherit_from(merged, vec_get(groups, gi)); }
+        }
+        n_sfz_inherit_from(merged, global);
+
+        # key shorthand
+        var kk = NSfzRegion_key(merged);
+        if (kk >= 0) {
+            if (NSfzRegion_lokey(merged) == 0) { if (NSfzRegion_hikey(merged) == 127) { NSfzRegion_set_lokey(merged, kk); NSfzRegion_set_hikey(merged, kk); } }
+            if (NSfzRegion_pitch_keycenter(merged) == 60) { NSfzRegion_set_pitch_keycenter(merged, kk); }
+        }
+
+        var samp = NSfzRegion_sample(merged);
+        if (samp == 0) {
+            # no sample -> skip region
+        } else {
+            var filename = samp;
+            if (default_path != 0) {
+                if (str_starts_with(filename, default_path) == 0) {
+                    filename = str_cat(default_path, filename);
+                }
+            }
+            # tune_cents = tune + transpose * 100
+            var tune_cents = f64_add(f64_from(NSfzRegion_tune(merged)), f64_mul(f64_from(NSfzRegion_transpose(merged)), f64_from(100)));
+            var filter_type = n_sfz_map_fil_type(NSfzRegion_fil_type(merged));
+
+            var zone = n_zone_new(i);
+            zone = n_zone_with_key_range(zone, NSfzRegion_lokey(merged), NSfzRegion_hikey(merged));
+            zone = n_zone_with_vel_range(zone, NSfzRegion_lovel(merged), NSfzRegion_hivel(merged));
+            zone = n_zone_with_root_note(zone, NSfzRegion_pitch_keycenter(merged));
+            zone = n_zone_with_tune(zone, tune_cents);
+            zone = n_zone_with_volume(zone, NSfzRegion_volume(merged));
+            zone = n_zone_with_pan(zone, f64_div(NSfzRegion_pan(merged), f64_from(100)));
+            zone = n_zone_with_loop(zone, n_sfz_map_loop_mode(NSfzRegion_loop_mode(merged)), NSfzRegion_loop_start(merged), NSfzRegion_loop_end(merged));
+            zone = n_zone_with_filter(zone, NSfzRegion_cutoff(merged), n_sfz_map_fil_veltrack(NSfzRegion_fil_veltrack(merged)));
+            zone = n_zone_with_filter_type(zone, filter_type);
+            zone = n_zone_with_group(zone, NSfzRegion_group(merged));
+
+            if (f64_gt(NSfzRegion_resonance(merged), 0) == 1) { zone = n_zone_with_filter_resonance(zone, NSfzRegion_resonance(merged)); }
+            if (NSfzRegion_offset(merged) > 0) { zone = n_zone_with_sample_offset(zone, NSfzRegion_offset(merged)); }
+            if (NSfzRegion_end(merged) > 0) { zone = n_zone_with_sample_end(zone, NSfzRegion_end(merged)); }
+
+            # ampeg
+            var f100 = f64_from(100);
+            var has_ampeg = 0;
+            if (NSfzRegion_ampeg_attack(merged) != 0) { has_ampeg = 1; }
+            if (NSfzRegion_ampeg_decay(merged) != 0) { has_ampeg = 1; }
+            if (NSfzRegion_ampeg_sustain(merged) != f100) { has_ampeg = 1; }
+            if (NSfzRegion_ampeg_release(merged) != 0) { has_ampeg = 1; }
+            if (has_ampeg == 1) {
+                var adsr = n_adsr_config_from_seconds(NSfzRegion_ampeg_attack(merged), NSfzRegion_ampeg_decay(merged), f64_div(NSfzRegion_ampeg_sustain(merged), f100), NSfzRegion_ampeg_release(merged), sample_rate);
+                zone = n_zone_with_adsr(zone, adsr);
+            }
+            # fileg
+            var has_fileg = 0;
+            if (NSfzRegion_fileg_depth(merged) != 0) { has_fileg = 1; }
+            if (NSfzRegion_fileg_attack(merged) != 0) { has_fileg = 1; }
+            if (NSfzRegion_fileg_decay(merged) != 0) { has_fileg = 1; }
+            if (NSfzRegion_fileg_sustain(merged) != f100) { has_fileg = 1; }
+            if (NSfzRegion_fileg_release(merged) != 0) { has_fileg = 1; }
+            if (has_fileg == 1) {
+                var fileg = n_adsr_config_from_seconds(NSfzRegion_fileg_attack(merged), NSfzRegion_fileg_decay(merged), f64_div(NSfzRegion_fileg_sustain(merged), f100), NSfzRegion_fileg_release(merged), sample_rate);
+                zone = n_zone_with_filter_envelope(zone, fileg, NSfzRegion_fileg_depth(merged));
+            }
+            # LFOs
+            if (f64_gt(NSfzRegion_pitchlfo_freq(merged), 0) == 1) { if (NSfzRegion_pitchlfo_depth(merged) != 0) { zone = n_zone_with_pitch_lfo(zone, NSfzRegion_pitchlfo_freq(merged), NSfzRegion_pitchlfo_depth(merged)); } }
+            if (f64_gt(NSfzRegion_fillfo_freq(merged), 0) == 1) { if (NSfzRegion_fillfo_depth(merged) != 0) { zone = n_zone_with_filter_lfo(zone, NSfzRegion_fillfo_freq(merged), NSfzRegion_fillfo_depth(merged)); } }
+            if (f64_gt(NSfzRegion_fil_keytrack(merged), 0) == 1) { zone = n_zone_with_key_tracking(zone, f64_div(NSfzRegion_fil_keytrack(merged), f64_from(1200))); }
+            if (NSfzRegion_output(merged) > 0) { zone = n_zone_with_output_bus(zone, NSfzRegion_output(merged)); }
+
+            var pair = alloc(sizeof(NSfzZoneFile));
+            NSfzZoneFile_set_zone(pair, zone);
+            NSfzZoneFile_set_filename(pair, filename);
+            vec_push(out, pair);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# shallow clone of a region (copy every slot; the cc_modulations vec is shared by reference,
+# matching how to_zones only reads it).
+#must_use
+fn n_sfz_clone_region(src) {
+    var r = alloc(sizeof(NSfzRegion));
+    var n = sizeof(NSfzRegion) / 8;
+    var i = 0;
+    while (i < n) {
+        store64(r + i * 8, load64(src + i * 8));
+        i = i + 1;
+    }
+    return r;
+}
+
+# a (instrument, sample_files) result
+#derive(accessors)
+struct NSfzInstResult { instrument; sample_files; }
+
+# to_instrument(name, sample_rate) -> NSfzInstResult. Dedups filenames -> sequential SampleIds.
+#must_use
+fn n_sfz_to_instrument(f, name, sample_rate) {
+    var pairs = n_sfz_to_zones(f, sample_rate);
+    var inst = n_instrument_new(name);
+    var sample_files = vec_new();
+    var np = vec_len(pairs);
+    var i = 0;
+    while (i < np) {
+        var pair = vec_get(pairs, i);
+        var zone = NSfzZoneFile_zone(pair);
+        var filename = NSfzZoneFile_filename(pair);
+        # find filename in sample_files (string equality)
+        var idx = 0 - 1;
+        var nf = vec_len(sample_files);
+        var j = 0;
+        while (j < nf) {
+            if (str_eq(vec_get(sample_files, j), filename) == 1) { idx = j; j = nf; }
+            else { j = j + 1; }
+        }
+        if (idx < 0) {
+            vec_push(sample_files, filename);
+            idx = vec_len(sample_files) - 1;
+        }
+        NZone_set_sample_id(zone, idx);
+        n_instrument_add_zone(inst, zone);
+        i = i + 1;
+    }
+    var res = alloc(sizeof(NSfzInstResult));
+    NSfzInstResult_set_instrument(res, inst);
+    NSfzInstResult_set_sample_files(res, sample_files);
+    return res;
+}
