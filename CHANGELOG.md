@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.0 (Cyrius port) — 2026-07-02
+
+Full Rust → **Cyrius** port (toolchain 6.3.34). The Rust 1.1.0 source is preserved under
+`rust-old/` as the parity oracle. All 14 modules ported for **feature-set parity**, leaning on
+the converted **naad** (DSP/filters/LFOs/effects/voice management), **shravan** (WAV codecs), and
+**hisab** (math) Cyrius libraries.
+
+### Ported
+- `error` (integer codes), `f64_util`, `loop_mode`, `envelope` (naad ADSR), `zone` (32 fields +
+  velocity curves + `matches`/`playback_ratio`), `sample` (cubic-hermite interp, energy onset
+  detection, `SampleBank`), `instrument` (find_zones + round-robin), `capture` (recorder, trim,
+  loop detection), `stretch` (WSOLA/OLA), `effect_chain` (5-slot naad effects), `io` (WAV
+  load/stream via shravan), `sf2` (RIFF/SoundFont binary parser), `sfz` (40+ opcode text parser),
+  `engine` (voice mgmt + per-sample render loop over naad SVF/LFO/smoother/VoiceManager)
+- Samples/floats are f64 (Cyrius has no f32); `#derive(Serialize)`-ready config structs; symbols
+  `n_`/`N`-prefixed for the flat bundle namespace
+
+### Quality
+- **14 test suites, ~327 assertions, 0 failures** (`cyrius test`)
+- Adversarial parity audit vs `rust-old/` (2 passes): fixed a sub-1.0-sample-rate envelope
+  divergence, SFZ integer-parse strictness (u8 `>255` / negative-unsigned / leading `+`), an SF2
+  malformed-sub-chunk error path, and made capture's loop-point sort stable
+- **Benchmarks** — 7 Criterion benchmarks reproduced in `tests/nidhi.bcyr` (`BENCHMARKS.md`,
+  `bench-history.csv`) for Rust-vs-Cyrius comparison
+- **Fuzz** — `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` never-crash harnesses (6000 mutated/random
+  inputs, 0 crashes)
+- `dist/nidhi.cyr` distributable bundle via `cyrius distlib`
+
 ## 1.1.0 — 2026-03-28
 
 Performance + real-time safety release. Zero-allocation render path, block-based voice rendering, filter caching, denormal protection, and SIMD infrastructure.

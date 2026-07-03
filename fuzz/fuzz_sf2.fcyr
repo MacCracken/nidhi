@@ -1,0 +1,122 @@
+# fuzz_sf2.fcyr -- never-crash fuzz for sf2_parse (ports rust-old/fuzz/fuzz_sf2).
+# Invariant: sf2_parse must return an error code (negative) or a valid result on ANY input,
+# never a segfault/abort. Feeds three input classes: pure random, RIFF/sfbk-prefixed random,
+# and byte-mutated valid minimal SF2 (to reach the record parsers + resolution loop).
+# Run: cyrius fuzz   (or: cyrius build fuzz/fuzz_sf2.fcyr build/fuzz_sf2 && ./build/fuzz_sf2 [iters])
+
+include "src/loop_mode.cyr"
+include "src/zone.cyr"
+include "src/sample.cyr"
+include "src/instrument.cyr"
+include "src/sf2.cyr"
+
+var FUZZ_RNG = 0;
+fn rng_seed(s) { FUZZ_RNG = s; return 0; }
+fn rng_next() {
+    var x = FUZZ_RNG;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    FUZZ_RNG = x;
+    return x & 0x7FFFFFFFFFFFFFFF;
+}
+fn rng_range(n) { if (n <= 0) { return 0; } return rng_next() % n; }
+fn rng_byte() { return rng_next() & 0xFF; }
+
+# --- minimal SF2 byte-builder (valid blob to mutate) ---
+fn bb_new(cap) { var b = alloc(16); store64(b, alloc(cap)); store64(b + 8, 0); return b; }
+fn bb_buf(b) { return load64(b); }
+fn bb_len(b) { return load64(b + 8); }
+fn bb_u8(b, v) { store8(bb_buf(b) + bb_len(b), v & 0xFF); store64(b + 8, bb_len(b) + 1); return 0; }
+fn bb_u16(b, v) { bb_u8(b, v); bb_u8(b, v >> 8); return 0; }
+fn bb_i16(b, v) { bb_u16(b, v & 0xFFFF); return 0; }
+fn bb_u32(b, v) { bb_u8(b, v); bb_u8(b, v >> 8); bb_u8(b, v >> 16); bb_u8(b, v >> 24); return 0; }
+fn bb_str4(b, s) { var i = 0; while (i < 4) { bb_u8(b, load8(s + i)); i = i + 1; } return 0; }
+fn bb_fixed_str(b, s, flen) {
+    var slen = strlen(s);
+    var i = 0;
+    while (i < flen) { if (i < slen) { bb_u8(b, load8(s + i)); } else { bb_u8(b, 0); } i = i + 1; }
+    return 0;
+}
+fn bb_chunk_begin(b, id) { bb_str4(b, id); var pos = bb_len(b); bb_u32(b, 0); return pos; }
+fn bb_chunk_end(b, pos) {
+    var cl = bb_len(b) - (pos + 4);
+    var p = bb_buf(b) + pos;
+    store8(p, cl & 0xFF); store8(p + 1, (cl >> 8) & 0xFF); store8(p + 2, (cl >> 16) & 0xFF); store8(p + 3, (cl >> 24) & 0xFF);
+    if ((cl & 1) == 1) { bb_u8(b, 0); }
+    return 0;
+}
+
+fn build_valid_sf2(num_samples, loop_mode) {
+    var b = bb_new(16384);
+    var riff = bb_chunk_begin(b, "RIFF");
+    bb_str4(b, "sfbk");
+    var sdta = bb_chunk_begin(b, "LIST"); bb_str4(b, "sdta");
+    var smpl = bb_chunk_begin(b, "smpl");
+    var s = 0; while (s < num_samples) { bb_i16(b, 1000); s = s + 1; }
+    bb_chunk_end(b, smpl); bb_chunk_end(b, sdta);
+    var pdta = bb_chunk_begin(b, "LIST"); bb_str4(b, "pdta");
+    var phdr = bb_chunk_begin(b, "phdr");
+    bb_fixed_str(b, "Fuzz", 20); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_fixed_str(b, "EOP", 20); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 1); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_chunk_end(b, phdr);
+    var pbag = bb_chunk_begin(b, "pbag"); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 1); bb_u16(b, 0); bb_chunk_end(b, pbag);
+    var pgen = bb_chunk_begin(b, "pgen"); bb_u16(b, 41); bb_i16(b, 0); bb_u16(b, 0); bb_i16(b, 0); bb_chunk_end(b, pgen);
+    var inst = bb_chunk_begin(b, "inst"); bb_fixed_str(b, "Inst", 20); bb_u16(b, 0); bb_fixed_str(b, "EOI", 20); bb_u16(b, 1); bb_chunk_end(b, inst);
+    var ibag = bb_chunk_begin(b, "ibag"); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 4); bb_u16(b, 0); bb_chunk_end(b, ibag);
+    var igen = bb_chunk_begin(b, "igen");
+    bb_u16(b, 43); bb_i16(b, 0 | (127 << 8));
+    bb_u16(b, 44); bb_i16(b, 0 | (127 << 8));
+    bb_u16(b, 54); bb_i16(b, loop_mode);
+    bb_u16(b, 53); bb_i16(b, 0);
+    bb_u16(b, 0); bb_i16(b, 0);
+    bb_chunk_end(b, igen);
+    var shdr = bb_chunk_begin(b, "shdr");
+    bb_fixed_str(b, "S", 20); bb_u32(b, 0); bb_u32(b, num_samples); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 44100); bb_u8(b, 60); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 1);
+    bb_fixed_str(b, "EOS", 20); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u8(b, 0); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 0);
+    bb_chunk_end(b, shdr);
+    bb_chunk_end(b, pdta);
+    bb_chunk_end(b, riff);
+    return b;
+}
+
+fn fuzz_iter() {
+    var mode = rng_range(3);
+    if (mode == 0) {
+        var len = rng_range(256);
+        var buf = alloc(len + 8);
+        var j = 0; while (j < len) { store8(buf + j, rng_byte()); j = j + 1; }
+        sf2_parse(buf, len);
+    } else {
+        if (mode == 1) {
+            var len = 16 + rng_range(240);
+            var buf = alloc(len + 8);
+            store8(buf, 82); store8(buf + 1, 73); store8(buf + 2, 70); store8(buf + 3, 70);
+            store8(buf + 8, 115); store8(buf + 9, 102); store8(buf + 10, 98); store8(buf + 11, 107);
+            var j = 4; while (j < 8) { store8(buf + j, rng_byte()); j = j + 1; }
+            j = 12; while (j < len) { store8(buf + j, rng_byte()); j = j + 1; }
+            sf2_parse(buf, len);
+        } else {
+            var b = build_valid_sf2(rng_range(40) + 1, rng_range(4));
+            var data = bb_buf(b);
+            var dlen = bb_len(b);
+            var flips = rng_range(8);
+            var k = 0; while (k < flips) { store8(data + rng_range(dlen), rng_byte()); k = k + 1; }
+            sf2_parse(data, dlen);
+        }
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    rng_seed(0x2545F4914F6CDD1D);
+    var iters = 3000;
+    var i = 0;
+    while (i < iters) { fuzz_iter(); i = i + 1; }
+    println("fuzz_sf2: ok (no crash across all inputs)");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);
