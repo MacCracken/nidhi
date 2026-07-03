@@ -1,8 +1,9 @@
 # Changelog
 
-## 0.1.0 (Cyrius port) — 2026-07-02
+## 2.0.0 — 2026-07-03
 
-Full Rust → **Cyrius** port (toolchain 6.3.34). The Rust 1.1.0 source is preserved under
+Full Rust → **Cyrius** port (toolchain 6.3.36). Major version marking the rewrite (and aligning
+with the naad/shravan/hisab 2.x ecosystem); supersedes the Rust 1.1.0 line below. The Rust 1.1.0 source is preserved under
 `rust-old/` as the parity oracle. All 14 modules ported for **feature-set parity**, leaning on
 the converted **naad** (DSP/filters/LFOs/effects/voice management), **shravan** (WAV codecs), and
 **hisab** (math) Cyrius libraries.
