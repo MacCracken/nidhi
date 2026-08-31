@@ -78,14 +78,14 @@ fn main() {
     vec_push(pd, f64_div(f64_from(1), f64_from(10)));
     var ps = n_sample_from_mono(pd, 44100);
     n_normalize_peak(ps);
-    assert_eq(approx(peak(NSample_data(ps)), F64_ONE, f64_div(F64_ONE, f64_from(1000))), 1, "peak normalized to 1.0");
+    assert_eq(approx(naad_peak(NSample_data(ps)), F64_ONE, f64_div(F64_ONE, f64_from(1000))), 1, "peak normalized to 1.0");
 
     test_group("normalize_rms");
     var rd = vec_new();
     push_n(rd, half, 100);
     var rsm = n_sample_from_mono(rd, 44100);
     n_normalize_rms(rsm, f64_div(f64_from(2), f64_from(10)));   # target 0.2
-    assert_eq(approx(rms(NSample_data(rsm)), f64_div(f64_from(2), f64_from(10)), tol), 1, "rms adjusted to ~0.2");
+    assert_eq(approx(naad_rms(NSample_data(rsm)), f64_div(f64_from(2), f64_from(10)), tol), 1, "rms adjusted to ~0.2");
 
     test_group("detect_loop_points");
     # 4410-sample 100 Hz sine @ 44100
@@ -125,7 +125,7 @@ fn main() {
     n_recorder_write(rp, post);
     var fp = n_recorder_finish_processed(rp, f64_div(F64_ONE, f64_from(100)));
     assert_eq(NSample_frames(fp), 200, "finish_processed trims to 200 frames");
-    assert_eq(approx(peak(NSample_data(fp)), F64_ONE, tol), 1, "finish_processed peak ~ 1.0");
+    assert_eq(approx(naad_peak(NSample_data(fp)), F64_ONE, tol), 1, "finish_processed peak ~ 1.0");
 
     return assert_summary();
 }

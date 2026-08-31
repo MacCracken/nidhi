@@ -10,8 +10,8 @@ fn main() {
 
     test_group("naad dsp helpers");
     # 0 dB -> unity gain; check finiteness (avoid exact float compares)
-    assert_eq(naad_is_finite(db_to_amplitude(f64_from(0))), 1, "db_to_amplitude(0) finite");
-    assert_eq(naad_is_finite(amplitude_to_db(F64_ONE)), 1, "amplitude_to_db(1) finite");
+    assert_eq(naad_is_finite(naad_db_to_amplitude(f64_from(0))), 1, "naad_db_to_amplitude(0) finite");
+    assert_eq(naad_is_finite(naad_amplitude_to_db(F64_ONE)), 1, "naad_amplitude_to_db(1) finite");
 
     test_group("naad adsr");
     var env = envelope_adsr_new(f64_from(0), f64_from(0), F64_ONE, f64_from(0));

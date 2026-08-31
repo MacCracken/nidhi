@@ -1,11 +1,13 @@
 # Benchmarks: Rust vs Cyrius
 
-> nidhi 2.0.0 (Cyrius port) benchmark comparison.
+> nidhi 2.0.1 (Cyrius port) benchmark comparison.
 >
 > - **Rust**: criterion v0.5, release mode (`rust-old/`, `cargo bench`). f32 samples; naad 1 /
 >   shravan 1.0.1 std path; SSE2/NEON SIMD mix + zero-alloc render path.
-> - **Cyrius**: cyrius 6.3.34, `tests/nidhi.bcyr` (`bench_batch_start`/`stop`), 2026-07-02. f64
->   samples (no f32); naad-backed DSP; per-sample SVF-output alloc; per-frame block render.
+> - **Cyrius**: cyrius 6.5.36, `tests/nidhi.bcyr` (`bench_batch_start`/`stop`), 2026-08-31. f64
+>   samples (no f32); naad 2.2.2 / shravan 2.8.0 / hisab 2.11.2; per-sample SVF-output alloc;
+>   per-frame block render. The head-to-head ratios below are unchanged from the 6.3.34 run —
+>   see the full set for the small per-benchmark movements.
 > - **Platform**: x86_64 Linux
 >
 > Both sides run the SAME 7 operations (from `rust-old/benches/benchmarks.rs`). The parity signal
@@ -64,26 +66,26 @@ at 48 kHz). Block render agrees: `fill_buffer_stereo/16` = 2.877 ms for a 512-fr
 512-frame budget of 11.6 ms → **4× headroom**. The ~15–22× gap to Rust only widens Rust's already-
 comfortable margin; it does not change whether Cyrius meets the deadline — which it does throughout.
 
-## Full Cyrius Benchmark Set (16 benchmarks, cyrius 6.3.34, 2026-07-02)
+## Full Cyrius Benchmark Set (16 benchmarks, cyrius 6.5.36, 2026-08-31)
 
-| Benchmark | Avg | Iterations |
-|-----------|-----|------------|
-| voice_count_scaling/1 | 887 ns | 4,410 |
-| voice_count_scaling/4 | 1.875 µs | 4,410 |
-| voice_count_scaling/8 | 3.173 µs | 4,410 |
-| voice_count_scaling/16 | 5.591 µs | 4,410 |
-| voice_count_scaling/32 | 10.689 µs | 4,410 |
-| voice_count_scaling/64 | 20.886 µs | 4,410 |
-| fill_buffer_stereo/1 | 457.7 µs | 40 |
-| fill_buffer_stereo/8 | 1.569 ms | 40 |
-| fill_buffer_stereo/16 | 2.877 ms | 40 |
-| fill_buffer_per_sample/1 | 440.9 µs | 40 |
-| fill_buffer_per_sample/8 | 1.582 ms | 40 |
-| fill_buffer_per_sample/16 | 2.869 ms | 40 |
-| interpolation_cubic | 82 ns | 44,100 |
-| interpolation_stereo | 155 ns | 44,100 |
-| fill_buffer_stereo_filtered_8v | 2.592 ms | 40 |
-| wsola_1sec_2x | 857.1 ms | 2 |
+| Benchmark | Avg (6.5.36) | Prev (6.3.34) | Iterations |
+|-----------|-----|-----|------------|
+| voice_count_scaling/1 | 868 ns | 887 ns | 4,410 |
+| voice_count_scaling/4 | 1.789 µs | 1.875 µs | 4,410 |
+| voice_count_scaling/8 | 3.105 µs | 3.173 µs | 4,410 |
+| voice_count_scaling/16 | 5.601 µs | 5.591 µs | 4,410 |
+| voice_count_scaling/32 | 10.569 µs | 10.689 µs | 4,410 |
+| voice_count_scaling/64 | 20.614 µs | 20.886 µs | 4,410 |
+| fill_buffer_stereo/1 | 433.3 µs | 457.7 µs | 40 |
+| fill_buffer_stereo/8 | 1.555 ms | 1.569 ms | 40 |
+| fill_buffer_stereo/16 | 2.871 ms | 2.877 ms | 40 |
+| fill_buffer_per_sample/1 | 429.1 µs | 440.9 µs | 40 |
+| fill_buffer_per_sample/8 | 1.550 ms | 1.582 ms | 40 |
+| fill_buffer_per_sample/16 | 2.884 ms | 2.869 ms | 40 |
+| interpolation_cubic | 89 ns | 82 ns | 44,100 |
+| interpolation_stereo | 154 ns | 155 ns | 44,100 |
+| fill_buffer_stereo_filtered_8v | **2.247 ms** | 2.592 ms | 40 |
+| wsola_1sec_2x | 858.8 ms | 857.1 ms | 2 |
 
 ## Analysis
 

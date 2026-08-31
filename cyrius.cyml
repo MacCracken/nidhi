@@ -5,7 +5,7 @@ description = "nidhi — Sample playback engine (Cyrius port): key/velocity zone
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/nidhi"
 language = "cyrius"
-cyrius = "6.3.36"
+cyrius = "6.5.36"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -41,15 +41,15 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "ass
 # shravan references sankoch — declared here so the flat bundle resolves.
 [deps.naad]
 git = "https://github.com/MacCracken/naad.git"
-tag = "2.1.0"
+tag = "2.2.2"
 modules = ["dist/naad.cyr"]
 
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "2.6.7"
+tag = "2.11.2"
 modules = ["dist/hisab.cyr"]
 
 [deps.shravan]
 git = "https://github.com/MacCracken/shravan.git"
-tag = "2.5.12"
+tag = "2.8.0"
 modules = ["dist/shravan.cyr"]

@@ -26,10 +26,10 @@ consumed by **dhvani** (audio engine) and thereby **shruti** (DAW), replacing
 
 Declared in `cyrius.cyml [deps.*]` (git + tag + `dist/*.cyr` bundle), resolved by `cyrius deps`:
 
-- **naad** (2.1.0) — DSP: SVF/biquad filters, ADSR, LFOs, effects, voice management, interpolation,
+- **naad** (2.2.2) — DSP: SVF/biquad filters, ADSR, LFOs, effects, voice management, interpolation,
   onset/normalize helpers. **Use naad fully** — do not reimplement DSP naad already provides.
-- **shravan** (2.5.12) — audio codecs (WAV decode/encode + streaming), behind the `io` module.
-- **hisab** (2.6.7) — math (pulled transitively by naad; also directly available).
+- **shravan** (2.8.0) — audio codecs (WAV decode/encode + streaming), behind the `io` module.
+- **hisab** (2.11.2) — math (pulled transitively by naad; also directly available).
 
 ## Quick Start
 

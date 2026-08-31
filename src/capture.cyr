@@ -1,8 +1,8 @@
 # capture.cyr -- sample recording, silence trim, normalization, loop detection
-# Requires: alloc, vec, math, sample (NSample_*), naad (normalize, rms)
+# Requires: alloc, vec, math, sample (NSample_*), naad (naad_normalize, naad_rms)
 #
-# Ports rust-old/src/capture.rs. "Use naad fully": normalize_peak -> naad normalize(buffer)
-# (scale peak to 1.0 in place), normalize_rms -> naad rms(buffer) + scale. trim_silence and
+# Ports rust-old/src/capture.rs. "Use naad fully": normalize_peak -> naad_normalize(buffer)
+# (scale peak to 1.0 in place), normalize_rms -> naad_rms(buffer) + scale. trim_silence and
 # detect_loop_points are nidhi-specific and ported directly.
 
 # --- SampleRecorder ---
@@ -133,15 +133,15 @@ fn n_trim_silence(sample, threshold) {
 
 # --- normalize_peak: scale so loudest |sample| -> 1.0 (via naad) ---
 fn n_normalize_peak(sample) {
-    normalize(NSample_data(sample));
+    naad_normalize(NSample_data(sample));
     return 0;
 }
 
-# --- normalize_rms: scale to target RMS (naad rms + manual gain) ---
+# --- normalize_rms: scale to target RMS (naad_rms + manual gain) ---
 fn n_normalize_rms(sample, target_rms) {
     var data = NSample_data(sample);
     if (vec_len(data) == 0) { return 0; }
-    var r = rms(data);
+    var r = naad_rms(data);
     var eps = f64_div(F64_ONE, f64_from(10000000000));
     if (f64_gt(r, eps) == 1) {
         var gain = f64_div(target_rms, r);

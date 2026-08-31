@@ -19,11 +19,12 @@
   to avoid collisions with naad/shravan/hisab in the flat concatenated bundle namespace.
 - **D4 — Use naad FULLY** (user, 2026-07-02). Prefer naad's implementations over reproducing
   nidhi's own duplicated DSP — this also *cleans up* the port (no_std fallbacks, feature gates,
-  duplicated DSP collapse). `[deps.naad] 2.1.0`, `[deps.shravan] 2.5.12`, `[deps.hisab] 2.6.7`
+  duplicated DSP collapse). `[deps.naad] 2.2.2`, `[deps.shravan] 2.8.0`, `[deps.hisab] 2.11.2`
   (git+tag+`modules=["dist/X.cyr"]`) are declared and **resolved** (`cyrius deps` pulled 6 deps
   incl. transitive goonj/sakshi/sankoch; `cyrius.lock` written). naad DSP available: SVF/biquad
-  filters, `envelope_adsr_*`, LFOs, effects, `hermite_interpolate`, `crossfade_equal_power`,
-  `detect_onsets`, `normalize`/`rms`/`peak`, `db_to_amplitude`, `flush_denormal`, VoiceManager.
+  filters, `envelope_adsr_*`, LFOs, effects, `hermite_interpolate`, `naad_crossfade_equal_power`,
+  `detect_onsets`, `naad_normalize`/`naad_rms`/`naad_peak`, `naad_db_to_amplitude`,
+  `flush_denormal`, VoiceManager. (naad 2.1.1/2.2.0 moved these onto the `naad_` prefix.)
 - **D7 — Parity = feature-set, not behavioral clone** (user, 2026-07-02). Reproduce the same
   capabilities (so the same benchmark workloads run), but take cleaner/better routes where naad
   or Cyrius idioms offer them. Behavior tracks naad (== Rust's std path).
