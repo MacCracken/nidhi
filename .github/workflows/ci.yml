@@ -37,9 +37,21 @@ jobs:
         run: cyrius deps
 
       - name: Build
+        # [build].entry / [build].output in cyrius.cyml are the source of
+        # truth for WHAT to compile — the same rule as the toolchain pin
+        # above; never hardcode them here. This step used to build
+        # `src/main.cyr`, a path left over from the binary-project
+        # scaffold that has never existed in this repo: nidhi is a
+        # LIBRARY. The entry is a smoke program that proves the build
+        # chain links; the real artifact is dist/nidhi.cyr (see Distlib).
         run: |
-          mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          set -e
+          ENTRY="$(grep '^entry = ' cyrius.cyml | head -1 | sed 's/entry = "\(.*\)"/\1/')"
+          OUTPUT="$(grep '^output = ' cyrius.cyml | head -1 | sed 's/output = "\(.*\)"/\1/')"
+          [ -n "$ENTRY" ] && [ -n "$OUTPUT" ] || { echo "cyrius.cyml has no [build].entry/[build].output"; exit 1; }
+          echo "Building $ENTRY -> $OUTPUT"
+          mkdir -p "$(dirname "$OUTPUT")"
+          cyrius build "$ENTRY" "$OUTPUT"
 
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry

@@ -50,9 +50,28 @@ jobs:
         run: cyrius deps
 
       - name: Build
+        # Derived from cyrius.cyml [build].entry/[build].output — see the
+        # matching step in ci.yml for why this is not `src/main.cyr`.
+        # BUILD_OUTPUT is exported so the artifact steps below reference
+        # the same path this step actually produced.
         run: |
-          mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          set -e
+          ENTRY="$(grep '^entry = ' cyrius.cyml | head -1 | sed 's/entry = "\(.*\)"/\1/')"
+          OUTPUT="$(grep '^output = ' cyrius.cyml | head -1 | sed 's/output = "\(.*\)"/\1/')"
+          [ -n "$ENTRY" ] && [ -n "$OUTPUT" ] || { echo "cyrius.cyml has no [build].entry/[build].output"; exit 1; }
+          echo "Building $ENTRY -> $OUTPUT"
+          mkdir -p "$(dirname "$OUTPUT")"
+          cyrius build "$ENTRY" "$OUTPUT"
+          echo "BUILD_OUTPUT=$OUTPUT" >> "$GITHUB_ENV"
+
+      - name: Verify library bundle is current
+        # dist/nidhi.cyr is what consumers actually take (cyrius.cyml
+        # [lib].modules -> `cyrius distlib`). --check compares the
+        # COMMITTED bundle against what src/ would produce and fails if it
+        # is stale, so a release can never ship a bundle that disagrees
+        # with the tagged source. Do not run plain `distlib` first — that
+        # would regenerate the file and make this check vacuous.
+        run: cyrius distlib --check
 
       - name: Extract changelog
         # Pull the tagged section out of CHANGELOG.md for the release body.
@@ -71,7 +90,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           NAME="${{ github.event.repository.name }}"
           git archive --format=tar.gz --prefix="$NAME-$TAG/" -o "$NAME-$TAG.tar.gz" HEAD
-          sha256sum "$NAME-$TAG.tar.gz" build/"$NAME" > SHA256SUMS 2>/dev/null \
+          sha256sum "$NAME-$TAG.tar.gz" "$BUILD_OUTPUT" > SHA256SUMS 2>/dev/null \
             || sha256sum "$NAME-$TAG.tar.gz" > SHA256SUMS
 
       - name: Create release
@@ -82,4 +101,4 @@ jobs:
           files: |
             ${{ github.event.repository.name }}-${{ github.ref_name }}.tar.gz
             SHA256SUMS
-            build/${{ github.event.repository.name }}
+            ${{ env.BUILD_OUTPUT }}
