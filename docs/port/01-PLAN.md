@@ -75,7 +75,12 @@ docs/port/          this plan + the 13 recon briefs (10-26)
 
 ## ✅ PORT COMPLETE (2026-07-02)
 
-All **14 modules ported**, **14/14 test suites green (~321 assertions, 0 failures)** on cyrius 6.3.34. `dist/nidhi.cyr` bundles via `cyrius distlib` (3611 lines). Remaining polish (not blocking): triage the re-run parity audit (all 14 modules); add fuzz never-crash drivers (`tests/*.fcyr`) for sfz/sf2; build the 7 parity benchmarks (`tests/*.bcyr`, docs/port/26 §2) + bench-history.csv for Rust-vs-Cyrius comparison; reconcile the port-template CLAUDE.md with nidhi specifics; CHANGELOG/VERSION.
+All **14 modules ported**. This plan is the historical record of the port; it is **not** current
+state — see [`docs/development/state.md`](../development/state.md) for that, and
+[`CHANGELOG.md`](../../CHANGELOG.md) for what has happened since. At the time this line was
+written the tree was 14 suites / ~321 assertions on cyrius 6.3.34; every "remaining polish" item
+it used to list (fuzz drivers, the 7 parity benchmarks, bench-history.csv, CHANGELOG/VERSION,
+the re-run parity audit) has since shipped.
 
 ## Parity test/bench/fuzz suites to build (mirror hisab's split)
 

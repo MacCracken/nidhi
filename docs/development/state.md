@@ -57,21 +57,31 @@ Transitive, resolved into `lib/`: **goonj** 2.0.4, **sankoch** 2.7.10, **sakshi*
 
 ## Known hazards
 
-_(Everything listed here at 2.0.1 — the `ERR_NONE` collision, the `src/main.cyr` CI break, the
-sf2 magic literals, and the integer-PCM silence — is resolved in 2.0.2.)_
+Everything is pinned in [`roadmap.md`](roadmap.md); this is the short list of what a consumer
+could actually hit.
 
-Every open item is now pinned to a release in [`roadmap.md`](roadmap.md). What remains:
+- **Per-zone bus routing does not work.** `output=` is parsed from SFZ, inherited and stored,
+  and **read by nothing** — the same shape `volume_db` had before 2.1.0. Pinned to 2.1.1. The
+  README says so too rather than listing it as a feature.
+- **High-pass / band-pass / notch voices allocate ~180 MB/s at 64 voices** — and this allocator
+  never frees (see [architecture 001](../architecture/001-the-allocator-never-frees.md)).
+  Low-pass, the default, is allocation-free. Filed upstream:
+  [`issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md`](issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md).
+- **72 bytes per note-on, never reclaimed** — the envelope and LFOs, which naad gives no way to
+  re-arm. Filed upstream:
+  [`issues/2026-08-31-naad-adsr-and-lfo-cannot-be-re-armed.md`](issues/2026-08-31-naad-adsr-and-lfo-cannot-be-re-armed.md).
+- **WSOLA amplifies output up to ~588x** where `window_sum` falls under the `1e-6` normalise
+  threshold. **Inherited from the oracle**, identical threshold and guard — a port-faithful
+  defect, not a port defect. Fixing it is a deliberate divergence needing its own ADR.
+- **86 top-level names skip the `n_`/`N` prefix.** 0 collisions measured against all 6,478
+  top-level names in `lib/`, so this is forward risk only —
+  [ADR 0005](../adr/0005-namespace-prefix-scope.md), and
+  [architecture 002](../architecture/002-one-flat-namespace.md) for why it matters at all.
 
-- **Deferred with reasons recorded** — the remaining 86 unprefixed names
-  ([ADR 0005](../adr/0005-namespace-prefix-scope.md), 0 collisions measured), the voice-major
-  block render, `fill_buses_stereo` (the oracle's own version is a stub that ignores
-  `output_bus`), genuinely incremental streaming, and serde
-  ([ADR 0003](../adr/0003-serde-is-not-ported.md)).
-- **Upstream-gated**: high-pass / band-pass / notch voices still allocate ~180 MB/s at 64 voices;
-  naad ships an alloc-free SVF core for low-pass only.
-- **Inherited, not a port defect**: WSOLA amplifies output up to ~588x where `window_sum` falls
-  under the `1e-6` normalise threshold. Reproduced faithfully from the oracle; fixing it is a
-  deliberate divergence needing its own ADR.
+Deliberate divergences from the Rust oracle, each with an ADR: the loop-crossfade seam
+([0001](../adr/0001-loop-crossfade-seam.md)), NaN clamping to a bound
+([0002](../adr/0002-nan-clamps-to-the-bound.md)), and zone `volume` being applied at all
+([0004](../adr/0004-apply-zone-volume-db.md)).
 
 ## rust-old/ — retired (2.0.4)
 

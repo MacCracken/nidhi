@@ -1,76 +1,79 @@
 # nidhi — Roadmap
 
-> Sequencing: what ships, in what order, against what gates. State lives in
-> [`state.md`](state.md); this file is the plan.
+> **Forward-facing only.** What ships next, in what order, and why anything not next is not next.
+> Shipped work lives in [`CHANGELOG.md`](../../CHANGELOG.md); current state is in
+> [`state.md`](state.md); decisions are in [`docs/adr/`](../adr/).
 
-Every item below traces to a specific finding from the 2.0.2 P-1 sweep or the 2.0.3 `rust-old/`
-parity audit, both recorded in [`CHANGELOG.md`](../../CHANGELOG.md). Items are pinned to a
-release, not left as a wishlist.
-
-## Shipped
-
-| Release | Theme |
-|---|---|
-| **2.0.0** (2026-07-03) | Rust → Cyrius port, all 14 modules |
-| **2.0.1** (2026-08-31) | Toolchain 6.5.36 + dependency catch-up (naad 2.2.2 / shravan 2.8.0 / hisab 2.11.2) |
-| **2.0.2** (2026-08-31) | P-1 audit: security, memory safety, correctness. `ERR_* → NIDHI_ERR_*` |
-| **2.0.3** (2026-08-31) | Loop-crossfade seam ([ADR 0001](../adr/0001-loop-crossfade-seam.md)); round-half-away parity; signed `inf`/`nan` |
-| **2.0.4** (2026-08-31) | **Rust oracle retired.** Golden vectors captured, build identity recorded, `rust-old/` removed (377 MB) |
-| **2.0.5** (2026-08-31) | Coverage backfill — every named oracle test now has a counterpart; 441 → 518 assertions |
-| **2.0.6** (2026-08-31) | Latent-hazard closeout; ADRs 0002 (NaN clamps) and 0003 (serde not ported) |
-| **2.0.7** (2026-08-31) | Performance, all bit-identical — WSOLA 4.02×, interpolation 2.8×, 64-voice 1.64× |
-| **2.1.0** (2026-08-31) | Zone `volume` applied (ADR 0004); per-note filter reuse; streaming reader decodes once; `CC_*` → `N_CC_*` |
+Current: **2.1.0**. Every item below carries a release pin and a reason. Nothing here blocks a
+release — 2.1.0 is complete and green.
 
 ---
 
-## 2.1.1 / 2.2.0 — what is left
+## 2.1.1 — the work nidhi can do alone
 
-Ordered by measured harm. Nothing here is blocking a release.
+Ordered by measured harm. All of it is nidhi-side; nothing waits on a dependency.
 
-### Upstream-gated on naad
+- [ ] **`fill_buses_stereo` — implement real bus routing, not the oracle's stub.**
+      The last unported public function from the Rust surface, but porting it verbatim is worse
+      than not porting it: the oracle's own implementation accumulates the whole mix into
+      `buses[0]` and ignores `output_bus` entirely ("per-voice bus routing is planned for a
+      future release"). `NZone_output_bus` is already parsed from SFZ `output=`, inherited, and
+      stored — **and read by nothing**, which is exactly the shape `volume_db` had before 2.1.0
+      ([ADR 0004](../adr/0004-apply-zone-volume-db.md)). Give the voice an `output_bus` at
+      note-on and accumulate per bus. Additive API; nothing in-tree consumes it yet.
+- [ ] **WSOLA amplifies output up to ~588x.** `normalize_by_window_sum` divides by `window_sum`
+      only where it exceeds `1e-6`, so at the output edges — one Hann frame, tiny taper — the
+      division amplifies instead of normalising. Measured: input max 0.97 -> output max 588.5, on
+      every fixture tried. **Faithfully inherited from the oracle** (identical threshold and
+      guard), so fixing it is a deliberate divergence: needs an ADR, a listening check, and new
+      golden vectors, since `tests/golden.tcyr` currently pins the *current* behaviour by
+      sampling the interior deliberately.
+- [ ] **Guard-page fuzz harnesses** (`guard_sf2.fcyr` / `guard_sfz.fcyr`). Harness-only, no `src/`
+      change; the shipped parsers already pass. Needs a `cyr_mmap == -1` fallback for the agnos
+      target.
+- [ ] **`n_stretch` / `n_stretch_ola` dedup** — 49 shared lines. Oracle-faithful duplication with
+      no wrong behaviour, so this is tidying, not repair. Extract only the guard prologue and the
+      normalize/truncate epilogue; a single mode-flagged helper would make the OLA path carry
+      `prev`/`tolerance` bookkeeping it never uses.
 
-- [ ] **High-pass / band-pass / notch voices allocate ~180 MB/s at 64 voices.** naad ships an
-      allocation-free SVF core for **low-pass only**. `fill_buffer_stereo_filtered_hp_8v` (added
-      2.0.7) makes the cost visible: 1.82 ms vs 1.53 ms for the identical low-pass workload, a
-      19 % penalty. Needs `_filter_svf_compute_into(self, input, out4)` from naad, mirroring
-      `reverb_process_core`. **Do not inline the Cytomic/Simper core into `engine.cyr`** — that
-      forks DSP CLAUDE.md says must come from naad.
-- [ ] **The rest of the per-note allocation (72 B/note).** 2.1.0 removed the filter half; the
-      envelope and LFOs remain because naad has no `envelope_adsr_reset` and no LFO frequency
-      setter, so an `Adsr` cannot be re-armed for a different zone's times.
+## 2.2.0 — gated on naad
 
-### Deferred with reasons recorded
+Both filed upstream. nidhi cannot fix either without forking DSP that CLAUDE.md says must come
+from naad.
 
-- [ ] **The other 86 unprefixed names** — [ADR 0005](../adr/0005-namespace-prefix-scope.md).
-      0 collisions measured against 6,478 lib names. The ADR lists the per-family naming
-      decisions the next attempt needs, and says to land it alone.
-- [ ] **Voice-major block render.** PERF-01's headline was refuted by measurement: alone it makes
-      64-voice low-pass *worse* (17.734 → 18.273 ms). The genuine 2.4× is the many-idle-slots
-      case (1 voice in 64: 441.7 → 180.3 µs). Redo with real invariant hoisting, a mandatory
-      output-length guard, and mono coverage. Note 2.0.7 already took most of the per-voice win
-      by other means.
-- [ ] **`fill_buses_stereo`.** The only unported public function in the oracle's surface — but
-      the oracle's own implementation is a stub: it accumulates the full mix into `buses[0]` and
-      ignores `output_bus` entirely ("per-voice bus routing is planned for a future release").
-      So porting it verbatim ships a function that does not do what its name says. Real routing
-      is the honest version and is a feature: give each voice an `output_bus` from its zone and
-      accumulate per bus. `NZone_output_bus` is already parsed, inherited and stored — the same
-      shape as `volume_db` before 2.1.0.
+- [ ] **Allocation-free SVF core for high-pass / band-pass / notch** —
+      [`issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md`](issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md).
+      **32 B per channel per sample = 180.6 MB/s at 64 voices**, measured. Low-pass already has
+      the escape hatch and nidhi took it in 2.0.7; the other three modes have none.
+      `fill_buffer_stereo_filtered_hp_8v` (1.819 ms) vs `..._8v` (1.528 ms) keeps the **19 %**
+      penalty visible. *On arrival:* route all four modes through it, delete the mode branch in
+      `nvf_process_stereo`, extend the zero-allocation assertion to all four.
+- [ ] **`Adsr` / `Lfo` re-arm APIs** —
+      [`issues/2026-08-31-naad-adsr-and-lfo-cannot-be-re-armed.md`](issues/2026-08-31-naad-adsr-and-lfo-cannot-be-re-armed.md).
+      **72 B per note-on**, never reclaimed. 2.1.0 removed the filter half (264 -> 72 B) *because*
+      `filter_svf_set_params` and `filter_svf_reset` exist; `Adsr` and `Lfo` have no equivalent.
+      *On arrival:* give each voice its envelope and LFOs once in `n_voice_new`, re-arm in
+      `note_on`, take per-note allocation to zero.
 - [ ] **Genuinely incremental streaming.** 2.1.0 made `open()` decode once instead of twice, but
-      it still holds the whole decoded file. Needs an incremental decoder from shravan.
-- [ ] **WSOLA amplifies output up to ~588×** where `window_sum` falls under the `1e-6` normalise
-      threshold. Faithfully inherited from the oracle (identical threshold and guard), so fixing
-      it is a deliberate divergence needing its own ADR and a listening check.
-- [ ] **Serde**, if it is ever wanted — [ADR 0003](../adr/0003-serde-is-not-ported.md). A
-      feature, not a repair.
-- [ ] Guard-page fuzz harnesses (`guard_sf2.fcyr` / `guard_sfz.fcyr`); needs a `cyr_mmap == -1`
-      fallback for the agnos target.
-- [ ] `n_stretch` / `n_stretch_ola` dedup — 49 shared lines, oracle-faithful duplication, no
-      wrong behaviour. Extract only the guard prologue and the normalize/truncate epilogue.
+      it still holds the whole decoded file. shravan's decoder is buffer-then-decode-once — the
+      defect behind the 2.0.2 4 KB truncation bug — so real streaming needs an incremental
+      decoder there. File against shravan when it becomes worth doing.
 
-## Housekeeping (any release)
+## Deferred — with the reason, so it is not re-opened blind
 
-- [ ] `CONTRIBUTING.md` still documents the Rust workflow — MSRV 1.89, cargo-audit/cargo-deny,
-      "feature-gate `naad` usage behind `#[cfg(feature = \"std\")]`". Orphaned since the port.
-- [ ] `docs/port/13-hisab-lib-template.md` prescribes bare `ERR_*` in its snippet; the warning
-      added in 2.0.2 covers it, but the snippet itself is still the wrong pattern to copy.
+Each of these was examined and consciously not done. The reason is the point.
+
+| Item | Pin | Why it is deferred |
+|---|---|---|
+| **The 86 remaining unprefixed names** | 2.2.0, alone | [ADR 0005](../adr/0005-namespace-prefix-scope.md). **0 collisions measured** across all 6,478 top-level names in `lib/`, so the benefit is purely preventive. The naming questions are not mechanical (`nvf_*` already starts with `n` but not `n_`; `Sf2Shdr` -> `NSf2Shdr` is consistent and ugly), and a partially-applied rename in a flat-namespace language is a live hazard rather than a cosmetic one. The two with a *named* forward path (`CC_*`, `ignore_i`) were renamed in 2.1.0. **Land the rest in its own release**; the ADR lists the per-family decisions needed first. |
+| **Voice-major block render** | 2.2.0 | The headline claim was **refuted by measurement**: alone it makes 64-voice low-pass *worse* (17.734 -> 18.273 ms). The genuine 2.4x is only the many-idle-slots case (1 voice in 64: 441.7 -> 180.3 us). 2.0.7 took most of the per-voice win by other means, so what remains is a narrower prize than it looked. Redo only with real invariant hoisting, a mandatory output-length guard, and mono coverage. |
+| **Serde** | unpinned — needs a consumer | [ADR 0003](../adr/0003-serde-is-not-ported.md). Never implemented despite four documents claiming it was; those are corrected. Implementing it is a **feature, not a repair** — `NZone` has 32 fields against a 16-field derive guidance, and with no traits there is no `Deserialize` to derive, so every type needs a hand-written `from_json`. Pin it when something actually needs to persist a config. |
+| **NaN clamping to a bound** | no change planned | [ADR 0002](../adr/0002-nan-clamps-to-the-bound.md). A NaN parameter yields a finite value at a clamp bound where Rust propagated NaN. **Kept deliberately** — a NaN reaching the SVF latches the voice for its whole life. The "ignore non-finite input entirely" alternative is arguably better still and is recorded there; revisit only if the hard-left-pan-on-NaN surprise is ever reported. |
+| **PERF-03 layer 3** (Cauchy-Schwarz prune) | **rejected**, not deferred | A numerical heuristic with a hand-tuned margin, not an exact transformation — it trades audio accuracy for speed against an explicit project rule. The two exact WSOLA layers delivered 4.02x without it. |
+
+## Housekeeping — any release
+
+- [ ] `docs/port/12-vidya-port-template.md` is a template for porting *other* projects and still
+      describes a live `rust-old/`. Harmless here, but it is the file a future port would copy.
+- [ ] `docs/port/13-hisab-lib-template.md` shows bare `ERR_*` in its snippet. A warning was added
+      in 2.0.2, but the snippet itself is still the wrong pattern to copy.
