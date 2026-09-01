@@ -5,9 +5,10 @@
 
 ## Version
 
-**2.0.7** — 2026-08-31. Performance, all bit-identical: WSOLA 4.02x, interpolation 2.8x,
-64-voice scaling 1.64x. Follows 2.0.6 (latent hazards), 2.0.5 (coverage backfill), 2.0.4 (oracle
-retired), 2.0.3 (crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up), 2.0.0 (port).
+**2.1.0** — 2026-08-31. Zone `volume` is applied (it was parsed, stored and ignored), note_on
+reuses the voice's filter, and the streaming reader decodes once instead of twice. Follows 2.0.7
+(performance), 2.0.6 (latent hazards), 2.0.5 (coverage backfill), 2.0.4 (oracle retired), 2.0.3
+(crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up), 2.0.0 (the port).
 
 ## Toolchain
 
@@ -29,7 +30,7 @@ retired), 2.0.3 (crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up),
 
 ## Tests
 
-- **15 suites / 556 assertions / 0 failures** (`cyrius test`), zero `#must_use` warnings
+- **15 suites / 571 assertions / 0 failures** (`cyrius test`), zero `#must_use` warnings
 - Render path asserted **allocation-free**: `alloc_used()` delta of 0 across 20 blocks at 8 and
   64 voices, filtered and unfiltered (`tests/engine.tcyr`)
 - **Fuzz**: `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` — 2 passed, 0 crashes
@@ -61,10 +62,11 @@ sf2 magic literals, and the integer-PCM silence — is resolved in 2.0.2.)_
 
 Every open item is now pinned to a release in [`roadmap.md`](roadmap.md). What remains:
 
-- **Structural** (2.1.0) — the `n_`/`N` prefix sweep over 100 top-level names (zero measured
-  collisions today), the voice-major block render, the streaming-reader restructure, per-note-on
-  allocation, `fill_buses_stereo`, `NZone_volume_db` being parsed and never read, and serde if
-  it is ever wanted ([ADR 0003](../adr/0003-serde-is-not-ported.md)).
+- **Deferred with reasons recorded** — the remaining 86 unprefixed names
+  ([ADR 0005](../adr/0005-namespace-prefix-scope.md), 0 collisions measured), the voice-major
+  block render, `fill_buses_stereo` (the oracle's own version is a stub that ignores
+  `output_bus`), genuinely incremental streaming, and serde
+  ([ADR 0003](../adr/0003-serde-is-not-ported.md)).
 - **Upstream-gated**: high-pass / band-pass / notch voices still allocate ~180 MB/s at 64 voices;
   naad ships an alloc-free SVF core for low-pass only.
 - **Inherited, not a port defect**: WSOLA amplifies output up to ~588x where `window_sum` falls

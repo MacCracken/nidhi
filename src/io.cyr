@@ -2,8 +2,12 @@
 # Requires: alloc, vec, string (strlen), str (str_new), syscalls/fs (file_open/read/write/close,
 #           memcpy, load8/store8), sample (n_sample_from_mono/stereo/with_name), error (NIDHI_ERR_IMPORT),
 #           shravan (wav_decode, decode_file, decode_result_info/samples, fmtinfo_channels/
-#           sample_rate/total_samples, wav_stream_new/feed/flush, stream_evt_type/data,
-#           STREAM_EVT_HEADER/SAMPLES/END)
+#           sample_rate/total_samples, shravan_init_constants)
+#
+# 2.1.0 dropped the shravan streaming shim (wav_stream_new/feed/flush, stream_evt_*,
+# STREAM_EVT_*): NStreamReader now decodes once and serves chunks from a cursor. Restore
+# them only if shravan ever ships a genuinely incremental decoder -- the current one is
+# buffer-then-decode-once, which is what made the shim decode every file twice.
 #
 # Ports rust-old/src/io.rs. Samples are f64 bit patterns end-to-end (shravan decodes to f64), so
 # the Rust Vec<f32> boundary conversions are no-ops here. All failures collapse to NIDHI_ERR_IMPORT.
@@ -144,132 +148,86 @@ fn n_load_wav(path) {
 }
 
 # --- StreamingWavReader ---
+#
+# 2.1.0: decodes the file ONCE. It used to decode twice -- n_stream_reader_open ran a full
+# wav_decode purely to read the format header and threw the samples away, then read_chunk fed
+# the entire file back through shravan's stream decoder to recover them. Measured 85.9 ms and
+# 14.4 MB of never-reclaimed heap on a 10 s file BEFORE the first chunk was returned, which is
+# the opposite of what a streaming reader is for. read_chunk also rebuilt `pending` into a
+# fresh vec on every call, so read_all was two more full copies on top.
+#
+# The decoded buffer now lives on the reader and chunks are a cursor into it. That drops the
+# shravan stream decoder, the pending buffer, and the file-data/offset bookkeeping entirely.
+#
+# NOTE: this is still not incremental -- open() holds the whole decoded file in memory. Making
+# it genuinely streaming needs an incremental decoder from shravan; its current one is
+# buffer-then-decode-once (the defect behind the 2.0.2 4 KB truncation bug). What this change
+# buys is one decode instead of two and one copy instead of three, at strictly lower peak
+# memory than before.
 #derive(accessors)
 struct NStreamReader {
-    decoder;
     info;
-    pending;
+    samples;
     channels;
     sample_rate;
     total_frames;
     frames_read;
-    finished;
-    file_data;
-    file_len;
-    file_offset;
 }
 
-# open(path) -> NStreamReader pointer, or NIDHI_ERR_IMPORT. Does a full decode up front for metadata.
+# open(path) -> NStreamReader pointer, or NIDHI_ERR_IMPORT.
 #must_use
 fn n_stream_reader_open(path) {
     n_init();
     var lenslot = alloc(8);
+    if (lenslot == 0) { return NIDHI_ERR_IMPORT; }
     var file_data = n_read_file(path, lenslot);
     if (file_data == 0) { return NIDHI_ERR_IMPORT; }
-    var file_len = load64(lenslot);
-    var dr = wav_decode(file_data, file_len);
+    var dr = wav_decode(file_data, load64(lenslot));
     if (dr < 0) { return NIDHI_ERR_IMPORT; }
     var info = decode_result_info(dr);
+    var samples = decode_result_samples(dr);
+
+    var ch = fmtinfo_channels(info);
+    if (ch < 1) { ch = 1; }
+
+    # Frame count comes from the DECODED data, not from the header's declared total. The two
+    # disagreeing is exactly the 2.0.2 bug where total_frames stayed correct while the reader
+    # returned 1013 frames; deriving it from what actually decoded makes that unrepresentable.
     var r = alloc(sizeof(NStreamReader));
-    NStreamReader_set_decoder(r, wav_stream_new(0));
+    if (r == 0) { return NIDHI_ERR_IMPORT; }
     NStreamReader_set_info(r, info);
-    NStreamReader_set_pending(r, vec_new());
-    NStreamReader_set_channels(r, fmtinfo_channels(info));
+    NStreamReader_set_samples(r, samples);
+    NStreamReader_set_channels(r, ch);
     NStreamReader_set_sample_rate(r, fmtinfo_sample_rate(info));
-    NStreamReader_set_total_frames(r, fmtinfo_total_samples(info));
+    NStreamReader_set_total_frames(r, vec_len(samples) / ch);
     NStreamReader_set_frames_read(r, 0);
-    NStreamReader_set_finished(r, 0);
-    NStreamReader_set_file_data(r, file_data);
-    NStreamReader_set_file_len(r, file_len);
-    NStreamReader_set_file_offset(r, 0);
     return r;
 }
 
-# Append every SAMPLES event's data vec into pending; set finished on END; stash HEADER info.
-fn n_stream_drain_events(reader, events) {
-    var pending = NStreamReader_pending(reader);
-    var ne = vec_len(events);
-    var ei = 0;
-    while (ei < ne) {
-        var evt = vec_get(events, ei);
-        var etype = stream_evt_type(evt);
-        if (etype == STREAM_EVT_HEADER) {
-            NStreamReader_set_info(reader, stream_evt_data(evt));
-        } else {
-            if (etype == STREAM_EVT_SAMPLES) {
-                var s = stream_evt_data(evt);
-                var ns = vec_len(s);
-                var si = 0;
-                while (si < ns) { vec_push(pending, vec_get(s, si)); si = si + 1; }
-            } else {
-                if (etype == STREAM_EVT_END) { NStreamReader_set_finished(reader, 1); }
-            }
-        }
-        ei = ei + 1;
-    }
-    return 0;
-}
-
-# read_chunk(chunk_frames) -> vec of interleaved f64 samples (empty when done).
+# read_chunk(chunk_frames) -> vec of interleaved f64 samples (empty when exhausted).
 fn n_stream_reader_read_chunk(reader, chunk_frames) {
-    var channels = NStreamReader_channels(reader);
-    var remaining = NStreamReader_total_frames(reader) - NStreamReader_frames_read(reader);
-    var frames_to_read = chunk_frames;
-    if (remaining < frames_to_read) { frames_to_read = remaining; }
-    if (frames_to_read == 0) { return vec_new(); }
-    var samples_needed = frames_to_read * channels;
-    var pending = NStreamReader_pending(reader);
-    var decoder = NStreamReader_decoder(reader);
+    var out = vec_new();
+    if (chunk_frames <= 0) { return out; }
+    var ch = NStreamReader_channels(reader);
+    var read = NStreamReader_frames_read(reader);
+    var remaining = NStreamReader_total_frames(reader) - read;
+    if (remaining <= 0) { return out; }
+    var n = chunk_frames;
+    if (n > remaining) { n = remaining; }
 
-    var looping = 1;
-    while (looping == 1) {
-        if (vec_len(pending) >= samples_needed) {
-            looping = 0;
-        } else {
-            if (NStreamReader_finished(reader) == 1) {
-                looping = 0;
-            } else {
-                var file_offset = NStreamReader_file_offset(reader);
-                var file_len = NStreamReader_file_len(reader);
-                if (file_offset < file_len) {
-                    # Feed the WHOLE remainder in one go. shravan's stream decoder is
-                    # buffer-then-decode-once, and wav_decode clamps the declared data size
-                    # to what is present -- so the first 4096-byte slice decoded as a
-                    # COMPLETE valid WAV and latched _WAV_ST_DECODED, after which every
-                    # later feed appended without decoding. Every file over ~4 KB silently
-                    # returned only its first 1013 frames, while total_frames stayed
-                    # correct, so the reader was not even self-consistent.
-                    var end = file_len;
-                    var chunk_ptr = NStreamReader_file_data(reader) + file_offset;
-                    NStreamReader_set_file_offset(reader, end);
-                    var events = wav_stream_feed(decoder, chunk_ptr, end - file_offset);
-                    n_stream_drain_events(reader, events);
-                } else {
-                    var fevents = wav_stream_flush(decoder);
-                    n_stream_drain_events(reader, fevents);
-                    NStreamReader_set_finished(reader, 1);
-                }
-            }
-        }
+    var samples = NStreamReader_samples(reader);
+    var base = read * ch;
+    var count = n * ch;
+    var i = 0;
+    while (i < count) {
+        vec_push(out, vec_get(samples, base + i));
+        i = i + 1;
     }
-
-    var take = samples_needed;
-    if (vec_len(pending) < take) { take = vec_len(pending); }
-    var result = vec_new();
-    var ti = 0;
-    while (ti < take) { vec_push(result, vec_get(pending, ti)); ti = ti + 1; }
-    # drain the first `take` samples from pending
-    var newpending = vec_new();
-    var plen = vec_len(pending);
-    var pi = take;
-    while (pi < plen) { vec_push(newpending, vec_get(pending, pi)); pi = pi + 1; }
-    NStreamReader_set_pending(reader, newpending);
-    NStreamReader_set_frames_read(reader, NStreamReader_frames_read(reader) + take / channels);
-    return result;
+    NStreamReader_set_frames_read(reader, read + n);
+    return out;
 }
 
-# read_all() -> Sample built from the whole stream.
-#must_use
+# read_all() -> a Sample holding every remaining frame.
 fn n_stream_reader_read_all(reader) {
     var data = n_stream_reader_read_chunk(reader, NStreamReader_total_frames(reader));
     if (NStreamReader_channels(reader) == 1) {

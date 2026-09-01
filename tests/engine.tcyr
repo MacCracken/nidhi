@@ -146,6 +146,68 @@ fn xf_seam(xfade, ls, le) {
 }
 
 
+# Renders one block at volume 0 dB and one at -6 dB from an otherwise identical zone, and
+# returns the ratio of peak levels scaled by 1000. -6 dB is a factor of 0.501, so ~501.
+fn vol_peak(db) {
+    var e = n_engine_new(4, f64_from(44100));
+    var bank = n_engine_bank(e);
+    var d = vec_new();
+    var i = 0;
+    while (i < 2000) { vec_push(d, f64_div(f64_from((i * 11) % 32), f64_from(32))); i = i + 1; }
+    var sid = n_sample_bank_add(bank, n_sample_from_mono(d, 44100));
+    var inst = n_instrument_new(str_from("v"));
+    var z = n_zone_with_root_note(n_zone_with_key_range(n_zone_new(sid), 0, 127), 60);
+    z = n_zone_with_volume(z, db);
+    n_instrument_add_zone(inst, z);
+    ignore(n_engine_set_instrument(e, inst));
+    ignore(n_engine_note_on(e, 60, 127));
+    var buf = vec_new();
+    var k = 0;
+    while (k < 512) { vec_push(buf, 0); k = k + 1; }
+    n_engine_fill_buffer_stereo(e, buf, 512);
+    var pk = 0;
+    var j = 0;
+    while (j < 512) {
+        var a = f64_abs(vec_get(buf, j));
+        if (f64_gt(a, pk) == 1) { pk = a; }
+        j = j + 1;
+    }
+    return pk;
+}
+
+fn fn_vol_check() {
+    var p0 = vol_peak(0);
+    var pm6 = vol_peak(f64_neg(f64_from(6)));
+    var pp6 = vol_peak(f64_from(6));
+    assert_eq(f64_gt(p0, 0), 1, "0 dB reference renders audible output");
+    # -6 dB = x0.5012. Assert the RATIO so the test does not depend on the source material.
+    var ratio = f64_to(f64_mul(f64_div(pm6, p0), f64_from(1000)));
+    assert(ratio > 480, "volume=-6 attenuates (ratio > 0.48)");
+    assert(ratio < 520, "volume=-6 attenuates to ~0.501, not further");
+    # +6 dB = x1.995.
+    var ratio_up = f64_to(f64_mul(f64_div(pp6, p0), f64_from(1000)));
+    assert(ratio_up > 1900, "volume=+6 boosts (ratio > 1.9)");
+    assert(ratio_up < 2100, "volume=+6 boosts to ~1.995");
+    return 0;
+}
+
+
+# Bytes allocated across N note_on/note_off pairs on an already-warmed engine.
+fn noteon_bytes(pairs) {
+    var e = eng_leak_build(8, FILTER_LOWPASS);
+    ignore(n_engine_note_on(e, 60, 100));
+    n_engine_note_off(e, 60);
+    var before = alloc_used();
+    var i = 0;
+    while (i < pairs) {
+        ignore(n_engine_note_on(e, 60 + (i % 12), 100));
+        n_engine_note_off(e, 60 + (i % 12));
+        i = i + 1;
+    }
+    return alloc_used() - before;
+}
+
+
 fn main() {
     alloc_init();
     var eps = f64_div(F64_ONE, f64_from(100));
@@ -410,6 +472,22 @@ fn main() {
         "mutating the caller's config does not reach the engine");
     assert_eq(n_engine_set_adsr(ae, NIDHI_ERR_IMPORT), NIDHI_ERR_INVALID_PARAMETER,
         "set_adsr rejects a negative error code");
+
+    # --- 2.1.0: per-zone volume is applied (ADR 0004) ---
+    # volume_db was parsed, inherited and stored, then read by nothing: a volume=-6 region
+    # rendered at full level and the relative balance between regions was discarded.
+    test_group("zone volume_db reaches the output (2.1.0)");
+    fn_vol_check();
+
+    # --- 2.1.0: note_on reuses the voice's filter instead of allocating one ---
+    # Every voice already owns an NVoiceFilter from n_voice_new, but note_on threw it away and
+    # built a fresh one -- the struct plus TWO naad SVFs per note, never reclaimed. The
+    # envelope and LFO halves still allocate: naad has filter_svf_reset but no
+    # envelope_adsr_reset and no LFO frequency setter, so those are upstream-gated.
+    test_group("note_on does not allocate a filter per note (2.1.0)");
+    var per_note = noteon_bytes(200) / 200;
+    println_int(per_note);
+    assert(per_note < 200, "per note_on/note_off allocation is well under the pre-2.1.0 264 B");
 
     return assert_summary();
 }

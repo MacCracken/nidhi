@@ -1,5 +1,91 @@
 # Changelog
 
+## 2.1.0 — 2026-08-31
+
+First minor since the port. Three substantive changes, two ADRs, and one breaking rename.
+
+### Fixed — zone `volume` was parsed, inherited, stored, and never applied
+
+`NZone.volume_db` came in from the SFZ `volume=` opcode, was inherited through `<group>` and
+`<global>`, was clamped and stored, was exposed through a public accessor — **and read by
+nothing**. Voice amplitude was `velocity_curve × envelope × pressure`, with no dB term anywhere.
+
+`<region> volume=-6` rendered at full level. Worse, the *relative* balance a multi-region
+instrument encodes was silently discarded: a layered patch with `volume=-3` on its soft layer
+and `volume=0` on its hard layer played both identically — not slightly wrong, the wrong
+instrument.
+
+**The oracle had the same gap**, so this is a deliberate divergence rather than a parity repair
+([ADR 0004](docs/adr/0004-apply-zone-volume-db.md)). Applied once at note-on via naad's
+`naad_db_to_amplitude`, because a zone's volume cannot change for the life of a voice — one
+`f64_pow` per note-on, nothing per frame. Guarded by `if (vol_db != 0)`, so a zone that never
+sets `volume` renders bit-identically to 2.0.7.
+
+⚠ **This changes rendered audio** for any zone with a non-zero `volume`, which is most real SFZ
+instruments. Anyone who compensated by pre-scaling their samples will need to undo that.
+
+### Fixed — `note_on` allocated a filter per note
+
+Every voice already owns an `NVoiceFilter` from `n_voice_new`; `note_on` threw it away and built
+a fresh one — the struct plus **two naad SVFs per note**, never reclaimed, because the
+allocator's free is a no-op. `nvf_reinit` now re-arms the voice's own filter in place.
+
+**Measured: 264 → 72 bytes per note_on/note_off pair.**
+
+Reuse is behaviour-preserving, not merely cheaper: `filter_svf_set_params` validates frequency
+and q exactly as `filter_svf_new` does, and `filter_svf_reset` zeroes `ic1eq`/`ic2eq` —
+*precisely* the two state variables the constructor zeroes. The reset is load-bearing: without it
+a new note inherits the previous note's integrator state and starts mid-ring.
+
+The remaining 72 B is the envelope and LFOs, and that half is **upstream-gated**: naad has
+`filter_svf_reset` but no `envelope_adsr_reset` and no LFO frequency setter, so an `Adsr` cannot
+be re-armed for a different zone's ADSR times.
+
+### Changed — the streaming reader decodes once instead of twice
+
+`n_stream_reader_open` ran a full `wav_decode` purely to read the format header, **threw the
+samples away**, and then `read_chunk` fed the entire file back through shravan's stream decoder
+to recover them — 85.9 ms and 14.4 MB of never-reclaimed heap on a 10 s file *before the first
+chunk*, which is the opposite of what a streaming reader is for. `read_chunk` also rebuilt its
+`pending` buffer into a fresh vec on every call, so `read_all` was two more full copies.
+
+The decoded buffer now lives on the reader and chunks are a cursor into it. That drops the
+shravan streaming shim, the pending buffer, and the file-data/offset bookkeeping entirely, and
+`total_frames` is derived from the **decoded** data rather than the header's declared total —
+which makes the 2.0.2 disagreement (correct `total_frames`, 1013 frames returned) unrepresentable.
+
+Honest about what this is *not*: still not incremental. `open()` holds the whole decoded file.
+Genuinely streaming needs an incremental decoder from shravan; the current one is
+buffer-then-decode-once, which is the defect behind that 4 KB truncation bug.
+
+### Changed — BREAKING: `CC_*` → `N_CC_*`
+
+The 13 RIFF/SoundFont chunk fourccs in `src/sf2.cyr`. They sit in exactly the namespace a codec
+dependency grows into — **shravan already parses RIFF** — and Cyrius is *silent* on a duplicate
+`var`, so a future `CC_RIFF` there would resolve last-definition-wins with no diagnostic and the
+SF2 parser would quietly stop recognising chunks. Also `ignore_i` → `n_ignore`, added in 2.0.6
+and about as collision-prone a name as ships in a flat namespace.
+
+### Deliberately NOT done — the other 86 unprefixed names
+
+[ADR 0005](docs/adr/0005-namespace-prefix-scope.md). 88 top-level names in `src/` skip the
+mandatory `n_`/`N` prefix. Measured this release: **0 collisions across all 6,478 top-level names
+in the 46 files in `lib/`** — so the benefit is preventive, and the measurement is not close.
+
+The two with a *named* forward path are renamed above. The rest waits because the naming
+questions are not mechanical (`nvf_*` already starts with `n` but not `n_`; `Sf2Shdr` → `NSf2Shdr`
+is consistent and ugly), a partially-applied rename in a flat-namespace language is a live hazard
+rather than a cosmetic one, and an 88-symbol diff touching every file would bury the three
+changes above — and reviewability is what catches the subtle one. The ADR records the per-family
+decisions the next attempt needs.
+
+### Quality
+- **15 suites / 571 assertions / 0 failures**, fuzz 2/2, zero `#must_use` warnings.
+- Benchmarks hold within run-to-run noise of 2.0.7 (`wsola_1sec_2x` 221 ms,
+  `fill_buffer_stereo/16` 1.973 ms, `voice_count_scaling/64` 13.6 µs).
+- New coverage: zone volume ratios (−6 dB → ×0.501, +6 dB → ×1.995), per-note allocation,
+  sequential chunk reads, and that opening a file does not hold multiple decoded copies.
+
 ## 2.0.7 — 2026-08-31
 
 Performance. **Every change is bit-identical** — no audio output moves.

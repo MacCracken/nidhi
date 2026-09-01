@@ -27,6 +27,60 @@ fn nvf_bypass() {
     return vf;
 }
 
+# nvf_reinit -- re-arm the voice's EXISTING filter in place. Returns 1 if active, else 0.
+#
+# Every voice already owns an NVoiceFilter from n_voice_new; note_on used to throw it away and
+# build a fresh one, allocating the struct plus TWO naad SVFs per note and never reclaiming any
+# of it (the allocator's free is a no-op). At ten notes a second that is megabytes an hour.
+#
+# Reuse is behaviour-preserving, not merely cheaper: filter_svf_set_params validates frequency
+# and q exactly as filter_svf_new does, and filter_svf_reset zeroes ic1eq/ic2eq -- precisely the
+# two state variables the constructor zeroes. So a re-armed filter is indistinguishable from a
+# fresh one. The reset is load-bearing: without it a new note inherits the previous note's
+# integrator state and starts mid-ring.
+#
+# The SVFs are built lazily on first use rather than at voice construction, which sidesteps
+# having to invent a default cutoff that validate_frequency accepts at every sample rate.
+fn nvf_reinit(vf, cutoff, resonance, mode, vel_track, velocity, sample_rate) {
+    if (f64_le(cutoff, 0) == 1) {
+        NVoiceFilter_set_active(vf, 0);
+        NVoiceFilter_set_last_cutoff(vf, 0);
+        NVoiceFilter_set_mode(vf, FILTER_LOWPASS);
+        return 0;
+    }
+    var vel_norm = f64_div(f64_from(velocity), f64_from(127));
+    var ec = f64_mul(cutoff, f64_sub(F64_ONE, f64_mul(vel_track, f64_sub(F64_ONE, vel_norm))));
+    var hi = f64_mul(sample_rate, 0x3FDF5C28F5C28F5C);
+    ec = f64_min(f64_max(ec, 0x4034000000000000), hi);
+    var q = f64_max(resonance, f64_div(F64_ONE, f64_from(10)));
+
+    var fl = NVoiceFilter_filter_l(vf);
+    if (fl == 0) {
+        fl = filter_svf_new(ec, q, sample_rate);
+        if (naad_is_err(fl) == 1) { fl = 0; }
+        NVoiceFilter_set_filter_l(vf, fl);
+    } else {
+        if (naad_is_err(filter_svf_set_params(fl, ec, q)) == 1) { fl = 0; }
+        if (fl != 0) { filter_svf_reset(fl); }
+    }
+    var fr = NVoiceFilter_filter_r(vf);
+    if (fr == 0) {
+        fr = filter_svf_new(ec, q, sample_rate);
+        if (naad_is_err(fr) == 1) { fr = 0; }
+        NVoiceFilter_set_filter_r(vf, fr);
+    } else {
+        if (naad_is_err(filter_svf_set_params(fr, ec, q)) == 1) { fr = 0; }
+        if (fr != 0) { filter_svf_reset(fr); }
+    }
+
+    var active = 0;
+    if (fl != 0) { active = 1; }
+    NVoiceFilter_set_active(vf, active);
+    NVoiceFilter_set_last_cutoff(vf, ec);
+    NVoiceFilter_set_mode(vf, mode);
+    return active;
+}
+
 #must_use
 fn nvf_new(cutoff, resonance, mode, vel_track, velocity, sample_rate) {
     if (f64_le(cutoff, 0) == 1) { return nvf_bypass(); }
@@ -131,6 +185,11 @@ struct NSamplerVoice {
     fil_keytrack;
     cutoff_smoother;
 }
+
+# Discard a value the caller does not need, without leaving a bare-statement call.
+# n_-prefixed: this ships in dist/nidhi.cyr, and `ignore` is about as collision-prone a
+# name as exists in a flat namespace.
+fn n_ignore(v) { return 0; }
 
 #must_use
 fn n_voice_new(sample_rate) {
@@ -347,7 +406,18 @@ fn n_engine_note_on(e, note, velocity) {
 
     var sr = NSamplerEngine_sample_rate(e);
     var speed = n_zone_playback_ratio(zone, note);
+    # Per-zone volume, applied at note-on. See docs/adr/0004-apply-zone-volume-db.md.
+    #
+    # NZone_volume_db was parsed from SFZ `volume=`, inherited through <group>/<global>, and
+    # stored -- and then read by nothing. A `<region> volume=-6` rendered at full level, and
+    # the RELATIVE balance a multi-region instrument encodes was silently discarded. The
+    # oracle had the same gap, so this is a deliberate divergence, not a parity repair.
+    #
+    # Folded in here rather than per sample: the zone's volume cannot change for the life of
+    # a voice, so this costs one f64_pow per note-on and nothing per frame.
     var amp = n_velocity_curve_apply(NZone_vel_curve(zone), velocity);
+    var vol_db = NZone_volume_db(zone);
+    if (vol_db != 0) { amp = f64_mul(amp, naad_db_to_amplitude(vol_db)); }
     var f_cutoff = NZone_filter_cutoff(zone);
     var f_res = NZone_filter_resonance(zone);
     var f_type = NZone_filter_type(zone);
@@ -364,7 +434,6 @@ fn n_engine_note_on(e, note, velocity) {
     var flfo_depth = NZone_fillfo_depth(zone);
     var keytrack = NZone_fil_keytrack(zone);
 
-    var voice_filter = nvf_new(f_cutoff, f_res, f_type, f_vel, velocity, sr);
 
     # choke: hard-cut active voices in the same choke group (before allocation)
     if (choke > 0) {
@@ -392,7 +461,8 @@ fn n_engine_note_on(e, note, velocity) {
     NSamplerVoice_set_note(voice, note);
     NSamplerVoice_set_age(voice, 0);
     NSamplerVoice_set_forward(voice, 1);
-    NSamplerVoice_set_filter(voice, voice_filter);
+    # Re-arm the voice's own filter rather than allocating a new one per note.
+    n_ignore(nvf_reinit(NSamplerVoice_filter(voice), f_cutoff, f_res, f_type, f_vel, velocity, sr));
     # Key tracking is folded in HERE rather than recomputed per sample. Both inputs -- the
     # voice's note and its fil_keytrack -- are written once at note_on and never mutated, so
     # the factor is voice-invariant, and the render path was paying an f64_pow (an x87 ln+exp

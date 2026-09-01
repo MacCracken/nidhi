@@ -144,6 +144,34 @@ fn main() {
     assert_eq(approx(vec_get(bd, 4999), f64_div(f64_from(4999 % 100), f64_from(200)), tol2), 1,
         "last frame survives the stream");
 
+    # --- 2.1.0: the reader decodes once, and chunks are a cursor ---
+    # It used to decode the whole file in open() purely for the header, throw the samples
+    # away, then feed the entire file back through shravan's stream decoder to recover them.
+    test_group("streaming reader decodes once and chunks sequentially (2.1.0)");
+    var csr = n_stream_reader_open("/tmp/nidhi_io_big.wav");
+    assert(csr > 0, "cursor reader opens");
+    assert_eq(NStreamReader_total_frames(csr), 5000, "total_frames from the DECODED data");
+    var c1 = n_stream_reader_read_chunk(csr, 1000);
+    assert_eq(vec_len(c1), 1000, "first chunk is 1000 mono frames");
+    var c2 = n_stream_reader_read_chunk(csr, 1000);
+    assert_eq(vec_len(c2), 1000, "second chunk is 1000 frames");
+    # The chunks must be SEQUENTIAL, not both from the start.
+    assert_eq(approx(vec_get(c2, 0), f64_div(f64_from(1000 % 100), f64_from(200)), tol2), 1,
+        "chunk 2 continues where chunk 1 stopped");
+    var rest = n_stream_reader_read_chunk(csr, 100000);
+    assert_eq(vec_len(rest), 3000, "over-asking returns only what remains");
+    assert_eq(vec_len(n_stream_reader_read_chunk(csr, 100)), 0, "exhausted reader returns empty");
+
+    # Peak memory: opening must not cost two decoded copies of the file.
+    var before_open = alloc_used();
+    var msr = n_stream_reader_open("/tmp/nidhi_io_big.wav");
+    assert(msr > 0, "measured reader opens");
+    var open_bytes = alloc_used() - before_open;
+    println_int(open_bytes);
+    # 5000 mono f64 frames = 40 KB decoded, plus the raw file buffer. Two decoded copies plus
+    # a pending vec would be far more; assert well under that.
+    assert(open_bytes < 4000000, "open does not hold multiple decoded copies");
+
     return assert_summary();
 }
 

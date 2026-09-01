@@ -8,19 +8,22 @@
 # Every read is bounds-checked (returns 0 past end) so hostile input never reads OOB.
 
 # --- FourCC constants (bytes packed little-endian, byte0 in the low 8 bits) ---
-var CC_RIFF = 0x46464952;
-var CC_SFBK = 0x6B626673;
-var CC_LIST = 0x5453494C;
-var CC_SDTA = 0x61746473;
-var CC_SMPL = 0x6C706D73;
-var CC_PDTA = 0x61746470;
-var CC_PHDR = 0x72646870;
-var CC_PBAG = 0x67616270;
-var CC_PGEN = 0x6E656770;
-var CC_INST = 0x74736E69;
-var CC_IBAG = 0x67616269;
-var CC_IGEN = 0x6E656769;
-var CC_SHDR = 0x72646873;
+# RIFF/SoundFont chunk fourccs. N_-prefixed because these sit in exactly the namespace a codec
+# dependency grows into -- shravan already parses RIFF, and Cyrius is SILENT on a duplicate
+# `var`, so a future `CC_RIFF` there would resolve last-definition-wins with no diagnostic.
+var N_CC_RIFF = 0x46464952;
+var N_CC_SFBK = 0x6B626673;
+var N_CC_LIST = 0x5453494C;
+var N_CC_SDTA = 0x61746473;
+var N_CC_SMPL = 0x6C706D73;
+var N_CC_PDTA = 0x61746470;
+var N_CC_PHDR = 0x72646870;
+var N_CC_PBAG = 0x67616270;
+var N_CC_PGEN = 0x6E656770;
+var N_CC_INST = 0x74736E69;
+var N_CC_IBAG = 0x67616269;
+var N_CC_IGEN = 0x6E656769;
+var N_CC_SHDR = 0x72646873;
 
 # --- bounds-checked little-endian byte readers (0 past end) ---
 #inline
@@ -431,8 +434,8 @@ fn sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_l
 #must_use
 fn sf2_parse(data, len) {
     if (len < 12) { return NIDHI_ERR_IMPORT; }
-    if (sf2_fourcc(data, len, 0) != CC_RIFF) { return NIDHI_ERR_IMPORT; }
-    if (sf2_fourcc(data, len, 8) != CC_SFBK) { return NIDHI_ERR_IMPORT; }
+    if (sf2_fourcc(data, len, 0) != N_CC_RIFF) { return NIDHI_ERR_IMPORT; }
+    if (sf2_fourcc(data, len, 8) != N_CC_SFBK) { return NIDHI_ERR_IMPORT; }
 
     var smpl_ptr = 0;
     var smpl_len = 0;
@@ -449,10 +452,10 @@ fn sf2_parse(data, len) {
         var cdata_start = off + 8;
         var cdata_end = cdata_start + csize;
         if (cdata_end > len) { return NIDHI_ERR_IMPORT; }
-        if (cid == CC_LIST) {
+        if (cid == N_CC_LIST) {
             if (csize >= 4) {
                 var list_type = sf2_fourcc(data, len, cdata_start);
-                if (list_type == CC_SDTA) {
+                if (list_type == N_CC_SDTA) {
                     var soff = cdata_start + 4;
                     var subscan = 1;
                     while (subscan == 1) {
@@ -466,7 +469,7 @@ fn sf2_parse(data, len) {
                             if (sdend > cdata_end) {
                                 return NIDHI_ERR_IMPORT;
                             } else {
-                                if (sid == CC_SMPL) {
+                                if (sid == N_CC_SMPL) {
                                     smpl_ptr = data + sdstart;
                                     smpl_len = ssize;
                                     smpl_found = 1;
@@ -476,7 +479,7 @@ fn sf2_parse(data, len) {
                         }
                     }
                 }
-                if (list_type == CC_PDTA) {
+                if (list_type == N_CC_PDTA) {
                     pdta_ptr = data + cdata_start + 4;
                     pdta_len = csize - 4;
                     pdta_found = 1;
@@ -507,13 +510,13 @@ fn sf2_parse(data, len) {
         if (pdend > pdta_len) {
             return NIDHI_ERR_IMPORT;
         } else {
-            if (pid == CC_PHDR) { phdr_ptr = pdta_ptr + pdstart; phdr_len = psize; phdr_found = 1; }
-            if (pid == CC_PBAG) { pbag_ptr = pdta_ptr + pdstart; pbag_len = psize; pbag_found = 1; }
-            if (pid == CC_PGEN) { pgen_ptr = pdta_ptr + pdstart; pgen_len = psize; pgen_found = 1; }
-            if (pid == CC_INST) { inst_ptr = pdta_ptr + pdstart; inst_len = psize; inst_found = 1; }
-            if (pid == CC_IBAG) { ibag_ptr = pdta_ptr + pdstart; ibag_len = psize; ibag_found = 1; }
-            if (pid == CC_IGEN) { igen_ptr = pdta_ptr + pdstart; igen_len = psize; igen_found = 1; }
-            if (pid == CC_SHDR) { shdr_ptr = pdta_ptr + pdstart; shdr_len = psize; shdr_found = 1; }
+            if (pid == N_CC_PHDR) { phdr_ptr = pdta_ptr + pdstart; phdr_len = psize; phdr_found = 1; }
+            if (pid == N_CC_PBAG) { pbag_ptr = pdta_ptr + pdstart; pbag_len = psize; pbag_found = 1; }
+            if (pid == N_CC_PGEN) { pgen_ptr = pdta_ptr + pdstart; pgen_len = psize; pgen_found = 1; }
+            if (pid == N_CC_INST) { inst_ptr = pdta_ptr + pdstart; inst_len = psize; inst_found = 1; }
+            if (pid == N_CC_IBAG) { ibag_ptr = pdta_ptr + pdstart; ibag_len = psize; ibag_found = 1; }
+            if (pid == N_CC_IGEN) { igen_ptr = pdta_ptr + pdstart; igen_len = psize; igen_found = 1; }
+            if (pid == N_CC_SHDR) { shdr_ptr = pdta_ptr + pdstart; shdr_len = psize; shdr_found = 1; }
             poff = pdend + (psize & 1);
         }
     }
