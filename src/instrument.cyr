@@ -70,6 +70,28 @@ fn n_instrument_find_zones(inst, note, vel) {
     return out;
 }
 
+# find_first_zone(note, vel) -> index of the FIRST matching zone, or -1 if none.
+#
+# The non-allocating counterpart to n_instrument_find_zones, for the note_on hot path.
+# note_on used to call find_zones -- which allocates a vec holding EVERY match -- take
+# element 0, then scan the zone list a second time comparing pointers to recover its index.
+# Two O(Z) passes and ~1 KB of never-reclaimed heap per note-on, to answer a question one
+# pass and no allocation can. find_zones stays as-is: it is public API and tests use it.
+#
+# NOT interchangeable with find_zone_rr: that one advances the round-robin counter and picks
+# a group member, which would silently change zone selection for every grouped instrument.
+#must_use
+fn n_instrument_find_first_zone(inst, note, vel) {
+    var zones = NInstrument_zones(inst);
+    var n = vec_len(zones);
+    var i = 0;
+    while (i < n) {
+        if (n_zone_matches(vec_get(zones, i), note, vel) == 1) { return i; }
+        i = i + 1;
+    }
+    return N_ZONE_NO_MATCH;
+}
+
 # find_zone_rr(note, vel) -> 0-based zone index, or -1 if no zone matches.
 # The RR group is the group of the FIRST matching zone; only same-group matches
 # participate. Ungrouped (group 0) always returns the first match.

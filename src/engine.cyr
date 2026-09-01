@@ -58,11 +58,14 @@ fn nvf_pick(svfout, mode) {
     return SvfOutput_low_pass(svfout);
 }
 
+# 0.49 and 20.0 as literal f64 bit patterns, and F64_HALF for the hysteresis threshold --
+# all three were rebuilt with divides on every sample of every filtered voice.
+#   0.49 = 0x3FDF5C28F5C28F5C   20.0 = 0x4034000000000000
 fn nvf_set_cutoff(vf, cutoff, sample_rate) {
     if (NVoiceFilter_active(vf) == 0) { return 0; }
-    var hi = f64_mul(sample_rate, f64_div(f64_from(49), f64_from(100)));
-    var c = f64_min(f64_max(cutoff, f64_from(20)), hi);
-    if (f64_lt(f64_abs(f64_sub(c, NVoiceFilter_last_cutoff(vf))), f64_div(F64_ONE, f64_from(2))) == 1) { return 0; }
+    var hi = f64_mul(sample_rate, 0x3FDF5C28F5C28F5C);
+    var c = f64_min(f64_max(cutoff, 0x4034000000000000), hi);
+    if (f64_lt(f64_abs(f64_sub(c, NVoiceFilter_last_cutoff(vf))), F64_HALF) == 1) { return 0; }
     NVoiceFilter_set_last_cutoff(vf, c);
     var fl = NVoiceFilter_filter_l(vf);
     if (fl != 0) { filter_svf_set_params(fl, c, filter_svf_q(fl)); }
@@ -332,17 +335,15 @@ fn n_engine_has_active_note(e, note) {
 #must_use
 fn n_engine_note_on(e, note, velocity) {
     var inst = NSamplerEngine_instrument(e);
-    if (inst == 0) { return 0 - 1; }
-    var matching = n_instrument_find_zones(inst, note, velocity);
-    if (vec_len(matching) == 0) { return 0 - 1; }
+    # `<= 0`: sf2_parse and n_load_wav return NEGATIVE codes, which an `== 0` guard lets
+    # straight through into NInstrument_zones.
+    if (inst <= 0) { return 0 - 1; }
+    # One pass, no allocation. This was find_zones (which allocates a vec of every match)
+    # followed by a second O(Z) pointer scan to recover the index of match 0.
+    var zone_idx = n_instrument_find_first_zone(inst, note, velocity);
+    if (zone_idx < 0) { return 0 - 1; }
     var zones = NInstrument_zones(inst);
-    var zone = vec_get(matching, 0);
-    var zone_idx = 0;
-    var nz = vec_len(zones);
-    var zi = 0;
-    while (zi < nz) {
-        if (vec_get(zones, zi) == zone) { zone_idx = zi; zi = nz; } else { zi = zi + 1; }
-    }
+    var zone = vec_get(zones, zone_idx);
 
     var sr = NSamplerEngine_sample_rate(e);
     var speed = n_zone_playback_ratio(zone, note);
@@ -392,7 +393,18 @@ fn n_engine_note_on(e, note, velocity) {
     NSamplerVoice_set_age(voice, 0);
     NSamplerVoice_set_forward(voice, 1);
     NSamplerVoice_set_filter(voice, voice_filter);
-    NSamplerVoice_set_base_cutoff(voice, f_cutoff);
+    # Key tracking is folded in HERE rather than recomputed per sample. Both inputs -- the
+    # voice's note and its fil_keytrack -- are written once at note_on and never mutated, so
+    # the factor is voice-invariant, and the render path was paying an f64_pow (an x87 ln+exp
+    # pair) for it on every sample of every voice. Multiplication order is unchanged:
+    # (base * keytrack) * env * lfo, exactly as before, so output is bit-identical.
+    var base_cut = f_cutoff;
+    if (f64_gt(keytrack, 0) == 1) {
+        var kt_semis = f64_from(note - 60);
+        var kt_c = f64_mul(f64_mul(kt_semis, f64_from(100)), keytrack);
+        base_cut = f64_mul(base_cut, f64_pow(f64_from(2), f64_div(kt_c, f64_from(1200))));
+    }
+    NSamplerVoice_set_base_cutoff(voice, base_cut);
     NSamplerVoice_set_pitch_bend(voice, 0);
     NSamplerVoice_set_pressure(voice, 0);
     NSamplerVoice_set_brightness(voice, F64_HALF);
@@ -614,12 +626,9 @@ fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscr
 
     # filter cutoff modulation (only when base_cutoff > 0)
     if (f64_gt(NSamplerVoice_base_cutoff(voice), 0) == 1) {
+        # base_cutoff already carries the key-tracking factor -- folded in at note_on, where
+        # its two inputs are fixed for the voice's life.
         var cutoff = NSamplerVoice_base_cutoff(voice);
-        if (f64_gt(NSamplerVoice_fil_keytrack(voice), 0) == 1) {
-            var semis = f64_from(NSamplerVoice_note(voice) - 60);
-            var kt_cents = f64_mul(f64_mul(semis, f64_from(100)), NSamplerVoice_fil_keytrack(voice));
-            cutoff = f64_mul(cutoff, f64_pow(f64_from(2), f64_div(kt_cents, f64_from(1200))));
-        }
         var fenv = NSamplerVoice_filter_env(voice);
         if (fenv != 0) {
             var mod_cents = f64_mul(NSamplerVoice_filter_env_depth(voice), n_amp_envelope_tick(fenv));

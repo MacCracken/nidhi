@@ -198,6 +198,34 @@ fn main(): i64 {
     bench_batch_stop(bf, 40);
     bench_report(bf);
 
+    # 6b. HIGH-PASS variant of the same workload. naad ships an allocation-free SVF core for
+    #     LOW-PASS only, so high-pass / band-pass / notch voices still take the allocating
+    #     one-shot path (~180 MB/s at 64 voices). Without this case that gap is invisible:
+    #     every other benchmark in this file sets FILTER_LOWPASS.
+    var bankh = n_sample_bank_new();
+    var idh = n_sample_bank_add(bankh, n_sample_from_mono(make_sine(440, 44100), 44100));
+    var zh = n_zone_new(idh);
+    zh = n_zone_with_key_range(zh, 0, 127);
+    zh = n_zone_with_root_note(zh, 60);
+    zh = n_zone_with_loop(zh, LOOP_FORWARD, 0, 44099);
+    zh = n_zone_with_filter(zh, f64_from(2000), f64_div(f64_from(7), f64_from(10)));
+    zh = n_zone_with_filter_type(zh, FILTER_HIGHPASS);
+    var insth = n_instrument_new(str_from("bench_hp"));
+    n_instrument_add_zone(insth, zh);
+    var eh = n_engine_new(16, srf);
+    n_engine_set_bank(eh, bankh);
+    n_engine_set_instrument(eh, insth);
+    trigger_notes(eh, 8);
+    var bufh = zeros(1024);
+    var bh = bench_new("fill_buffer_stereo_filtered_hp_8v");
+    bench_batch_start(bh);
+    var i6h = 0;
+    while (i6h < 40) { n_engine_fill_buffer_stereo(eh, bufh, 1024); i6h = i6h + 1; }
+    bench_batch_stop(bh, 40);
+    bench_report(bh);
+
+
+
     # 7. wsola_1sec_2x: WSOLA time-stretch(2.0) on a 1s mono sine.
     var st = n_stretcher_new(make_sine(440, 44100), f64_from(44100));
     var bw = bench_new("wsola_1sec_2x");

@@ -1,5 +1,81 @@
 # Changelog
 
+## 2.0.7 — 2026-08-31
+
+Performance. **Every change is bit-identical** — no audio output moves.
+
+| | 2.0.6 | 2.0.7 | |
+|---|---:|---:|---:|
+| `wsola_1sec_2x` | 874.7 ms | **217.7 ms** | **4.02×** |
+| `interpolation_stereo` | 170 ns | **60 ns** | **2.83×** |
+| `interpolation_cubic` | 87 ns | **37 ns** | **2.35×** |
+| `voice_count_scaling/64` | 21.761 µs | **13.245 µs** | **1.64×** |
+| `fill_buffer_stereo/16` | 2.945 ms | **1.901 ms** | **1.55×** |
+| `fill_buffer_stereo_filtered_8v` | 2.063 ms | **1.511 ms** | **1.37×** |
+
+`fill_buffer_stereo/16` is now 1.901 ms against an 11.6 ms budget — **6.1× real-time headroom**,
+up from 3.9×.
+
+### How bit-identity was established
+
+A render differential dumps **24,576 samples** as raw bit patterns across 8 configurations —
+mono and stereo source, forward loop, crossfaded loop, low-pass, high-pass, pitched, key-tracked,
+each over three blocks with a note-off partway. Captured before the first edit and re-compared
+after every one; `cmp` clean throughout. The WSOLA path additionally has `tests/golden.tcyr`,
+which asserts output *values* against the retired Rust oracle — the coverage 2.0.4 captured
+specifically so a change like this could be made safely.
+
+### Optimised
+
+- **WSOLA correlation search → raw-pointer dot product** (`src/stretch.cyr`). ~88M element pairs
+  per one-second stretch, every one going through `vec_get`'s two bounds tests, twice over. The
+  callers have already proven both spans in range.
+- **`prev` is now an index into `input`, not a copy.** It was a fresh `frame_size` vec built per
+  frame — but the frame is a pure slice of `input`, and the loop guard already proves the whole
+  span in range, so the copy allocated and memcpy'd for nothing: ~2.8 MB per stretch on an
+  allocator that never reclaims.
+- **Interpolation interior fast path** (`src/sample.cyr`). The four taps span `idx-1 .. idx+2`,
+  so a single test — `idx - 1 >= 0 && idx + 2 < frames` — proves all of them in range, *including*
+  for stereo, because the highest element touched is `(idx+2)*2+1 ≤ 2*frames-1` under exactly
+  that condition. Eight per-tap helper calls (each with two bounds tests, three accessor calls,
+  and `vec_get`'s own bounds test) collapse to eight raw loads. Zero-padding semantics stay on the
+  edge path. ⚠ That test must stay exactly as written: an off-by-one is a silent OOB read.
+- **Hermite coefficients are literal bit patterns** — they were rebuilt with two divides and
+  three negations on every interpolated sample.
+- **Filter key-tracking folded into `base_cutoff` at note-on.** Both inputs (the voice's note and
+  its `fil_keytrack`) are written once and never mutated, so the render path was paying an
+  `f64_pow` — an x87 ln+exp pair — per sample per voice for a constant. Multiplication order is
+  unchanged, `(base × keytrack) × env × lfo`, which is why it stays bit-identical.
+- **Non-allocating `n_instrument_find_first_zone`** for `note_on`, which previously called
+  `find_zones` (allocating a vec of *every* match), took element 0, then scanned the zone list a
+  second time comparing pointers to recover its index. Two O(Z) passes and ~1 KB of unreclaimed
+  heap per note-on. `n_instrument_find_zones` is untouched — it is public API and tests use it.
+  Deliberately *not* reused: `find_zone_rr` advances the round-robin counter and picks a group
+  member, so substituting it would silently change zone selection for every grouped instrument.
+- **`nvf_set_cutoff` literal hoists** — 0.49, 20.0 and the 0.5 hysteresis threshold were rebuilt
+  with divides per sample per filtered voice.
+- Widened one more `inst == 0` guard to `<= 0` in `n_engine_note_on`; negative error codes from
+  `sf2_parse` / `n_load_wav` were still passing through it.
+
+### Added — a benchmark that is meant to look bad
+
+`fill_buffer_stereo_filtered_hp_8v` (1.797 ms) runs the same workload as the low-pass case
+(1.511 ms) with `FILTER_HIGHPASS`. The **19 % penalty** is naad shipping an allocation-free SVF
+core for low-pass *only*; high-pass, band-pass and notch voices still take the allocating
+one-shot path at ~180 MB/s at 64 voices. Every other benchmark in the file sets `FILTER_LOWPASS`,
+so this gap had no way to show up. Tracked for 2.1.0, gated on a naad change.
+
+### Not done, deliberately
+
+**PERF-03 layer 3** (the Cauchy–Schwarz early-exit prune) stays rejected. It is a numerical
+heuristic with a hand-tuned margin, not an exact transformation, and it would trade audio
+accuracy for speed against an explicit project rule. The two layers that *are* exact delivered
+4.02× on their own.
+
+### Quality
+- **15 suites / 556 assertions / 0 failures**, fuzz 2/2, zero `#must_use` warnings.
+- Before/after recorded in `bench-history.csv` per CLAUDE.md.
+
 ## 2.0.6 — 2026-08-31
 
 Latent-hazard closeout. Every item is reachable by a **consumer** rather than by nidhi's own

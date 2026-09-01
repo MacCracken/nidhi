@@ -20,45 +20,63 @@ Cyrius batches N iterations between one `clock_gettime` pair and reports the per
 average (`bench_batch_start` → tight loop → `bench_batch_stop(N)` → `bench_report`). Criterion
 reports a statistical estimate per call. Compare the **per-operation** figures.
 
-## Cyrius current (toolchain 6.5.36, x86_64 Linux, 2026-08-31, nidhi 2.0.2)
+## Cyrius current (toolchain 6.5.36, x86_64 Linux, 2026-08-31, nidhi 2.0.7)
 
-naad 2.2.2 · shravan 2.8.0 · hisab 2.11.2. Two runs shown where they differ meaningfully.
+naad 2.2.2 · shravan 2.8.0 · hisab 2.11.2. **Every 2.0.7 change is bit-identical** — verified by
+a render differential over 24,576 samples across 8 configurations (mono/stereo source, forward
+loop, crossfaded loop, low-pass, high-pass, pitched, key-tracked), plus the golden vectors in
+`tests/golden.tcyr` for the WSOLA path.
 
-| Benchmark | 2.0.2 | 2.0.1 | 6.3.34 baseline |
-|---|---:|---:|---:|
-| `voice_count_scaling/1` | 839 ns | 868 ns | 887 ns |
-| `voice_count_scaling/4` | 1.719 µs | 1.789 µs | 1.875 µs |
-| `voice_count_scaling/8` | 2.975 µs | 3.105 µs | 3.173 µs |
-| `voice_count_scaling/16` | 5.480 µs | 5.601 µs | 5.591 µs |
-| `voice_count_scaling/32` | 10.524 µs | 10.569 µs | 10.689 µs |
-| `voice_count_scaling/64` | 21.038 µs | 20.614 µs | 20.886 µs |
-| `fill_buffer_stereo/1` | 420.3 µs | 433.3 µs | 457.7 µs |
-| `fill_buffer_stereo/8` | 1.532 ms | 1.555 ms | 1.569 ms |
-| `fill_buffer_stereo/16` | 2.814 ms | 2.871 ms | 2.877 ms |
-| `fill_buffer_per_sample/1` | 431.2 µs | 429.1 µs | 440.9 µs |
-| `fill_buffer_per_sample/8` | 1.543 ms | 1.550 ms | 1.582 ms |
-| `fill_buffer_per_sample/16` | 2.822 ms | 2.884 ms | 2.869 ms |
-| `interpolation_cubic` | 83 ns | 89 ns | 82 ns |
-| `interpolation_stereo` | 156 ns | 154 ns | 155 ns |
-| `fill_buffer_stereo_filtered_8v` | **1.976–2.021 ms** | 2.247 ms | 2.592 ms |
-| `wsola_1sec_2x` | 850.3 ms | 858.8 ms | 857.1 ms |
+| Benchmark | 2.0.7 | 2.0.6 | 6.3.34 baseline | 2.0.6 → 2.0.7 |
+|---|---:|---:|---:|---:|
+| `voice_count_scaling/1` | 720 ns | 893 ns | 887 ns | **1.24×** |
+| `voice_count_scaling/4` | 1.293 µs | 1.926 µs | 1.875 µs | **1.49×** |
+| `voice_count_scaling/8` | 2.120 µs | 3.194 µs | 3.173 µs | **1.51×** |
+| `voice_count_scaling/16` | 3.644 µs | 5.829 µs | 5.591 µs | **1.60×** |
+| `voice_count_scaling/32` | 6.970 µs | 11.069 µs | 10.689 µs | **1.59×** |
+| `voice_count_scaling/64` | 13.245 µs | 21.761 µs | 20.886 µs | **1.64×** |
+| `fill_buffer_stereo/1` | 364.3 µs | 442.8 µs | 457.7 µs | 1.22× |
+| `fill_buffer_stereo/8` | 1.113 ms | 1.626 ms | 1.569 ms | **1.46×** |
+| `fill_buffer_stereo/16` | 1.901 ms | 2.945 ms | 2.877 ms | **1.55×** |
+| `fill_buffer_per_sample/1` | 361.4 µs | 433.4 µs | 440.9 µs | 1.20× |
+| `fill_buffer_per_sample/8` | 1.080 ms | 1.614 ms | 1.582 ms | **1.49×** |
+| `fill_buffer_per_sample/16` | 1.904 ms | 2.924 ms | 2.869 ms | **1.54×** |
+| `interpolation_cubic` | 37 ns | 87 ns | 82 ns | **2.35×** |
+| `interpolation_stereo` | 60 ns | 170 ns | 155 ns | **2.83×** |
+| `fill_buffer_stereo_filtered_8v` | 1.511 ms | 2.063 ms | 2.592 ms | **1.37×** |
+| `fill_buffer_stereo_filtered_hp_8v` | 1.797 ms | *(new)* | — | — |
+| `wsola_1sec_2x` | **217.7 ms** | 874.7 ms | 857.1 ms | **4.02×** |
 
-**`fill_buffer_stereo_filtered_8v` is the one real movement: 2.592 → ~2.0 ms, about 22 %
-cumulative.** Roughly half came in 2.0.1 from the naad 2.2.2 SVF, and the rest in 2.0.2 from
-routing low-pass voices through naad's allocation-free `filter_svf_process_sample_lowpass`
-instead of the one-shot API that allocates an `SvfOutput` per channel per voice per sample.
-The benchmark sets `FILTER_LOWPASS`, so it sees the whole win; high-pass, band-pass and notch
-voices still take the allocating path until naad ships an alloc-free 4-output core.
+### Where the time went
 
-**The render path now allocates zero bytes.** `tests/engine.tcyr` asserts an `alloc_used()`
-delta of exactly 0 across 20 blocks at 8 and 64 voices, filtered and unfiltered. Before 2.0.2 it
-was 48 B/frame — 2,116,800 B/s at 44.1 kHz — against a bump allocator whose free is a no-op.
-That never showed up in these numbers because the benchmarks are far too short to hit the
-ceiling; it is a soak-time process death, not a throughput cost.
+**WSOLA, 4.02×** — the correlation search evaluates ~88M element pairs for a one-second stretch,
+and every one went through `vec_get`'s two bounds tests, twice. It now uses a raw-pointer dot
+product, and `prev` became an *index* into `input` rather than a fresh frame-size copy per frame
+(it was always a pure slice, and the loop guard already proved the span in range) — which also
+stops ~2.8 MB of never-reclaimed allocation per stretch.
 
-Everything else is within run-to-run noise. Sub-200 ns rows (`interpolation_cubic`,
-`interpolation_stereo`) are measured against a ~1.3 µs timer floor and move by ±8 ns between
-runs of the same binary — read them as indicative only.
+**Interpolation, 2.35–2.83×** — the four taps span `idx-1 .. idx+2`, so one interior test
+(`idx - 1 >= 0 && idx + 2 < frames`) proves all of them in range, for stereo too. That retires
+eight per-tap helper calls with their own bounds tests and accessor calls in favour of eight raw
+loads. Zero-padding semantics stay on the edge path. The hermite coefficients are now literal
+bit patterns instead of two divides and three negations per call.
+
+**Voice scaling, up to 1.64×** — mostly the interpolation win compounding per voice, plus the
+filter key-tracking factor folded into `base_cutoff` at note-on (its two inputs are fixed for the
+voice's life, so an `f64_pow` per sample per voice was pure waste) and the literal hoists in
+`nvf_set_cutoff`.
+
+**Real-time headroom**: `fill_buffer_stereo/16` is 1.901 ms against a 512-frame budget of
+11.6 ms at 44.1 kHz — **6.1× headroom**, up from 3.9×. 64 voices sit at 13.245 µs per
+`next_sample_stereo`.
+
+### The high-pass case is new, and it is there to be uncomfortable
+
+`fill_buffer_stereo_filtered_hp_8v` (1.797 ms) runs the same workload as
+`fill_buffer_stereo_filtered_8v` (1.511 ms) with `FILTER_HIGHPASS`. The **19 % penalty** is naad
+shipping an allocation-free SVF core for low-pass only; high-pass, band-pass and notch voices
+still take the allocating one-shot path (~180 MB/s at 64 voices). Every other benchmark in the
+file sets `FILTER_LOWPASS`, so this gap was invisible. Tracked for 2.1.0, gated on naad.
 
 ## Cyrius baseline (toolchain 6.3.34, x86_64 Linux, 2026-07-02)
 

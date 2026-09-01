@@ -5,10 +5,9 @@
 
 ## Version
 
-**2.0.6** — 2026-08-31. Latent-hazard closeout: the consumer-reachable hazards the 2.0.3 audit
-found, plus ADRs settling the NaN-clamp and serde questions. Follows 2.0.5 (coverage backfill),
-2.0.4 (oracle retired), 2.0.3 (crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up),
-2.0.0 (the port).
+**2.0.7** — 2026-08-31. Performance, all bit-identical: WSOLA 4.02x, interpolation 2.8x,
+64-voice scaling 1.64x. Follows 2.0.6 (latent hazards), 2.0.5 (coverage backfill), 2.0.4 (oracle
+retired), 2.0.3 (crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up), 2.0.0 (port).
 
 ## Toolchain
 
@@ -62,8 +61,6 @@ sf2 magic literals, and the integer-PCM silence — is resolved in 2.0.2.)_
 
 Every open item is now pinned to a release in [`roadmap.md`](roadmap.md). What remains:
 
-- **Performance** (2.0.7) — all measured, all verified output-preserving: the interpolation
-  hoist (163 → 41–61 ns), the WSOLA rewrite (880 → 239 ms), and four smaller hoists.
 - **Structural** (2.1.0) — the `n_`/`N` prefix sweep over 100 top-level names (zero measured
   collisions today), the voice-major block render, the streaming-reader restructure, per-note-on
   allocation, `fill_buses_stereo`, `NZone_volume_db` being parsed and never read, and serde if

@@ -12,6 +12,21 @@ var SM_PHASE_VOCODER = 2;
 
 # n_dot(a, a_off, b, b_off, n) -- sum_{i<n} a[a_off+i]*b[b_off+i]  (f64).
 #inline
+# Raw-pointer dot product over n f64 elements, a and b given as byte addresses into a vec's
+# buffer. The caller must already have proven both spans in range. This exists because the
+# WSOLA correlation search evaluates ~88M element pairs for a one-second stretch, and
+# vec_get's two bounds tests per element, times two operands, dominate that loop.
+#must_use
+fn n_dot_raw(pa, pb, n) {
+    var sum = 0;
+    var i = 0;
+    while (i < n) {
+        sum = f64_add(sum, f64_mul(load64(pa + i * 8), load64(pb + i * 8)));
+        i = i + 1;
+    }
+    return sum;
+}
+
 fn n_dot(a, a_off, b, b_off, n) {
     var sum = 0;
     var i = 0;
@@ -196,8 +211,14 @@ fn n_stretch(s, ratio) {
     var z = 0;
     while (z < out_len) { vec_push(output, 0); vec_push(window_sum, 0); z = z + 1; }
 
+    # `prev` is an INDEX into `input`, not a copy of it. It used to be a fresh frame_size vec
+    # built per frame -- but the frame is a pure slice of `input`, and the guard below
+    # (optimal_input + frame_size > input_len) already proves the whole span is in range, so
+    # the copy was allocating and memcpying frame_size f64s per frame for nothing. On a
+    # bump allocator that is never reclaimed, ~2.8 MB per one-second stretch.
     var have_prev = 0;
-    var prev = 0;
+    var prev_start = 0;
+    var in_base = load64(input);
     var frame_idx = 0;
     var looping = 1;
     while (looping == 1) {
@@ -226,7 +247,7 @@ fn n_stretch(s, ratio) {
                         var rem = input_len - pos;
                         var nn = frame_size;
                         if (rem < nn) { nn = rem; }
-                        var corr = n_dot(prev, 0, input, pos, nn);
+                        var corr = n_dot_raw(in_base + prev_start * 8, in_base + pos * 8, nn);
                         if (have_bc == 0) {
                             best_corr = corr;
                             best_pos = pos;
@@ -245,11 +266,9 @@ fn n_stretch(s, ratio) {
             if (optimal_input + frame_size > input_len) {
                 looping = 0;
             } else {
-                var newprev = vec_new();
                 var i = 0;
                 while (i < frame_size) {
                     var sv = vec_get(input, optimal_input + i);
-                    vec_push(newprev, sv);
                     var oi = out_pos + i;
                     if (oi < out_len) {
                         var wv = vec_get(window, i);
@@ -258,7 +277,7 @@ fn n_stretch(s, ratio) {
                     }
                     i = i + 1;
                 }
-                prev = newprev;
+                prev_start = optimal_input;
                 have_prev = 1;
                 frame_idx = frame_idx + 1;
             }

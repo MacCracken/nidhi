@@ -18,30 +18,9 @@ release, not left as a wishlist.
 | **2.0.4** (2026-08-31) | **Rust oracle retired.** Golden vectors captured, build identity recorded, `rust-old/` removed (377 MB) |
 | **2.0.5** (2026-08-31) | Coverage backfill — every named oracle test now has a counterpart; 441 → 518 assertions |
 | **2.0.6** (2026-08-31) | Latent-hazard closeout; ADRs 0002 (NaN clamps) and 0003 (serde not ported) |
+| **2.0.7** (2026-08-31) | Performance, all bit-identical — WSOLA 4.02×, interpolation 2.8×, 64-voice 1.64× |
 
 ---
-
-## 2.0.7 — Performance (all bit-identical)
-
-Measured in the 2.0.2 sweep, verified output-preserving, deferred only for scope. Record
-before/after in `bench-history.csv` per CLAUDE.md.
-
-- [ ] **Interpolation hoist** (`src/sample.cyr`) — hoist frames/channels/data out of the tap
-      loop, single interior bounds test, raw `load64` on the fast path. Measured 163 → 41–61 ns
-      (2.7–4×); `fill_buffer_stereo/16` 2.708 → 1.624 ms. Zero differing bit patterns over
-      55,000 positions. **The interior test must be exactly `idx-1 >= 0 && idx+2 < frames`** —
-      an off-by-one here is a silent OOB read.
-- [ ] **WSOLA layers 1+2** (`src/stretch.cyr`) — replace the per-frame `newprev` vec with an
-      index into `input`; add a raw-pointer dot product; hoist loads out of the frame loop.
-      Measured `wsola_1sec_2x` 880 → 239 ms, byte-identical over 8 configs. *(Layer 3, the
-      Cauchy-Schwarz prune, is **rejected** — a hand-tuned numerical heuristic that is not
-      exactly equivalent, against a "playback accuracy over speed" project rule.)*
-- [ ] Non-allocating `n_instrument_find_first_zone` for `note_on` — 64-zone note_on 3.71 →
-      ~1.6 µs, 1032 → 264 B/note.
-- [ ] Fold filter key-tracking into `base_cutoff` at note_on; delete the per-sample `f64_pow`.
-- [ ] Hermite constant hoist; `nvf_set_cutoff` literal hoist.
-- [ ] Add a `FILTER_HIGHPASS` benchmark case so the non-lowpass allocation gap stops being
-      invisible (`tests/nidhi.bcyr` only ever sets `FILTER_LOWPASS`).
 
 ## 2.1.0 — Structural (breaking or upstream-gated)
 
