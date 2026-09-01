@@ -109,6 +109,38 @@ fn n_amp_envelope_new(config, sample_rate) {
     return env;
 }
 
+# n_amp_envelope_rearm(env, config, sample_rate) -> 1 if re-armed, 0 if env was not usable.
+#
+# Re-points an EXISTING naad Adsr at a different zone's parameters, with no allocation.
+#
+# naad ships no `envelope_adsr_set_params`, which is what made this look upstream-gated -- but
+# `struct Adsr` is `#derive(accessors)` (lib/naad.cyr:3863), so every parameter is a settable
+# field and naad's own constructor sets them through exactly these generated accessors. Reading
+# only for a named `*_set_params` and inferring absence was the mistake.
+#
+# No separate reset is needed either: `envelope_adsr_gate_on` sets state=ATTACK and
+# stage_samples=0, and `envelope_adsr_next_value` recomputes current_value from stage_samples in
+# every branch, so nothing of the previous note survives the first tick.
+#
+# The parameter guards mirror n_amp_envelope_new exactly -- setters skip naad's constructor
+# validation, so nidhi must not hand them a value the constructor would have rejected.
+fn n_amp_envelope_rearm(env, config, sample_rate) {
+    if (env <= 0) { return 0; }
+    var a = f64_max(f64_div(f64_from(NAdsrConfig_attack_samples(config)), sample_rate), 0);
+    var d = f64_max(f64_div(f64_from(NAdsrConfig_decay_samples(config)), sample_rate), 0);
+    var s = f64_min(f64_max(NAdsrConfig_sustain_level(config), 0), F64_ONE);
+    var rel = f64_max(f64_div(f64_from(NAdsrConfig_release_samples(config)), sample_rate), 0);
+    if (n_is_finite(a) == 0) { a = 0; }
+    if (n_is_finite(d) == 0) { d = 0; }
+    if (n_is_finite(rel) == 0) { rel = 0; }
+    Adsr_set_attack_time(env, a);
+    Adsr_set_decay_time(env, d);
+    Adsr_set_sustain_level(env, s);
+    Adsr_set_release_time(env, rel);
+    Adsr_set_sample_rate(env, f64_max(sample_rate, F64_ONE));
+    return 1;
+}
+
 # Lifecycle wrappers over naad (thin -- keep nidhi's envelope vocabulary).
 #inline
 fn n_amp_envelope_trigger(env) { return envelope_adsr_gate_on(env); }

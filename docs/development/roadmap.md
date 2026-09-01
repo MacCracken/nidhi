@@ -4,7 +4,7 @@
 > Shipped work lives in [`CHANGELOG.md`](../../CHANGELOG.md); current state is in
 > [`state.md`](state.md); decisions are in [`docs/adr/`](../adr/).
 
-Current: **2.1.0**. Every item below carries a release pin and a reason. Nothing here blocks a
+Current: **2.1.1**. Every item below carries a release pin and a reason. Nothing here blocks a
 release — 2.1.0 is complete and green.
 
 ---
@@ -36,28 +36,20 @@ Ordered by measured harm. All of it is nidhi-side; nothing waits on a dependency
       normalize/truncate epilogue; a single mode-flagged helper would make the OLA path carry
       `prev`/`tolerance` bookkeeping it never uses.
 
-## 2.2.0 — gated on naad
+## 2.2.0 — one item, filed upstream
 
-Both filed upstream. nidhi cannot fix either without forking DSP that CLAUDE.md says must come
-from naad.
+- [ ] **Allocation-free four-output SVF core** — filed in **naad's own roadmap**
+      (`~/Repos/naad/docs/development/roadmap.md`, "Allocation-free hot paths"), not here: an
+      issue in nidhi's docs does nothing for naad. **32 B per channel per sample = 180.6 MB/s at
+      64 voices**, measured; `fill_buffer_stereo_filtered_hp_8v` (1.819 ms) vs `..._8v`
+      (1.528 ms) keeps the 19 % penalty visible.
 
-- [ ] **Allocation-free SVF core for high-pass / band-pass / notch** —
-      [`issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md`](issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md).
-      **32 B per channel per sample = 180.6 MB/s at 64 voices**, measured. Low-pass already has
-      the escape hatch and nidhi took it in 2.0.7; the other three modes have none.
-      `fill_buffer_stereo_filtered_hp_8v` (1.819 ms) vs `..._8v` (1.528 ms) keeps the **19 %**
-      penalty visible. *On arrival:* route all four modes through it, delete the mode branch in
-      `nvf_process_stereo`, extend the zero-allocation assertion to all four.
-- [ ] **`Adsr` / `Lfo` re-arm APIs** —
-      [`issues/2026-08-31-naad-adsr-and-lfo-cannot-be-re-armed.md`](issues/2026-08-31-naad-adsr-and-lfo-cannot-be-re-armed.md).
-      **72 B per note-on**, never reclaimed. 2.1.0 removed the filter half (264 -> 72 B) *because*
-      `filter_svf_set_params` and `filter_svf_reset` exist; `Adsr` and `Lfo` have no equivalent.
-      *On arrival:* give each voice its envelope and LFOs once in `n_voice_new`, re-arm in
-      `note_on`, take per-note allocation to zero.
-- [ ] **Genuinely incremental streaming.** 2.1.0 made `open()` decode once instead of twice, but
-      it still holds the whole decoded file. shravan's decoder is buffer-then-decode-once — the
-      defect behind the 2.0.2 4 KB truncation bug — so real streaming needs an incremental
-      decoder there. File against shravan when it becomes worth doing.
+      **Not blocking.** Two in-naad workarounds exist and neither is a fork:
+      route those modes through `filter_biquad_process_sample` (allocation-free, covers
+      HP/BP/notch, different topology so it needs an ADR), or call
+      `_filter_svf_compute_lowpass` and recover the other three outputs from `k` and the
+      pre/post `ic1eq` via derive accessors (bit-identical, but couples to naad's integrator
+      update). Take one if naad does not land the core.
 
 ## Deferred — with the reason, so it is not re-opened blind
 

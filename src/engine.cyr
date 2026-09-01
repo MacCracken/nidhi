@@ -203,7 +203,9 @@ fn n_voice_new(sample_rate) {
     NSamplerVoice_set_age(v, 0);
     NSamplerVoice_set_forward(v, 1);
     NSamplerVoice_set_amp_env(v, n_amp_envelope_new(n_adsr_config_default(), sample_rate));
-    NSamplerVoice_set_filter_env(v, 0);
+    # Persistent per-voice filter envelope and LFOs, re-armed in note_on rather than rebuilt.
+    # `filter_env_depth` 0 is what disables the filter envelope, not a null pointer.
+    NSamplerVoice_set_filter_env(v, n_amp_envelope_new(n_adsr_config_default(), sample_rate));
     NSamplerVoice_set_filter_env_depth(v, 0);
     NSamplerVoice_set_base_cutoff(v, 0);
     NSamplerVoice_set_filter(v, nvf_bypass());
@@ -211,9 +213,9 @@ fn n_voice_new(sample_rate) {
     NSamplerVoice_set_pressure(v, 0);
     NSamplerVoice_set_brightness(v, F64_HALF);
     NSamplerVoice_set_choke_group(v, 0);
-    NSamplerVoice_set_pitch_lfo(v, 0);
+    NSamplerVoice_set_pitch_lfo(v, modulation_lfo_new(MODULATION_LFO_SINE, F64_ONE, sample_rate));
     NSamplerVoice_set_pitch_lfo_depth(v, 0);
-    NSamplerVoice_set_filter_lfo(v, 0);
+    NSamplerVoice_set_filter_lfo(v, modulation_lfo_new(MODULATION_LFO_SINE, F64_ONE, sample_rate));
     NSamplerVoice_set_filter_lfo_depth(v, 0);
     NSamplerVoice_set_fil_keytrack(v, 0);
     NSamplerVoice_set_cutoff_smoother(v, smoothing_new(f64_div(f64_from(5), f64_from(1000)), sample_rate, 0));
@@ -475,44 +477,66 @@ fn n_engine_note_on(e, note, velocity) {
         base_cut = f64_mul(base_cut, f64_pow(f64_from(2), f64_div(kt_c, f64_from(1200))));
     }
     NSamplerVoice_set_base_cutoff(voice, base_cut);
+    # Snap the cutoff smoother to THIS note's cutoff. The smoother is per-voice and persistent,
+    # so without this a reused voice glides over ~5 ms from the PREVIOUS note's cutoff into the
+    # new one -- an audible filter sweep at the start of every note on a busy voice. Exactly the
+    # defect filter_svf_reset fixes for the integrator state, one field over.
+    var csm = NSamplerVoice_cutoff_smoother(voice);
+    if (csm > 0) {
+        smoothing_set_target(csm, base_cut);
+        smoothing_snap(csm);
+    }
     NSamplerVoice_set_pitch_bend(voice, 0);
     NSamplerVoice_set_pressure(voice, 0);
     NSamplerVoice_set_brightness(voice, F64_HALF);
     NSamplerVoice_set_choke_group(voice, choke);
 
     if (fileg_config != 0) {
-        var fenv = n_amp_envelope_new(fileg_config, sr);
+        var fenv = NSamplerVoice_filter_env(voice);
+        n_ignore(n_amp_envelope_rearm(fenv, fileg_config, sr));
         n_amp_envelope_trigger(fenv);
-        NSamplerVoice_set_filter_env(voice, fenv);
         NSamplerVoice_set_filter_env_depth(voice, fileg_depth);
     } else {
-        NSamplerVoice_set_filter_env(voice, 0);
         NSamplerVoice_set_filter_env_depth(voice, 0);
     }
 
-    var plfo = 0;
-    if (f64_gt(plfo_rate, 0) == 1) {
-        if (plfo_depth != 0) {
-            plfo = modulation_lfo_new(MODULATION_LFO_SINE, plfo_rate, sr);
-            if (naad_is_err(plfo) == 1) { plfo = 0; }
+    # Re-arm the voice's own LFOs. `modulation_lfo_set_frequency` validates exactly as the
+    # constructor does; `Lfo_set_phase(.,0)` is the phase reset naad has no named function for,
+    # and is the same generated accessor naad's own constructor uses. nidhi only ever builds
+    # SINE LFOs, whose output depends on phase and frequency alone -- the sample-and-hold
+    # rng/latch fields are untouched by this shape.
+    # A zero depth is what disables the LFO, so a live pointer with depth 0 is inert.
+    var plfo = NSamplerVoice_pitch_lfo(voice);
+    var p_depth = plfo_depth;
+    if (plfo > 0) {
+        if (f64_gt(plfo_rate, 0) == 1) {
+            if (naad_is_err(modulation_lfo_set_frequency(plfo, plfo_rate)) == 1) { p_depth = 0; }
+            Lfo_set_phase(plfo, 0);
+        } else {
+            p_depth = 0;
         }
+    } else {
+        p_depth = 0;
     }
-    NSamplerVoice_set_pitch_lfo(voice, plfo);
-    var flfo = 0;
-    if (f64_gt(flfo_rate, 0) == 1) {
-        if (flfo_depth != 0) {
-            flfo = modulation_lfo_new(MODULATION_LFO_SINE, flfo_rate, sr);
-            if (naad_is_err(flfo) == 1) { flfo = 0; }
+    var flfo = NSamplerVoice_filter_lfo(voice);
+    var f_depth = flfo_depth;
+    if (flfo > 0) {
+        if (f64_gt(flfo_rate, 0) == 1) {
+            if (naad_is_err(modulation_lfo_set_frequency(flfo, flfo_rate)) == 1) { f_depth = 0; }
+            Lfo_set_phase(flfo, 0);
+        } else {
+            f_depth = 0;
         }
+    } else {
+        f_depth = 0;
     }
-    NSamplerVoice_set_filter_lfo(voice, flfo);
-    NSamplerVoice_set_pitch_lfo_depth(voice, plfo_depth);
-    NSamplerVoice_set_filter_lfo_depth(voice, flfo_depth);
+    NSamplerVoice_set_pitch_lfo_depth(voice, p_depth);
+    NSamplerVoice_set_filter_lfo_depth(voice, f_depth);
     NSamplerVoice_set_fil_keytrack(voice, keytrack);
 
-    var aenv = n_amp_envelope_new(adsr_config, sr);
+    var aenv = NSamplerVoice_amp_env(voice);
+    n_ignore(n_amp_envelope_rearm(aenv, adsr_config, sr));
     n_amp_envelope_trigger(aenv);
-    NSamplerVoice_set_amp_env(voice, aenv);
 
     return vidx;
 }
@@ -699,8 +723,10 @@ fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscr
         # base_cutoff already carries the key-tracking factor -- folded in at note_on, where
         # its two inputs are fixed for the voice's life.
         var cutoff = NSamplerVoice_base_cutoff(voice);
+        # Gate on DEPTH, not on the pointer: since 2.1.1 every voice owns a persistent filter
+        # envelope, so the pointer is always live and a zero depth is what disables it.
         var fenv = NSamplerVoice_filter_env(voice);
-        if (fenv != 0) {
+        if (NSamplerVoice_filter_env_depth(voice) != 0) {
             var mod_cents = f64_mul(NSamplerVoice_filter_env_depth(voice), n_amp_envelope_tick(fenv));
             cutoff = f64_mul(cutoff, f64_pow(f64_from(2), f64_div(mod_cents, f64_from(1200))));
         }

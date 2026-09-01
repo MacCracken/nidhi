@@ -5,10 +5,10 @@
 
 ## Version
 
-**2.1.0** — 2026-08-31. Zone `volume` is applied (it was parsed, stored and ignored), note_on
-reuses the voice's filter, and the streaming reader decodes once instead of twice. Follows 2.0.7
-(performance), 2.0.6 (latent hazards), 2.0.5 (coverage backfill), 2.0.4 (oracle retired), 2.0.3
-(crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up), 2.0.0 (the port).
+**2.1.1** — 2026-08-31. `note_on` allocates nothing (264 B -> 72 B -> 0), and a reused voice no
+longer inherits the previous note's cutoff. Follows 2.1.0 (zone volume applied, streaming reader),
+2.0.7 (performance), 2.0.6 (latent hazards), 2.0.5 (coverage backfill), 2.0.4 (oracle retired),
+2.0.3 (crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up), 2.0.0 (the port).
 
 ## Toolchain
 
@@ -30,9 +30,9 @@ reuses the voice's filter, and the streaming reader decodes once instead of twic
 
 ## Tests
 
-- **15 suites / 571 assertions / 0 failures** (`cyrius test`), zero `#must_use` warnings
-- Render path asserted **allocation-free**: `alloc_used()` delta of 0 across 20 blocks at 8 and
-  64 voices, filtered and unfiltered (`tests/engine.tcyr`)
+- **15 suites / 573 assertions / 0 failures** (`cyrius test`), zero `#must_use` warnings
+- Render path **and `note_on`** asserted allocation-free: `alloc_used()` delta of 0 across 20
+  blocks at 8 and 64 voices, and 0 bytes per note_on/note_off pair (`tests/engine.tcyr`)
 - **Fuzz**: `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` — 2 passed, 0 crashes
 - **Benchmarks**: `tests/nidhi.bcyr`, 16 measurements reproducing the 7 Rust criterion
   benchmarks. See [`BENCHMARKS.md`](../../BENCHMARKS.md) and
@@ -65,11 +65,8 @@ could actually hit.
   README says so too rather than listing it as a feature.
 - **High-pass / band-pass / notch voices allocate ~180 MB/s at 64 voices** — and this allocator
   never frees (see [architecture 001](../architecture/001-the-allocator-never-frees.md)).
-  Low-pass, the default, is allocation-free. Filed upstream:
-  [`issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md`](issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md).
-- **72 bytes per note-on, never reclaimed** — the envelope and LFOs, which naad gives no way to
-  re-arm. Filed upstream:
-  [`issues/2026-08-31-naad-adsr-and-lfo-cannot-be-re-armed.md`](issues/2026-08-31-naad-adsr-and-lfo-cannot-be-re-armed.md).
+  Low-pass, the default, is allocation-free. Filed in **naad's** roadmap. Not blocking: naad's
+  `filter_biquad_process_sample` is an allocation-free alternative covering all three modes.
 - **WSOLA amplifies output up to ~588x** where `window_sum` falls under the `1e-6` normalise
   threshold. **Inherited from the oracle**, identical threshold and guard — a port-faithful
   defect, not a port defect. Fixing it is a deliberate divergence needing its own ADR.

@@ -76,7 +76,7 @@ voice's life, so an `f64_pow` per sample per voice was pure waste) and the liter
 `fill_buffer_stereo_filtered_8v` (1.511 ms) with `FILTER_HIGHPASS`. The **19 % penalty** is naad
 shipping an allocation-free SVF core for low-pass only; high-pass, band-pass and notch voices
 still take the allocating one-shot path (~180 MB/s at 64 voices). Every other benchmark in the
-file sets `FILTER_LOWPASS`, so this gap was invisible. Tracked for 2.1.0, gated on naad.
+file sets `FILTER_LOWPASS`, so this gap was invisible. Filed in naad's roadmap. Not strictly blocking: naad's `filter_biquad_process_sample` is an allocation-free alternative covering all three modes, at the cost of a different topology.
 
 ## Cyrius baseline (toolchain 6.3.34, x86_64 Linux, 2026-07-02)
 

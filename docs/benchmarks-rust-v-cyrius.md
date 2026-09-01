@@ -106,9 +106,8 @@ point in the 2.0.x line.
 | wsola_1sec_2x | **217.7 ms** | 858.8 ms | 857.1 ms | 2 |
 
 The high-pass case exists to keep an upstream gap visible: naad ships an allocation-free SVF core
-for low-pass only, so the other three filter modes still allocate 32 B per channel per sample.
-Filed as
-[`issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md`](development/issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md).
+for the SVF low-pass path only, so the other three filter modes still allocate 32 B per channel
+per sample. Filed in naad's own roadmap.
 
 ## Analysis
 
@@ -118,7 +117,7 @@ Filed as
 |--------|------|-------|
 | f64 vs f32 | ~1.5–2× | all sample math |
 | No autovectorization (SIMD) | ~2–4× | mix, interpolation, filter |
-| Per-sample heap alloc | — | **Eliminated.** 2.0.2 hoisted the render scratch to per-engine slots and 2.0.7 routed low-pass through naad's alloc-free SVF core; `tests/engine.tcyr` asserts a zero-byte delta across a rendered block. Only high-pass / band-pass / notch still allocate, and that is [an upstream gap](development/issues/2026-08-31-naad-no-alloc-free-svf-core-for-non-lowpass.md). |
+| Per-sample heap alloc | — | **Eliminated.** 2.0.2 hoisted the render scratch to per-engine slots and 2.0.7 routed low-pass through naad's alloc-free SVF core; `tests/engine.tcyr` asserts a zero-byte delta across a rendered block. Only high-pass / band-pass / notch still allocate — naad's allocation-free core exists for the SVF low-pass path only. Filed in naad's roadmap; naad's biquad is an allocation-free alternative in the meantime. |
 | Per-frame block render | ~1.5× | `fill_buffer_stereo` calls `next_sample_stereo` per frame instead of Rust's per-voice block-into-scratch (so it ≈ `fill_buffer_per_sample` and forgoes Rust's ~2.9×/1.2× block speedup). Still open — see the roadmap, where the obvious fix measured *worse* at ≥8 voices. |
 
 The **relative shape holds**: `next_sample_stereo` scales ~linearly with voice count on both

@@ -1,5 +1,80 @@
 # Changelog
 
+## 2.1.1 — 2026-08-31
+
+**note_on now allocates nothing.** 264 B (pre-2.1.0) → 72 B (2.1.0) → **0**.
+
+And the reason it took three releases is worth recording: 2.1.0 filed the last 72 B as
+"upstream-gated on naad". **That was wrong, and the error was systematic.**
+
+### The mistake
+
+Every "naad gives no way to re-arm X" claim in this repo was written by grepping naad for a named
+`*_reset` or `*_set_params` function, finding none, and concluding the capability was absent —
+without ever reading the struct declaration one screen above.
+
+**79 naad structs carry `#derive(accessors)`**, which generates a setter for every field.
+`struct Adsr` exposes `attack_time`, `decay_time`, `sustain_level`, `release_time` and
+`sample_rate` as settable fields, and naad's own constructor writes them through exactly those
+generated accessors. `struct Lfo` exposes `phase`. On top of that
+**`modulation_lfo_set_frequency` already existed** as a validating setter — I asserted its
+absence having only ever searched for `*_reset`.
+
+nidhi already consumed one of these accessors (`Adsr_attack_time` in `tests/envelope.tcyr`), so
+the mechanism was demonstrably reachable the whole time.
+
+An audit of every naad claim across the repo found this pattern in five files. The corrections
+are applied; the 2.1.0 entry now carries a warning rather than being silently rewritten.
+
+### Fixed — per-note allocation is zero
+
+- **Amp envelope**: each voice keeps one `Adsr` for the life of the engine. `n_amp_envelope_rearm`
+  re-points it at the new zone's parameters via the derive accessors. No reset is needed —
+  `envelope_adsr_gate_on` sets `state=ATTACK`, `stage_samples=0`, and `envelope_adsr_next_value`
+  recomputes `current_value` from `stage_samples` in every branch, so nothing of the previous
+  note survives the first tick.
+- **Filter envelope**: same, held persistently per voice. A zero `filter_env_depth` is what
+  disables it, so the render path now gates on depth rather than on a null pointer.
+- **LFOs**: `modulation_lfo_set_frequency` + `Lfo_set_phase(lfo, 0)`. nidhi only builds SINE
+  LFOs, whose output depends on phase and frequency alone, so the sample-and-hold rng and latch
+  are untouched by this shape.
+
+Render output is **bit-identical** — verified against the same 24,576-sample differential used
+for 2.0.7.
+
+### Fixed — a reused voice inherited the previous note's cutoff
+
+The per-voice cutoff smoother is persistent, and `note_on` never reset it: a voice picking up a
+new note glided over ~5 ms from the **old** note's cutoff into the new one — an audible filter
+sweep at the start of every note on a busy voice. `note_on` now snaps the smoother to the new
+note's own cutoff.
+
+Precisely the defect `filter_svf_reset` was added to `nvf_reinit` to fix in 2.1.0, one field
+over — and it was found by the same audit, not by a test. ⚠ **Output-changing** for a reused
+voice whose new zone has a different cutoff; a fresh voice is unaffected.
+
+### Changed — the upstream filing moved to the right repo
+
+The two issue documents added under `docs/development/issues/` in the previous turn are gone.
+An issue in nidhi's docs is a note to itself; it does nothing for naad.
+
+- The **ADSR/LFO** request was **withdrawn** — it was wrong, and the work is done here instead.
+- The **allocation-free four-output SVF core** request is real (`filter_svf_process_sample`
+  genuinely allocates 32 B/call and no `_into` variant exists) and is now filed in **naad's own
+  roadmap**, matching naad's convention for consumer-filed items.
+
+Its supporting argument was also corrected: naad's out-param pattern appears **at least six**
+times, not twice (`panning_pan_mono_into`'s header names `reverb_process_core` as the split it
+follows — the strongest precedent, and it was missed), and the claim that nidhi could not fix it
+"without forking DSP" was **false**. `filter_biquad_process_sample` is an allocation-free naad
+filter covering high-pass, band-pass and notch. So the item is **not blocking**, and every
+"gated on naad" phrasing in the roadmap, state.md and the benchmark docs is corrected.
+
+### Quality
+- **15 suites / 573 assertions / 0 failures**, fuzz 2/2, zero `#must_use` warnings.
+- `tests/engine.tcyr` now asserts per-note allocation is exactly **0**, and that a reused voice
+  is filtered by its own cutoff.
+
 ## 2.1.0 — 2026-08-31
 
 First minor since the port. Three substantive changes, two ADRs, and one breaking rename.
@@ -37,9 +112,11 @@ and q exactly as `filter_svf_new` does, and `filter_svf_reset` zeroes `ic1eq`/`i
 *precisely* the two state variables the constructor zeroes. The reset is load-bearing: without it
 a new note inherits the previous note's integrator state and starts mid-ring.
 
-The remaining 72 B is the envelope and LFOs, and that half is **upstream-gated**: naad has
-`filter_svf_reset` but no `envelope_adsr_reset` and no LFO frequency setter, so an `Adsr` cannot
-be re-armed for a different zone's ADSR times.
+The remaining 72 B is the envelope and LFOs. ⚠ **This release claimed that half was
+"upstream-gated" on naad. That was wrong** — see 2.1.1, which took it to zero with no upstream
+change. `struct Adsr` and `struct Lfo` are `#derive(accessors)`, so every parameter is already
+settable, and `modulation_lfo_set_frequency` already exists. The claim came from grepping for a
+named `*_reset` function and never reading the struct declaration.
 
 ### Changed — the streaming reader decodes once instead of twice
 

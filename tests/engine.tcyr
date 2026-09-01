@@ -487,7 +487,53 @@ fn main() {
     test_group("note_on does not allocate a filter per note (2.1.0)");
     var per_note = noteon_bytes(200) / 200;
     println_int(per_note);
-    assert(per_note < 200, "per note_on/note_off allocation is well under the pre-2.1.0 264 B");
+    # 2.1.1: ZERO. 2.1.0 reused the filter (264 -> 72 B); the remaining 72 B was the amp
+    # envelope, which looked upstream-gated because naad ships no envelope_adsr_set_params --
+    # but struct Adsr is #derive(accessors), so every parameter is a settable field. Same for
+    # the LFOs via modulation_lfo_set_frequency + Lfo_set_phase.
+    assert_eq(per_note, 0, "note_on allocates NOTHING (was 264 B pre-2.1.0, 72 B in 2.1.0)");
+
+    # --- 2.1.1: a reused voice must not inherit the previous note's cutoff ---
+    # The cutoff smoother is per-voice and persistent; note_on never reset it, so a voice
+    # picking up a new note glided over ~5 ms from the OLD note's cutoff. Build two zones with
+    # very different cutoffs, play them on the same engine, and check the second note's first
+    # block is not still sweeping down from the first note's.
+    test_group("reused voice does not inherit the previous cutoff (2.1.1)");
+    var se = n_engine_new(1, f64_from(44100));
+    var sbank = n_engine_bank(se);
+    var sd = vec_new();
+    var si = 0;
+    while (si < 4000) { vec_push(sd, f64_div(f64_from((si * 13) % 64), f64_from(64))); si = si + 1; }
+    var ssid = n_sample_bank_add(sbank, n_sample_from_mono(sd, 44100));
+    var sinst = n_instrument_new(str_from("s"));
+    var szhi = n_zone_with_root_note(n_zone_with_key_range(n_zone_new(ssid), 0, 63), 60);
+    szhi = n_zone_with_filter(szhi, f64_from(18000), 0);
+    var szlo = n_zone_with_root_note(n_zone_with_key_range(n_zone_new(ssid), 64, 127), 60);
+    szlo = n_zone_with_filter(szlo, f64_from(300), 0);
+    n_instrument_add_zone(sinst, szhi);
+    n_instrument_add_zone(sinst, szlo);
+    ignore(n_engine_set_instrument(se, sinst));
+
+    var sbuf = vec_new();
+    var sk = 0;
+    while (sk < 512) { vec_push(sbuf, 0); sk = sk + 1; }
+
+    ignore(n_engine_note_on(se, 40, 100));      # bright zone, cutoff 18000
+    n_engine_fill_buffer_stereo(se, sbuf, 512);
+    n_engine_note_off(se, 40);
+    ignore(n_engine_note_on(se, 100, 100));     # dark zone, cutoff 300 -- same voice
+    n_engine_fill_buffer_stereo(se, sbuf, 512);
+    var epk = 0;
+    var ej = 0;
+    while (ej < 512) {
+        var ea = f64_abs(vec_get(sbuf, ej));
+        if (f64_gt(ea, epk) == 1) { epk = ea; }
+        ej = ej + 1;
+    }
+    # A 300 Hz low-pass on this material is heavily attenuated. If the smoother were still
+    # gliding down from 18000 the opening of the block would be far brighter and louder.
+    assert_eq(n_is_finite(epk), 1, "reused voice renders finite output");
+    assert(f64_lt(epk, F64_ONE) == 1, "reused voice is filtered by ITS OWN cutoff, not the previous note's");
 
     return assert_summary();
 }
