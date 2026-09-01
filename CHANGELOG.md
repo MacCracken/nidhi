@@ -1,5 +1,94 @@
 # Changelog
 
+## 2.0.3 — 2026-08-31
+
+Closes the loop-crossfade seam, the one item the 2.0.2 sweep confirmed but deferred because it
+changes rendered audio and had no coverage to change it against.
+
+### Fixed — loop crossfade never closed the seam
+
+The port faithfully transcribed `rust-old/src/engine.rs:813-829`, which reads the fade-in source
+**forward** from `loop_start`:
+
+```
+xfade_pos = loop_start + (xfade - dist)
+```
+
+`dist` counts down to 0 as the playhead reaches `loop_end`, so at the wrap this reads
+`loop_start + xfade` — while the very next frame, now wrapped, plays `loop_start`. The seam ends
+on a jump of `xfade` samples backwards through the material. **The crossfade attenuated the click
+without ever closing it.** That formula belongs to a convention where the loop also wraps to
+`loop_start + xfade`; the wrap target is plain `loop_start`, so the port inherited a formula from
+one convention and a wrap point from the other.
+
+The fade-in source now walks **backward** — `loop_start - dist` — because the material that must
+follow `loop_end` is the material that *precedes* `loop_start`. At the wrap it reads exactly
+`loop_start`, where the post-wrap playhead sits. The loop's period, and so its pitch, is
+unchanged.
+
+Two clamps, both load-bearing:
+- **against the loop length** — a crossfade longer than the loop used to be live from frame 0,
+  so the loop's own material was never heard at full level.
+- **against `loop_start`** — there is no material before frame 0 and reads there return
+  zero-padding, so an unclamped backward fade blends in **silence** and attenuates the loop by up
+  to 50 %. The naive fix is wrong without this.
+
+Where `loop_start < xfade` there is no pre-roll at all, and no crossfade can close a seam whose
+endpoints differ — only moving the wrap point could, at the cost of the loop's pitch. That case
+keeps the legacy forward blend: closure where it is achievable, never worse than 2.0.2 where it
+is not. Disabling the fade there was measured and rejected — it was worse than shipping nothing.
+
+⚠ **This changes rendered audio** for any zone with `crossfade_length > 0`, a forward or sustain
+loop, and `loop_start >= crossfade_length`. A deliberate divergence from the oracle, recorded in
+[ADR 0001](docs/adr/0001-loop-crossfade-seam.md). CLAUDE.md's "sample-accurate loop points and
+crossfades" is what makes the oracle's behaviour a defect rather than a baseline.
+
+### Added — the coverage that made this measurable
+
+There was **no crossfade test and no crossfade benchmark anywhere in the repo** before this
+release, which is why the defect survived the port, two parity audits, and a P-1 sweep.
+
+`tests/engine.tcyr` now measures the largest frame-to-frame discontinuity across the wrap on a
+400-frame linear ramp — a signal where a correct crossfade is *exactly* continuous. Values ×1e6:
+
+| case | 2.0.2 | 2.0.3 |
+|---|---:|---:|
+| `xfade=20`, loop 100..200 | 22,999 | **4,000** |
+| `xfade=0` (control) | 99,000 | 99,000 |
+| `xfade=20`, loop 0..200 (no pre-roll) | 28,000 | 28,000 |
+| `xfade=500` (longer than the 100-frame loop) | 19,602 | **1,000** |
+
+The ramp's own per-frame step is ~2,500, so 4,000 is essentially a closed seam. The control and
+the no-pre-roll case are pinned unchanged, so neither can regress silently.
+
+### Fixed — two more parity divergences, found by re-reading the oracle
+
+A full `rust-old/` port-coverage audit ran alongside this release (six modules, each
+adversarially verified). It confirmed 293/328 public items ported and could not falsify a single
+symbol-level claim — but it caught two real divergences that the 383-assertion suite could not
+see, both by reading the Rust source rather than the tests:
+
+- **`f64_round` is round-half-to-EVEN; Rust's `.round()` is half-away-from-zero.** Verified:
+  Cyrius gives 0.5 → 0, 1.5 → 2, 2.5 → 2, 3.5 → 4. All three `.round()` sites in the oracle set a
+  stretched buffer's target length, so any `input_len × ratio` landing exactly on .5 produced an
+  output **one frame shorter** than Rust's. Now `n_round_half_away` in `src/f64_util.cyr`,
+  computed from floor/ceil rather than `floor(x + 0.5)` — which is subtly wrong for
+  `x = 0.49999999999999994`, where the addition rounds up to exactly 1.0.
+- **Signed `inf` / `nan` were rejected by the 2.0.2 SFZ float validator.** `str_substr` takes an
+  exclusive **end index**, not a length, so the validator sliced the wrong span whenever a sign
+  was present. Unsigned `inf` worked only by coincidence (end == len with no sign). Introduced in
+  2.0.2 and fixed here.
+
+The audit also found that the 2.0.2 `group=300000000` regression test passed a `Str` where
+`n_sfz_parse` takes a cstring, so it was never exercising the path it claimed to. Corrected.
+
+### Quality
+- **14 suites / 398 assertions / 0 failures**, up from 378. Fuzz 2/2.
+- First ADR in the repo; `docs/adr/README.md`'s index was still "_No ADRs yet_".
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) rewritten: every item deferred by
+  the 2.0.2 sweep and the 2.0.3 audit is now pinned to a release across the 2.0.x arc, replacing
+  a stale v0.1.0-era milestone scaffold.
+
 ## 2.0.2 — 2026-08-31
 
 **P-1 audit and repair sweep.** A seven-lens adversarial audit (security, memory safety, oracle

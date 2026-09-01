@@ -12,6 +12,9 @@ include "src/sample.cyr"
 include "src/instrument.cyr"
 include "src/sfz.cyr"
 
+# Explicitly discard a #must_use result the test does not need.
+fn ignore(v) { return 0; }
+
 fn approx(a, b, tol) {
     if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
     return 0;
@@ -179,6 +182,14 @@ fn main() {
     assert_eq(sfz_f64(str_from("1.5E-3"), fo), 1, "1.5E-3 accepted");
     assert_eq(sfz_f64(str_from("inf"), fo), 1, "inf accepted");
     assert_eq(sfz_f64(str_from("NaN"), fo), 1, "NaN accepted");
+    # SIGNED inf/nan: str_substr takes an exclusive END index, not a length, so the 2.0.2
+    # validator computed the wrong slice and rejected every signed spelling. Unsigned worked
+    # only by coincidence (end == len when the sign is absent).
+    assert_eq(sfz_f64(str_from("-inf"), fo), 1, "-inf accepted (broken in 2.0.2)");
+    assert_eq(sfz_f64(str_from("+inf"), fo), 1, "+inf accepted (broken in 2.0.2)");
+    assert_eq(sfz_f64(str_from("-infinity"), fo), 1, "-infinity accepted");
+    assert_eq(sfz_f64(str_from("-nan"), fo), 1, "-nan accepted");
+    assert_eq(sfz_f64(str_from("-infx"), fo), 0, "-infx still rejected");
 
     # Integer overflow used to WRAP: group=9223372036854775808 became i64::MIN and reached
     # vec_get as a negative index -> exit(1) from a 47-byte file.
@@ -194,12 +205,17 @@ fn main() {
 
     # A group above the rr_counters cap must import as UNGROUPED, not abort.
     test_group("huge group imports without aborting (2.0.2)");
-    var gsrc = str_from("<region> sample=x.wav group=300000000");
-    var gp = n_sfz_parse(gsrc);
+    var gp = n_sfz_parse("<region> sample=x.wav group=300000000");
     assert(gp > 0, "huge group parses");
     var ginst = n_sfz_to_instrument(gp, str_from("g"), f64_from(44100));
     assert(ginst > 0, "huge group builds an instrument");
-    assert_eq(n_instrument_find_zone_rr(ginst, 60, 100) >= (0 - 1), 1, "find_zone_rr does not abort");
+    # Reaching this line IS the assertion. Before the N_MAX_ZONE_GROUP cap, group=300000000
+    # made n_instrument_ensure_counters push ~300M slots -- ~4 GB, then `vec: capacity
+    # overflow` and exit(1). A test that merely inspects the parsed group would not prove
+    # that, because the abort happened during add_zone, before anything was inspectable.
+    assert_eq(n_instrument_zone_count(ginst), 1, "the region imported as exactly one zone");
+    ignore(n_instrument_find_zone_rr(ginst, 60, 100));
+    assert(1, "find_zone_rr over a capped group does not abort");
 
     return assert_summary();
 }

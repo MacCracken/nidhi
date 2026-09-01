@@ -544,6 +544,33 @@ fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscr
     var srr = load64(scratch + 8);
 
     # loop crossfade (Forward / LoopSustain, crossfade_length > 0)
+    #
+    # DIVERGENCE from the oracle, deliberate -- see docs/adr/0001-loop-crossfade-seam.md.
+    #
+    # rust-old reads the fade-in source from `loop_start + (xfade - dist)`, which walks
+    # FORWARD from loop_start as the playhead approaches loop_end. At the wrap itself
+    # (dist = 0) that lands on `loop_start + xfade`, and the very next frame -- now wrapped
+    # -- plays `loop_start`. So the seam ends on a jump of xfade samples backwards: the
+    # crossfade attenuates the click without ever closing it.
+    #
+    # The material that must FOLLOW loop_end is the material that PRECEDES loop_start,
+    # because that is what naturally leads into loop_start. So the source walks backward
+    # from loop_start: `loop_start - dist`, reaching exactly loop_start at the wrap, where
+    # the post-wrap playhead also sits. The seam closes.
+    #
+    # Two clamps make it safe, and both are load-bearing:
+    #   * against the loop length -- a crossfade longer than the loop was live from frame 0
+    #     and the loop's own material was never heard at full level.
+    #   * against loop_start -- there is no material before sample frame 0, and reading there
+    #     returns zero-padding, so an unclamped backward fade would blend in SILENCE and
+    #     attenuate the loop by up to 50%. This is why the naive fix is wrong on its own.
+    #
+    # When loop_start < xfade there is genuinely no pre-roll to fade from, and no crossfade
+    # can close a seam whose two endpoints differ -- only moving the wrap point could, which
+    # would change the loop's period and therefore its pitch. Rather than disable the fade
+    # (measurably WORSE than shipping nothing: a ramp loop at loop_start=0 went from a
+    # 0.028 seam to 0.199), that case keeps the legacy forward blend. So: closure where it
+    # is achievable, never worse than 2.0.2 where it is not.
     var xfade = NZone_crossfade_length(zone);
     if (xfade > 0) {
         var lm0 = NZone_loop_mode(zone);
@@ -551,17 +578,27 @@ fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscr
         if (lm0 == LOOP_FORWARD) { do_xf = 1; }
         if (lm0 == LOOP_SUSTAIN) { do_xf = 1; }
         if (do_xf == 1) {
-            var loop_end_f = f64_from(eff_frames);
-            if (NZone_loop_end(zone) > 0) { loop_end_f = f64_from(NZone_loop_end(zone)); }
-            var xfade_f = f64_from(xfade);
-            var dist = f64_sub(loop_end_f, NSamplerVoice_position(voice));
-            if (f64_ge(dist, 0) == 1) {
-                if (f64_lt(dist, xfade_f) == 1) {
-                    var t = f64_div(dist, xfade_f);
-                    var xfade_pos = f64_add(f64_from(NZone_loop_start(zone)), f64_sub(xfade_f, dist));
-                    n_sample_read_stereo_interpolated(sample, xfade_pos, xscratch);
-                    sl = f64_add(f64_mul(sl, t), f64_mul(load64(xscratch), f64_sub(F64_ONE, t)));
-                    srr = f64_add(f64_mul(srr, t), f64_mul(load64(xscratch + 8), f64_sub(F64_ONE, t)));
+            var ls_i = NZone_loop_start(zone);
+            var le_i = eff_frames;
+            if (NZone_loop_end(zone) > 0) { le_i = NZone_loop_end(zone); }
+            var xf_i = xfade;
+            var loop_len = le_i - ls_i;
+            if (xf_i > loop_len) { xf_i = loop_len; }
+            if (xf_i > 0) {
+                var have_preroll = 0;
+                if (ls_i >= xf_i) { have_preroll = 1; }
+                var loop_end_f = f64_from(le_i);
+                var xfade_f = f64_from(xf_i);
+                var dist = f64_sub(loop_end_f, NSamplerVoice_position(voice));
+                if (f64_ge(dist, 0) == 1) {
+                    if (f64_lt(dist, xfade_f) == 1) {
+                        var t = f64_div(dist, xfade_f);
+                        var xfade_pos = f64_add(f64_from(ls_i), f64_sub(xfade_f, dist));
+                        if (have_preroll == 1) { xfade_pos = f64_sub(f64_from(ls_i), dist); }
+                        n_sample_read_stereo_interpolated(sample, xfade_pos, xscratch);
+                        sl = f64_add(f64_mul(sl, t), f64_mul(load64(xscratch), f64_sub(F64_ONE, t)));
+                        srr = f64_add(f64_mul(srr, t), f64_mul(load64(xscratch + 8), f64_sub(F64_ONE, t)));
+                    }
                 }
             }
         }

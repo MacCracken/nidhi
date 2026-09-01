@@ -110,6 +110,42 @@ fn eng_leak_bytes(nv, mode) {
 }
 
 
+# --- 2.0.3: loop crossfade seam ---
+# A 400-frame linear ramp is the right probe: with a CORRECT loop crossfade the seam is
+# exactly continuous, because the material preceding loop_start is what must follow
+# loop_end. Returns the largest frame-to-frame jump in the left channel across the wrap,
+# so a smaller number is a tighter seam. See docs/adr/0001-loop-crossfade-seam.md.
+fn xf_seam(xfade, ls, le) {
+    var e = n_engine_new(4, f64_from(44100));
+    var bank = n_engine_bank(e);
+    var d = vec_new();
+    var i = 0;
+    while (i < 400) { vec_push(d, f64_div(f64_from(i), f64_from(400))); i = i + 1; }
+    var sid = n_sample_bank_add(bank, n_sample_from_mono(d, 44100));
+    var inst = n_instrument_new(str_from("ramp"));
+    var z = n_zone_new(sid);
+    z = n_zone_with_key_range(z, 0, 127);
+    z = n_zone_with_root_note(z, 60);
+    z = n_zone_with_loop(z, LOOP_FORWARD, ls, le);
+    z = n_zone_with_crossfade(z, xfade);
+    n_instrument_add_zone(inst, z);
+    ignore(n_engine_set_instrument(e, inst));
+    ignore(n_engine_note_on(e, 60, 127));
+    var buf = vec_new();
+    var k = 0;
+    while (k < 1200) { vec_push(buf, 0); k = k + 1; }
+    n_engine_fill_buffer_stereo(e, buf, 1200);
+    var worst = 0;
+    var f = 20;
+    while (f < 590) {
+        var dlt = f64_abs(f64_sub(vec_get(buf, (f + 1) * 2), vec_get(buf, f * 2)));
+        if (f64_gt(dlt, worst) == 1) { worst = dlt; }
+        f = f + 1;
+    }
+    return f64_to(f64_mul(worst, f64_from(1000000)));
+}
+
+
 fn main() {
     alloc_init();
     var eps = f64_div(F64_ONE, f64_from(100));
@@ -327,6 +363,28 @@ fn main() {
     while (y < 128) { vec_push(sb, 0); y = y + 1; }
     n_engine_fill_buffer_stereo(eswap, sb, 128);
     assert(1, "instrument hot-swap to a smaller patch does not abort");
+
+    test_group("loop crossfade closes the seam (2.0.3)");
+    # Before 2.0.3 the fade-in source walked FORWARD from loop_start, so at the wrap it read
+    # loop_start + xfade while the next frame played loop_start: the click was attenuated but
+    # never closed. Measured 22999 then; the ramp's own per-frame step is ~2500, so 4000 is
+    # essentially a closed seam. Assert well inside both, so this cannot silently regress.
+    var seam = xf_seam(20, 100, 200);
+    assert(seam < 8000, "crossfaded seam is closed (was 22999 before 2.0.3)");
+    assert(seam > 0, "seam measurement is live, not a stuck zero");
+
+    # Control: with no crossfade the raw seam must be untouched by this change.
+    assert_eq(xf_seam(0, 100, 200), 99000, "no-crossfade seam unchanged");
+
+    # A crossfade longer than the loop used to be live from frame 0, so the loop's own
+    # material was never heard at full level. Now clamped to the loop length.
+    var seam_long = xf_seam(500, 100, 200);
+    assert(seam_long < 8000, "crossfade longer than the loop is clamped (was 19602)");
+
+    # No pre-roll before loop_start: a seam whose endpoints differ CANNOT be closed by any
+    # crossfade, so this keeps the legacy forward blend rather than disabling the fade.
+    # Disabling measured 199000 -- far worse than shipping nothing. Pin the no-regression.
+    assert_eq(xf_seam(20, 0, 200), 28000, "no-preroll case is no worse than 2.0.2");
 
     return assert_summary();
 }

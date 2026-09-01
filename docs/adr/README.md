@@ -19,4 +19,6 @@ Decisions about nidhi — what we chose, the context, and the consequences we ac
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+| ADR | Title | Status |
+|---|---|---|
+| [0001](0001-loop-crossfade-seam.md) | Loop crossfade reads its fade-in source backward from `loop_start` | Accepted |

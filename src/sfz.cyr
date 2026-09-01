@@ -157,7 +157,7 @@ fn sfz_f64(s, out) {
     if (i >= len) { return 0; }
 
     # inf / infinity / nan (case-insensitive) -- Rust accepts all three.
-    var rest = str_substr(s, i, len - i);
+    var rest = str_substr(s, i, len);
     if (str_eq_cstr(sfz_lower(rest), "inf") == 1) { return f64_parse_ok(str_cstr(s), out); }
     if (str_eq_cstr(sfz_lower(rest), "infinity") == 1) { return f64_parse_ok(str_cstr(s), out); }
     if (str_eq_cstr(sfz_lower(rest), "nan") == 1) { return f64_parse_ok(str_cstr(s), out); }

@@ -149,7 +149,7 @@ fn n_stretch_short(s, ratio) {
     var input = NTimeStretcher_input(s);
     var input_len = vec_len(input);
     var out = vec_new();
-    var target_len = f64_to(f64_round(f64_mul(f64_from(input_len), ratio)));
+    var target_len = f64_to(n_round_half_away(f64_mul(f64_from(input_len), ratio)));
     if (target_len == 0) { return out; }
     var i = 0;
     while (i < target_len) {
@@ -266,7 +266,7 @@ fn n_stretch(s, ratio) {
     }
 
     n_normalize_by_window_sum(output, window_sum);
-    var target_len = f64_to(f64_round(f64_mul(f64_from(input_len), ratio)));
+    var target_len = f64_to(n_round_half_away(f64_mul(f64_from(input_len), ratio)));
     var final_len = target_len;
     if (vec_len(output) < final_len) { final_len = vec_len(output); }
     vec_truncate(output, final_len);
@@ -330,7 +330,7 @@ fn n_stretch_ola(s, ratio) {
     }
 
     n_normalize_by_window_sum(output, window_sum);
-    var target_len = f64_to(f64_round(f64_mul(f64_from(input_len), ratio)));
+    var target_len = f64_to(n_round_half_away(f64_mul(f64_from(input_len), ratio)));
     var final_len = target_len;
     if (vec_len(output) < final_len) { final_len = vec_len(output); }
     vec_truncate(output, final_len);

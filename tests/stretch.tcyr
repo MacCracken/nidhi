@@ -107,6 +107,28 @@ fn main() {
     bs = n_stretcher_with_frame_size(bs, 512);
     assert_eq(NTimeStretcher_frame_size(bs), 512, "with_frame_size sets 512");
 
+    # --- 2.0.3: Rust .round() is half-AWAY-FROM-ZERO, Cyrius f64_round is half-to-EVEN ---
+    # Every oracle `.round()` sets a stretched buffer's target length, so an exact .5 product
+    # used to yield an output one frame shorter than Rust's.
+    test_group("round-half-away matches Rust f64::round (2.0.3)");
+    var h = F64_HALF;
+    assert_eq(f64_to(n_round_half_away(h)), 1, "0.5 -> 1 (f64_round gives 0)");
+    assert_eq(f64_to(n_round_half_away(f64_div(f64_from(3), f64_from(2)))), 2, "1.5 -> 2");
+    assert_eq(f64_to(n_round_half_away(f64_div(f64_from(5), f64_from(2)))), 3, "2.5 -> 3 (f64_round gives 2)");
+    assert_eq(f64_to(n_round_half_away(f64_div(f64_from(7), f64_from(2)))), 4, "3.5 -> 4");
+    assert_eq(f64_to(n_round_half_away(f64_neg(f64_div(f64_from(5), f64_from(2))))), 0 - 3, "-2.5 -> -3");
+    assert_eq(f64_to(n_round_half_away(f64_div(f64_from(24), f64_from(10)))), 2, "2.4 -> 2");
+    assert_eq(f64_to(n_round_half_away(f64_div(f64_from(26), f64_from(10)))), 3, "2.6 -> 3");
+    assert_eq(f64_to(n_round_half_away(f64_from(7))), 7, "exact integer unchanged");
+
+    # End to end: 5 frames at ratio 1.5 = 7.5 -> Rust rounds to 8, half-to-even gives 7.
+    var din = vec_new();
+    var i2 = 0;
+    while (i2 < 5) { vec_push(din, f64_div(f64_from(i2), f64_from(5))); i2 = i2 + 1; }
+    var stq = n_stretcher_new(din, f64_from(44100));
+    var outq = n_stretch(stq, f64_div(f64_from(3), f64_from(2)));
+    assert_eq(vec_len(outq), 8, "5 frames x1.5 -> 8 (was 7 before 2.0.3)");
+
     return assert_summary();
 }
 
