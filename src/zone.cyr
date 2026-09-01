@@ -13,14 +13,23 @@ var VEL_CURVE_SWITCH  = 3;
 
 # n_velocity_curve_apply(curve, vel) -> gain in 0..1 (f64 bits). vel is raw MIDI 0..127.
 # Linear: v; Convex: sqrt(v); Concave: v*v; Switch: 1.0 if vel>64 else 0.0 (raw vel, not v).
+#
+# The lower clamp is load-bearing, not defensive. Rust took `vel: u8`, so a negative
+# velocity was unrepresentable; the Cyrius port widened it to i64 and f64_sqrt of a
+# negative returns NaN -- which becomes a NaN amplitude, and a NaN sample latches the
+# SVF for the voice's whole life. The UPPER bound is deliberately NOT clamped: u8
+# legitimately spans 0..255 (gain up to 2.008) and n_zone_with_vel_range imposes no
+# ceiling either, so clamping high would diverge from the oracle.
 #inline
 #must_use
 fn n_velocity_curve_apply(curve, vel) {
+    var vc = vel;
+    if (vc < 0) { vc = 0; }
     if (curve == VEL_CURVE_SWITCH) {
-        if (vel > 64) { return F64_ONE; }
+        if (vc > 64) { return F64_ONE; }
         return 0;
     }
-    var v = f64_div(f64_from(vel), f64_from(127));
+    var v = f64_div(f64_from(vc), f64_from(127));
     if (curve == VEL_CURVE_CONVEX) { return f64_sqrt(v); }
     if (curve == VEL_CURVE_CONCAVE) { return f64_mul(v, v); }
     return v;

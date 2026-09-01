@@ -132,7 +132,13 @@ fn n_stretcher_new(input, sample_rate) {
     return s;
 }
 
+# A non-positive frame_size is rejected here rather than stored. The oracle took
+# `size: usize`, so negatives were unrepresentable; the i64 port made them reachable and
+# they do not merely misbehave -- they HANG. With frame_size = -1000, syn_hop is -500,
+# out_pos marches negative, and the sole loop exit (out_pos + frame_size > out_len) is
+# never true. Same everything-is-i64 domain loss as the velocity-curve clamp in zone.cyr.
 fn n_stretcher_with_frame_size(s, size) {
+    if (size <= 0) { return s; }
     NTimeStretcher_set_frame_size(s, size);
     return s;
 }
@@ -168,7 +174,7 @@ fn n_stretch(s, ratio) {
     var frame_size = NTimeStretcher_frame_size(s);
     var out = vec_new();
     if (input_len == 0) { return out; }
-    if (frame_size == 0) { return out; }
+    if (frame_size <= 0) { return out; }
     if (f64_le(ratio, 0) == 1) { return out; }
     if (n_is_finite(ratio) == 0) { return out; }
     if (input_len < frame_size) { return n_stretch_short(s, ratio); }
@@ -275,7 +281,7 @@ fn n_stretch_ola(s, ratio) {
     var frame_size = NTimeStretcher_frame_size(s);
     var out = vec_new();
     if (input_len == 0) { return out; }
-    if (frame_size == 0) { return out; }
+    if (frame_size <= 0) { return out; }
     if (f64_le(ratio, 0) == 1) { return out; }
     if (n_is_finite(ratio) == 0) { return out; }
     if (input_len < frame_size) { return n_stretch_short(s, ratio); }

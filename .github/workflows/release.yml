@@ -75,9 +75,28 @@ jobs:
 
       - name: Extract changelog
         # Pull the tagged section out of CHANGELOG.md for the release body.
+        #
+        # The previous pattern required a BRACKETED heading (`^## \[$TAG\]`),
+        # but no heading in this file has ever used brackets, so every
+        # release silently fell back to "No changelog entry". It also
+        # interpolated $TAG into a regex, where the dots in a version are
+        # metacharacters ("2.0.1" would match "2X0Y1").
+        #
+        # This compares the heading's version token LITERALLY, accepts
+        # bracketed or bare headings, and stops at the next `## ` heading.
+        # Literal comparison also means tag 2.0.1 does not match 2.0.10.
         run: |
           TAG="${GITHUB_REF_NAME}"
-          BODY=$(awk "/^## \\[$TAG\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
+          BODY=$(awk -v tag="$TAG" '
+            /^## / {
+              if (found) exit
+              v = $2
+              gsub(/^\[|\]$/, "", v)
+              if (v == tag) { found = 1 }
+              next
+            }
+            found { print }
+          ' CHANGELOG.md)
           [ -n "$BODY" ] || BODY="No changelog entry for $TAG."
           echo "$BODY" > /tmp/release-body.md
 

@@ -1,5 +1,158 @@
 # Changelog
 
+## 2.0.2 — 2026-08-31
+
+**P-1 audit and repair sweep.** A seven-lens adversarial audit (security, memory safety, oracle
+parity, numerics, error discipline, performance, hygiene) raised 54 findings; 46 survived
+independent refutation. This release fixes the security, memory-safety and correctness tier.
+
+Two of them could kill the host process from a small input file, and one made most WAVs silent.
+
+### Fixed — security
+
+- **SF2 allocation bomb (`src/sf2.cyr`).** `preset → pbag → ibag` was an un-memoized triple loop
+  over three attacker-declared u16 index fields, re-converting the *same* sample's PCM once per
+  triple, so memory grew as the **cube** of file size. A **7,322-byte** file reached
+  `vec: alloc failed → syscall(60,1)` — an unconditional `exit(1)` of the host (dhvani/shruti),
+  with no catchable error. Now memoized per `shdr` **and** capped at 65,536 zones; both halves
+  are load-bearing. Verified: the same file that killed the old binary under a 1 GB limit now
+  completes with a 1-entry bank and 9 MB of heap.
+- **Unbounded read loop (`src/io.cyr`).** `alloc`'s 2 GiB ceiling rejects with `>` not `>=`, so
+  the doubling chain reached 2^32, `alloc` returned 0, and `memcpy(0, buf, 2147483648)`
+  segfaulted. **No large file was needed** — `n_read_file("/dev/zero", …)` reached it, and
+  `n_stream_reader_open` is public, steerable by an SFZ `default_path` + `sample=` pair.
+- **SFZ numeric parsing (`src/sfz.cyr`).** Integer opcodes accumulated into an i64 and wrapped
+  silently: `group=9223372036854775808` became `i64::MIN` and reached `vec_get` as a negative
+  index — `exit(1)` from a **47-byte** file. Overflow is now rejected (or saturated where Rust's
+  `parse::<usize>()` genuinely accepts the value), `sfz_u8` rejects negatives, and `group` /
+  `seq_position` / loop points / `offset` / `end` / `tune` / `transpose` parse at the oracle's
+  own widths via new `sfz_u32` / `sfz_i32`.
+- **Group index bound (`src/instrument.cyr`).** Round-robin groups index `rr_counters` directly,
+  so the group number doubled as an allocation size. `group=300000000` — a valid u32 the oracle
+  accepts — asked for ~4 GB and hit `vec: capacity overflow`. Groups now cap at 4096; above that
+  a zone imports as ungrouped.
+
+### Fixed — memory safety
+
+- **The render path allocated on every frame.** `n_engine_next_sample_stereo` called `alloc(16)`
+  three times per frame and `n_engine_next_sample` a fourth: **48 B/frame stereo = 2,116,800 B/s**
+  at 44.1 kHz, never reclaimed, because `lib/alloc.cyr` is a bump allocator with a no-op free.
+  The endgame was not a leak but memory *unsafety* — once `alloc` returns 0 the render path
+  `store64`s through a null pointer inside the audio callback. Now four per-engine slots
+  allocated once in `n_engine_new`. `tests/engine.tcyr` asserts an `alloc_used()` delta of
+  **exactly 0** across 20 blocks at 8 and 64 voices, filtered and unfiltered.
+- **Allocating SVF on the hot path.** Low-pass voices now use naad's
+  `filter_svf_process_sample_lowpass`; the one-shot API allocated an `SvfOutput` per channel per
+  voice per sample (22.6 MB/s at 8 voices, 180 MB/s at 64). naad's own header says the hot path
+  must use this form. Integrator writes are identical, so filter state evolves bit-for-bit.
+- **Reverb allocated per sample** (`src/effect_chain.cyr`) — 1,411,200 B/s. Now routed through
+  `reverb_process_core` with one reused scratch, which is exactly what the wrapper did anyway.
+- **Recorder buffer aliasing** (`src/capture.cyr`). Rust *moved* the buffer out of `finish()`;
+  the port aliased it, so `finish()` then `clear()` left the Sample claiming N frames over an
+  empty vec (`exit(1)` on the next read) — and the non-crashing shape was worse, silently playing
+  the *new* take's audio under the old frame count. `finish()` now consumes the recording.
+- **Stale zone index across a live instrument swap** (`src/engine.cyr`). Hot-swapping an 8-zone
+  patch to a 1-zone patch on a sustaining note indexed the new vec out of bounds → `exit(1)`
+  mid-render. The voice now deactivates, mirroring the existing sample guard.
+- **Voice-count desync** — naad clamps `max_voices` to ≥1, nidhi did not, so `n_engine_new(0, sr)`
+  built 0 nidhi voices against naad's 1 and the first `note_on` indexed an empty vec.
+- **Negative error codes laundered into pointers.** `n_load_wav` and `sf2_parse` return negative
+  codes; `== 0` guards let them through into `NSample_frames(-5)` — a wild read in the audio
+  callback. `n_sample_bank_add` now rejects them at the trust boundary, and the `== 0` guards in
+  `engine.cyr` / `effect_chain.cyr` became `<= 0`.
+
+### Fixed — correctness
+
+- **Integer-PCM WAVs decoded to silence** (carried over from 2.0.1's known list). nidhi never
+  called `shravan_init_constants()`, so all 17 of shravan's f64 constants were the bit pattern 0
+  — which is `+0.0`. The little-endian converters *multiply* by them, so every 8/16/24/32-bit
+  integer PCM file decoded to pure silence; the big-endian converters *divide* by them, so an
+  AIFF returned a **successful** Sample whose every frame was ±inf/NaN. A new idempotent
+  `n_init()` runs from every public entry point. `tests/io.tcyr` now asserts decoded *values*
+  for I8/I16/I24/I32 — the old fixtures were all `PCM_F32`, the one format needing no constant,
+  which is exactly why this was invisible.
+- **The streaming reader truncated every file over ~4 KB to its first 1013 frames.** It fed
+  shravan in 4096-byte slices, but that decoder is buffer-then-decode-once and `wav_decode`
+  clamps the declared size to what is present — so the first slice decoded as a *complete* WAV
+  and every later feed was ignored. `total_frames` stayed correct, so the reader disagreed with
+  itself. Now feeds the whole remainder.
+- **`n_normalize_peak` amplified near-silence** (`src/capture.cyr`). Rust scales only when
+  `peak > 1e-10`; naad guards only `peak > 0`. A 1e-12 peak was amplified ×1e12, and a
+  *denormal* peak made `1.0/peak` overflow to **+inf**, writing non-finite values into sample
+  data — an inf/NaN injection site inside nidhi with no foreign decoder involved.
+- **Non-finite samples now stopped at the decode boundary.** One NaN frame latches the SVF and
+  poisons a voice for its whole life.
+- **SFZ float opcodes accepted trailing garbage.** `f64_parse_ok` succeeds on a prefix, so
+  `cutoff=1000Hz` low-passed every note at 1 kHz where the oracle disables the filter, and
+  `ampeg_attack=10ms` became `attack_samples=441000` — a **ten-second fade-in on every note**
+  where the oracle applies no envelope at all. Now whole-token validated, still accepting
+  `.5`, `5.`, `+3`, `1e1`, `inf`, `NaN` as Rust does.
+- **`f64_to` overflow inverted long envelopes.** It is a raw `cvttsd2si` returning `i64::MIN`
+  out of range, which collapses to 0 — so an "infinite" attack/release became *instantaneous*, a
+  click. Saturated to u32 range at all three live sites.
+- **Sub-1 Hz sample rates hung voices forever.** A denormal `sample_rate` (most plausibly a raw
+  i64 `44100` passed where an f64 bit pattern was expected, which reads as 2.18e-319) made the
+  release time `+inf`; naad accepts that, and the voice never reached IDLE. Routed into the
+  existing fallback — *without* clamping the input, so the oracle-parity behaviour that
+  `tests/envelope.tcyr` pins for finite rates is unchanged.
+- **Negative velocity produced NaN** — `f64_sqrt` of a negative. Rust's `u8` made it
+  unrepresentable; the i64 port did not. Lower bound clamped; the upper bound deliberately is
+  not, since u8 legitimately spans 0..255.
+- **Negative `frame_size` hung `n_stretch` forever** — `out_pos` marched negative and the sole
+  loop exit was never reachable.
+- **`n_engine_set_release_ms` mutated a shared config in place**, rewriting the caller's own
+  object and every zone handed the same pointer. Rust's `set_adsr` takes the config by value.
+
+### Changed — BREAKING
+
+- **`ERR_*` → `NIDHI_ERR_*`.** In the flat concatenated bundle a bare `ERR_NONE` collided three
+  ways — nidhi, `lib/goonj.cyr`, and shravan's `enum ShravanErr`. All were `0`, so nothing
+  misbehaved, which is precisely the hazard: Cyrius warns on a duplicate `fn` and is **silent**
+  on a duplicate `var`, so the clash stays invisible until one side renumbers. naad escaped the
+  same trap in 2.2.0. `docs/port/26-mod-io-bench.md` specified `NIDHI_ERR_IMPORT` from the start.
+  Consumers must update; dhvani is coordinated separately and shruti is not yet ported.
+- **`src/sf2.cyr` no longer returns raw magic literals.** All 15 (`-1`..`-3`, `-6`..`-15`) now
+  return `NIDHI_ERR_IMPORT`. Three were bit-identical to codes from a *different* taxonomy, so
+  handing a WAV to the SF2 importer reported "invalid parameter" and a truncated file reported
+  "sample not found". rust-old returns `ImportError` for all 19 corresponding sites.
+
+### Performance
+
+- `fill_buffer_stereo_filtered_8v` **2.247 → ~2.0 ms (−12 %)**, from the alloc-free low-pass
+  path. Cumulative since the 6.3.34 baseline: 2.592 → 2.0 ms, ~22 %.
+- `n_trim_silence` now short-circuits both scans. The oracle uses `.find()` / `.rev().find()`;
+  the port kept walking the whole buffer after finding its frame.
+- Everything else is within run-to-run noise. See `BENCHMARKS.md` and `bench-history.csv`.
+
+### Quality
+- **14 suites / 378 assertions / 0 failures**, up from 313 — the new coverage is concentrated
+  exactly where the defects were invisible: `io.tcyr` 18 → 48, `sfz.tcyr` 63 → 90,
+  `engine.tcyr` 29 → 37.
+- **Zero `#must_use` warnings**, down from 28 after the four new annotations landed.
+- Fuzz 2/2, `cyrius distlib --check` current.
+- `error.cyr` and `f64_util.cyr` are now included by every test/bench/fuzz file, as the
+  documented module-order convention always required.
+
+### Fixed — CI
+- `.github/workflows/ci.yml` and `release.yml` built `src/main.cyr`, a binary-project scaffold
+  path that has never existed here — CI was red. Both now derive `[build].entry` / `[build].output`
+  from `cyrius.cyml`, the same way they already derive the toolchain pin.
+- `release.yml`'s changelog extraction required a **bracketed** heading (`^## \[$TAG\]`), which
+  no heading in this file has ever used, so every release fell back to "No changelog entry". It
+  also interpolated the tag into a regex, where a version's dots are metacharacters. It now
+  compares the heading's version token literally and accepts either form.
+- `release.yml` gained a `cyrius distlib --check` gate so a release cannot ship a `dist/nidhi.cyr`
+  that disagrees with `src/`.
+
+### Deferred
+Real but out of scope for a patch release: the voice-major block render (measured *worse* than
+frame-major at ≥8 voices without invariant hoisting), the streaming-reader restructure, WSOLA's
+cross-correlation rewrite, the loop-crossfade seam (`xfade_pos` cannot close the loop, and
+`crossfade_length` is unclamped against the loop length — both character-identical to rust-old,
+both output-changing, and **there is no crossfade test or benchmark today**), per-note-on
+allocation, `fill_buses_stereo`, and the `n_`/`N` prefix sweep over the remaining 100 top-level
+names (currently zero measured collisions).
+
 ## 2.0.1 — 2026-08-31
 
 Toolchain and dependency catch-up. **No functional change to nidhi's own behaviour** — the only

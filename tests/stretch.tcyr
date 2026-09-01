@@ -1,5 +1,6 @@
 # stretch.tcyr -- parity tests for src/stretch.cyr (ports rust-old/src/stretch.rs #[test]s).
 
+include "src/error.cyr"
 include "src/f64_util.cyr"
 include "src/stretch.cyr"
 

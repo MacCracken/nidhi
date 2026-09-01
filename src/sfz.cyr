@@ -45,7 +45,13 @@ fn sfz_int(s, out) {
         var c = load8(data + i);
         if (c < 48) { return 0; }
         if (c > 57) { return 0; }
+        # Reject rather than wrap. Rust's parse::<i32>/<i64> returns Err on overflow; the
+        # port accumulated into an i64 and silently wrapped, so `group=9223372036854775808`
+        # became i64::MIN and reached vec_get as a negative index -> exit(1), and
+        # `lovel=9223372036854775808` produced negative bounds that matched no note at all.
+        if (val > 922337203685477580) { return 0; }
         val = val * 10 + (c - 48);
+        if (val < 0) { return 0; }
         any = 1;
         i = i + 1;
     }
@@ -64,15 +70,25 @@ fn sfz_uint(s, out) {
     if (load8(data) == 43) { i = 1; }
     var val = 0;
     var any = 0;
+    var over = 0;
     while (i < len) {
         var c = load8(data + i);
         if (c < 48) { return 0; }
         if (c > 57) { return 0; }
-        val = val * 10 + (c - 48);
+        # Saturate, do not wrap. Rust's parse::<usize>() genuinely ACCEPTS values above
+        # i64::MAX on this target (up to u64::MAX), so rejecting them outright would break
+        # parity in the other direction; anything that large is clamped to i64::MAX, which
+        # every downstream range check then rejects on its own terms.
+        if (val > 922337203685477580) { over = 1; }
+        if (over == 0) {
+            val = val * 10 + (c - 48);
+            if (val < 0) { over = 1; }
+        }
         any = 1;
         i = i + 1;
     }
     if (any == 0) { return 0; }
+    if (over == 1) { val = 9223372036854775807; }
     store64(out, val);
     return 1;
 }
@@ -80,12 +96,113 @@ fn sfz_uint(s, out) {
 # parse a u8 (Rust parse::<u8>: unsigned, 0..=255). Returns 0 (unparseable) if out of range.
 fn sfz_u8(s, out) {
     if (sfz_uint(s, out) == 0) { return 0; }
+    # The `< 0` half was missing: sfz_uint used to wrap, so a huge token arrived negative
+    # and sailed past a `> 255` test unchallenged.
+    if (load64(out) < 0) { return 0; }
     if (load64(out) > 255) { return 0; }
     return 1;
 }
 
+# ASCII-lowercase a Str into a fresh Str (for the inf/nan spellings Rust accepts).
+fn sfz_lower(s) {
+    var len = str_len(s);
+    var data = str_data(s);
+    var buf = alloc(len + 1);
+    if (buf == 0) { return s; }
+    var i = 0;
+    while (i < len) {
+        var c = load8(data + i);
+        if (c >= 65) { if (c <= 90) { c = c + 32; } }
+        store8(buf + i, c);
+        i = i + 1;
+    }
+    return str_new(buf, len);
+}
+
+# parse a u32 (Rust parse::<u32>: 0..=4294967295).
+fn sfz_u32(s, out) {
+    if (sfz_uint(s, out) == 0) { return 0; }
+    if (load64(out) < 0) { return 0; }
+    if (load64(out) > 4294967295) { return 0; }
+    return 1;
+}
+
+# parse an i32 (Rust parse::<i32>: -2147483648..=2147483647).
+fn sfz_i32(s, out) {
+    if (sfz_int(s, out) == 0) { return 0; }
+    if (load64(out) < (0 - 2147483648)) { return 0; }
+    if (load64(out) > 2147483647) { return 0; }
+    return 1;
+}
+
 # parse a Str as f64. Returns 1 + writes bits to out, or 0.
+#
+# f64_parse_ok stops at the first character it cannot use and reports success on the
+# prefix, so every float opcode used to accept trailing garbage that Rust's
+# parse::<f32>() rejects outright. That is not cosmetic: `cutoff=1000Hz` low-passed
+# every note at 1 kHz where the oracle disables the filter entirely, and
+# `ampeg_attack=10ms` became attack_samples=441000 -- a TEN-SECOND fade-in on every
+# note where the oracle applies no per-zone envelope at all.
+#
+# Validate the WHOLE token first: [+-]? ( digits [. digits?] | . digits ) ( [eE] [+-]? digits )?
+# Rust also accepts inf / infinity / nan, case-insensitively, so those pass through.
 fn sfz_f64(s, out) {
+    var len = str_len(s);
+    if (len == 0) { return 0; }
+    var data = str_data(s);
+    var i = 0;
+    var c0 = load8(data);
+    if (c0 == 43) { i = 1; }
+    if (c0 == 45) { i = 1; }
+    if (i >= len) { return 0; }
+
+    # inf / infinity / nan (case-insensitive) -- Rust accepts all three.
+    var rest = str_substr(s, i, len - i);
+    if (str_eq_cstr(sfz_lower(rest), "inf") == 1) { return f64_parse_ok(str_cstr(s), out); }
+    if (str_eq_cstr(sfz_lower(rest), "infinity") == 1) { return f64_parse_ok(str_cstr(s), out); }
+    if (str_eq_cstr(sfz_lower(rest), "nan") == 1) { return f64_parse_ok(str_cstr(s), out); }
+
+    var digits = 0;
+    while (i < len) {
+        var c = load8(data + i);
+        if (c < 48) { break; }
+        if (c > 57) { break; }
+        digits = digits + 1;
+        i = i + 1;
+    }
+    if (i < len) {
+        if (load8(data + i) == 46) {
+            i = i + 1;
+            while (i < len) {
+                var cf = load8(data + i);
+                if (cf < 48) { break; }
+                if (cf > 57) { break; }
+                digits = digits + 1;
+                i = i + 1;
+            }
+        }
+    }
+    if (digits == 0) { return 0; }
+    if (i < len) {
+        var ce = load8(data + i);
+        if (ce != 101) { if (ce != 69) { return 0; } }
+        i = i + 1;
+        if (i < len) {
+            var cs = load8(data + i);
+            if (cs == 43) { i = i + 1; }
+            if (cs == 45) { i = i + 1; }
+        }
+        var edig = 0;
+        while (i < len) {
+            var cx = load8(data + i);
+            if (cx < 48) { return 0; }
+            if (cx > 57) { return 0; }
+            edig = edig + 1;
+            i = i + 1;
+        }
+        if (edig == 0) { return 0; }
+    }
+    if (i != len) { return 0; }
     return f64_parse_ok(str_cstr(s), out);
 }
 
@@ -288,17 +405,17 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "lovel") == 1) { if (sfz_u8(value, o) == 1) { NSfzRegion_set_lovel(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "hivel") == 1) { if (sfz_u8(value, o) == 1) { NSfzRegion_set_hivel(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "pitch_keycenter") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_pitch_keycenter(r, n); } return 0; }
-    if (str_eq_cstr(key, "tune") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_tune(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "tune") == 1) { if (sfz_i32(value, o) == 1) { NSfzRegion_set_tune(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "volume") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_volume(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "pan") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pan(r, f64_min(f64_max(load64(o), f64_neg(f64_from(100))), f64_from(100))); } return 0; }
     if (str_eq_cstr(key, "loop_mode") == 1) { NSfzRegion_set_loop_mode(r, value); return 0; }
     if (str_eq_cstr(key, "loopmode") == 1) { NSfzRegion_set_loop_mode(r, value); return 0; }
-    if (str_eq_cstr(key, "loop_start") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loopstart") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loop_end") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loopend") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "seq_position") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "group") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loop_start") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loopstart") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loop_end") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loopend") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "seq_position") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "group") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "ampeg_attack") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_attack(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "ampeg_decay") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_decay(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "ampeg_sustain") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_sustain(r, f64_min(f64_max(load64(o), 0), f64_from(100))); } return 0; }
@@ -310,9 +427,9 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "fileg_sustain") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_sustain(r, f64_min(f64_max(load64(o), 0), f64_from(100))); } return 0; }
     if (str_eq_cstr(key, "fileg_release") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_release(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fileg_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_depth(r, f64_min(f64_max(load64(o), f64_neg(f64_from(9600))), f64_from(9600))); } return 0; }
-    if (str_eq_cstr(key, "transpose") == 1) { if (sfz_int(value, o) == 1) { NSfzRegion_set_transpose(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "offset") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_offset(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "end") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "transpose") == 1) { if (sfz_i32(value, o) == 1) { NSfzRegion_set_transpose(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "offset") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_offset(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "end") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_end(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fil_resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fil_type") == 1) { NSfzRegion_set_fil_type(r, value); return 0; }

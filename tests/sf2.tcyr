@@ -1,6 +1,8 @@
 # sf2.tcyr -- parity tests for src/sf2.cyr (ports rust-old/src/sf2.rs #[test]s).
 # Builds minimal SF2 blobs with a byte-builder (chunk-size backpatching) and parses them.
 
+include "src/error.cyr"
+include "src/f64_util.cyr"
 include "src/loop_mode.cyr"
 include "src/zone.cyr"
 include "src/sample.cyr"

@@ -1,5 +1,7 @@
 # instrument.tcyr -- parity tests for src/instrument.cyr (ports rust-old/src/instrument.rs #[test]s).
 
+include "src/error.cyr"
+include "src/f64_util.cyr"
 include "src/loop_mode.cyr"
 include "src/zone.cyr"
 include "src/instrument.cyr"

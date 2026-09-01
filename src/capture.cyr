@@ -1,7 +1,7 @@
 # capture.cyr -- sample recording, silence trim, normalization, loop detection
 # Requires: alloc, vec, math, sample (NSample_*), naad (naad_normalize, naad_rms)
 #
-# Ports rust-old/src/capture.rs. "Use naad fully": normalize_peak -> naad_normalize(buffer)
+# Ports rust-old/src/capture.rs. "Use naad fully": normalize_peak -> guarded peak scale (1e-10 floor)
 # (scale peak to 1.0 in place), normalize_rms -> naad_rms(buffer) + scale. trim_silence and
 # detect_loop_points are nidhi-specific and ported directly.
 
@@ -47,10 +47,20 @@ fn n_recorder_clear(r) {
     return 0;
 }
 
-# finish() -> NSample owning the recorded buffer.
+# finish() -> NSample owning the recorded buffer. CONSUMES the recording: the recorder
+# is left with a fresh empty buffer, mirroring Rust's `fn finish(self)`.
+#
+# The hand-off is not cosmetic. Rust MOVED the buffer out; the port aliased it, so the
+# returned Sample and the still-live recorder shared one vec while NSample_frames stayed
+# a snapshot. finish() then clear() left the Sample claiming N frames over an empty vec
+# -- `vec: index out of bounds`, exit(1), on the next read. The non-crashing shape is
+# worse: clear() then a LONGER write() left the old Sample silently playing the NEW
+# take's audio. It also stopped n_normalize_peak / n_trim_silence from rewriting the
+# recorder's live buffer behind its back.
 #must_use
 fn n_recorder_finish(r) {
     var buffer = NSampleRecorder_buffer(r);
+    NSampleRecorder_set_buffer(r, vec_new());
     var sr = NSampleRecorder_sample_rate(r);
     if (NSampleRecorder_channels(r) == 2) {
         return n_sample_from_stereo(buffer, sr);
@@ -74,41 +84,38 @@ fn n_trim_silence(sample, threshold) {
     if (frames == 0) { return 0; }
     var data = NSample_data(sample);
 
+    # Both scans exit on the first hit. The flag-guarded form these replace kept walking
+    # the whole buffer after finding its frame -- a port regression, since the oracle uses
+    # .find() / .rev().find(), which short-circuit. Same result, O(silence) not O(buffer).
     var start = frames;
-    var found_start = 0;
     var f = 0;
     while (f < frames) {
-        if (found_start == 0) {
-            var c = 0;
-            var nonsilent = 0;
-            while (c < ch) {
-                if (f64_gt(f64_abs(vec_get(data, f * ch + c)), thr) == 1) { nonsilent = 1; }
-                c = c + 1;
-            }
-            if (nonsilent == 1) {
-                start = f;
-                found_start = 1;
-            }
+        var c = 0;
+        var nonsilent = 0;
+        while (c < ch) {
+            if (f64_gt(f64_abs(vec_get(data, f * ch + c)), thr) == 1) { nonsilent = 1; }
+            c = c + 1;
+        }
+        if (nonsilent == 1) {
+            start = f;
+            break;
         }
         f = f + 1;
     }
 
     var end = 0;
-    var found_end = 0;
     var g = frames;
     while (g > 0) {
         g = g - 1;
-        if (found_end == 0) {
-            var c2 = 0;
-            var ns2 = 0;
-            while (c2 < ch) {
-                if (f64_gt(f64_abs(vec_get(data, g * ch + c2)), thr) == 1) { ns2 = 1; }
-                c2 = c2 + 1;
-            }
-            if (ns2 == 1) {
-                end = g + 1;
-                found_end = 1;
-            }
+        var c2 = 0;
+        var ns2 = 0;
+        while (c2 < ch) {
+            if (f64_gt(f64_abs(vec_get(data, g * ch + c2)), thr) == 1) { ns2 = 1; }
+            c2 = c2 + 1;
+        }
+        if (ns2 == 1) {
+            end = g + 1;
+            break;
         }
     }
 
@@ -131,9 +138,30 @@ fn n_trim_silence(sample, threshold) {
     return 0;
 }
 
-# --- normalize_peak: scale so loudest |sample| -> 1.0 (via naad) ---
+# --- normalize_peak: scale so loudest |sample| -> 1.0, with a near-silence floor ---
+#
+# NOT naad_normalize. naad guards only `peak > 0`, which is too weak in two ways that
+# both bite here. Rust (rust-old/src/capture.rs:116-125) scales only when peak > 1e-10:
+#   (a) a peak of 1e-12 was being amplified x1e12 to full scale -- turning room tone
+#       into a wall of noise where the oracle deliberately leaves the buffer alone;
+#   (b) worse, a DENORMAL peak (4.94e-324) makes 1.0/peak overflow to +inf, writing
+#       +/-inf straight into the sample data. That is a non-finite injection site inside
+#       nidhi with no foreign decoder involved, and it reaches the SVF, which latches.
+# The 1e-10 epsilon matches n_normalize_rms below, which has always had it.
 fn n_normalize_peak(sample) {
-    naad_normalize(NSample_data(sample));
+    var data = NSample_data(sample);
+    var n = vec_len(data);
+    if (n == 0) { return 0; }
+    var peak = naad_peak(data);
+    var eps = f64_div(F64_ONE, f64_from(10000000000));
+    if (f64_gt(peak, eps) == 1) {
+        var gain = f64_div(F64_ONE, peak);
+        var i = 0;
+        while (i < n) {
+            vec_set(data, i, f64_mul(vec_get(data, i), gain));
+            i = i + 1;
+        }
+    }
     return 0;
 }
 

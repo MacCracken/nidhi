@@ -243,9 +243,17 @@ fn n_sample_bank_new() {
     return b;
 }
 
-# add(sample) -> id (= length BEFORE push). sample is a NSample pointer.
+# add(sample) -> id (= length BEFORE push), or NIDHI_ERR_INVALID_PARAMETER if `sample`
+# is not a valid pointer. sample is a NSample pointer.
+#
+# The guard is the bank's trust boundary. n_load_wav returns NIDHI_ERR_IMPORT (-5) on
+# failure, and a caller that forwards that straight in used to have it STORED as a
+# sample: n_sample_bank_get would hand -5 back, engine.cyr's `== 0` guard would not
+# fire, and NSample_frames(-5) is a wild load in the audio callback. Reject negatives
+# and 0 here rather than trusting every call site to check first.
 #must_use
 fn n_sample_bank_add(bank, sample) {
+    if (sample <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
     var samples = NSampleBank_samples(bank);
     var id = vec_len(samples);
     vec_push(samples, sample);

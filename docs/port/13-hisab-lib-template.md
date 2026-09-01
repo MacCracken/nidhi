@@ -219,10 +219,15 @@ Conventions:
 - Or, for constructor-style functions, return a pointer (nonzero) on success and `0` on
   failure (see `cmat_new` returning `0` on bad dims).
 - f64 tolerance constants (`EPSILON_F64`) live in `error.cyr` and are reused everywhere.
-- **nidhi mapping:** the 5 `NidhiError` variants become integer codes, e.g.
-  `ERR_SAMPLE_NOT_FOUND = (0 - 1)`, `ERR_INVALID_ZONE = (0 - 2)`,
-  `ERR_INVALID_PARAMETER = (0 - 3)`, `ERR_PLAYBACK = (0 - 4)`, `ERR_IMPORT = (0 - 5)`.
+- **nidhi mapping:** the 5 `NidhiError` variants become integer codes. As of 2.0.2 these carry a
+  mandatory `NIDHI_` prefix — `NIDHI_ERR_SAMPLE_NOT_FOUND = (0 - 1)`,
+  `NIDHI_ERR_INVALID_ZONE = (0 - 2)`, `NIDHI_ERR_INVALID_PARAMETER = (0 - 3)`,
+  `NIDHI_ERR_PLAYBACK = (0 - 4)`, `NIDHI_ERR_IMPORT = (0 - 5)`, plus `NIDHI_ERR_NONE = 0`.
   The string payloads in the Rust enum are dropped (no error strings; the code is the error).
+  ⚠ The bare `ERR_*` form shown in the snippet above is the *hisab* template's own naming; do not
+  copy it into a sibling library. In the flat concatenated bundle a bare `ERR_NONE` collides with
+  `lib/goonj.cyr` and shravan's `enum ShravanErr`, and Cyrius does **not** warn on a duplicate
+  `var`. Prefix every error constant with the library's own name.
 
 ### 5d. f64 helpers (from `f64_util.cyr`)
 

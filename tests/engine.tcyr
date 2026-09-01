@@ -3,6 +3,7 @@
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
+include "src/error.cyr"
 include "src/f64_util.cyr"
 include "src/loop_mode.cyr"
 include "src/envelope.cyr"
@@ -10,6 +11,10 @@ include "src/zone.cyr"
 include "src/sample.cyr"
 include "src/instrument.cyr"
 include "src/engine.cyr"
+
+# Explicitly discard a #must_use result the test does not need. Naming the intent beats
+# leaving a permanent warning that trains everyone to ignore the diagnostic.
+fn ignore(v) { return 0; }
 
 fn make_sine(freq, n) {
     var v = vec_new();
@@ -61,9 +66,49 @@ fn sum_abs(e, n) {
 
 fn run_samples(e, n) {
     var i = 0;
-    while (i < n) { n_engine_next_sample(e); i = i + 1; }
+    while (i < n) { ignore(n_engine_next_sample(e)); i = i + 1; }
     return 0;
 }
+
+# --- 2.0.2 regression harness: the render path must allocate NOTHING ---
+# Before 2.0.2, n_engine_next_sample_stereo did three alloc(16) per FRAME and
+# n_engine_next_sample a fourth: 48 B/frame stereo = 2,116,800 B/s at 44.1 kHz, none of
+# it ever reclaimed (lib/alloc.cyr is a bump allocator with a no-op free). The endgame is
+# memory UNSAFETY, not just growth -- once alloc() returns 0 the render path store64's
+# through a null pointer inside the audio callback. naad's allocating one-shot SVF added
+# another 32 B per channel per voice per sample on top.
+fn eng_leak_build(nv, mode) {
+    var e = n_engine_new(nv, f64_from(44100));
+    var bank = n_engine_bank(e);
+    var data = vec_new();
+    var i = 0;
+    while (i < 8820) { vec_push(data, f64_div(f64_from(i % 100), f64_from(200))); i = i + 1; }
+    var sid = n_sample_bank_add(bank, n_sample_from_mono(data, 44100));
+    var inst = n_instrument_new(str_from("leak"));
+    var z = n_zone_new(sid);
+    z = n_zone_with_key_range(z, 0, 127);
+    if (mode >= 0) {
+        z = n_zone_with_filter(z, f64_from(2000), 0);
+        z = n_zone_with_filter_type(z, mode);
+    }
+    n_instrument_add_zone(inst, z);
+    n_engine_set_instrument(e, inst);
+    return e;
+}
+
+fn eng_leak_bytes(nv, mode) {
+    var e = eng_leak_build(nv, mode);
+    ignore(n_engine_note_on(e, 60, 100));
+    var buf = vec_new();
+    var i = 0;
+    while (i < 1024) { vec_push(buf, 0); i = i + 1; }
+    n_engine_fill_buffer_stereo(e, buf, 1024);
+    var before = alloc_used();
+    var b = 0;
+    while (b < 20) { n_engine_fill_buffer_stereo(e, buf, 1024); b = b + 1; }
+    return alloc_used() - before;
+}
+
 
 fn main() {
     alloc_init();
@@ -78,14 +123,14 @@ fn main() {
 
     test_group("note_off releases");
     var e2 = make_engine();
-    n_engine_note_on(e2, 69, 100);
+    ignore(n_engine_note_on(e2, 69, 100));
     n_engine_note_off(e2, 69);
     run_samples(e2, 44100);
     assert_eq(n_engine_active_voice_count(e2), 0, "voice released");
 
     test_group("pitch shift");
     var e3 = make_engine();
-    n_engine_note_on(e3, 81, 100);
+    ignore(n_engine_note_on(e3, 81, 100));
     var buf3 = vec_new();
     var z3 = 0; while (z3 < 4410) { vec_push(buf3, 0); z3 = z3 + 1; }
     n_engine_fill_buffer(e3, buf3, 4410);
@@ -101,7 +146,7 @@ fn main() {
     test_group("adsr shapes output");
     var e5 = make_engine();
     n_engine_set_adsr(e5, n_adsr_config_new(100, 100, F64_HALF, 100));
-    n_engine_note_on(e5, 69, 127);
+    ignore(n_engine_note_on(e5, 69, 127));
     var first5 = f64_abs(n_engine_next_sample(e5));
     run_samples(e5, 49);
     var mid5 = f64_abs(n_engine_next_sample(e5));
@@ -113,7 +158,7 @@ fn main() {
     zp = n_zone_with_root_note(zp, 69);
     zp = n_zone_with_pan(zp, F64_ONE);
     var e6 = make_engine_with_zone(zp);
-    n_engine_note_on(e6, 69, 127);
+    ignore(n_engine_note_on(e6, 69, 127));
     var suml = 0; var sumr = 0; var o6 = alloc(16); var i6 = 0;
     while (i6 < 1000) {
         n_engine_next_sample_stereo(e6, o6);
@@ -143,15 +188,15 @@ fn main() {
     zb = n_zone_with_filter(zb, f64_from(100), 0);
     var instb = n_instrument_new(str_from("b")); n_instrument_add_zone(instb, zb);
     var eb = n_engine_new(1, srf); n_engine_set_bank(eb, bankb); n_engine_set_instrument(eb, instb);
-    n_engine_note_on(ea, 69, 127);
-    n_engine_note_on(eb, 69, 127);
+    ignore(n_engine_note_on(ea, 69, 127));
+    ignore(n_engine_note_on(eb, 69, 127));
     var sum_un = sum_abs(ea, 1000);
     var sum_fil = sum_abs(eb, 1000);
     assert_eq(f64_lt(sum_fil, sum_un), 1, "LP filter reduces energy");
 
     test_group("fill_buffer_stereo");
     var e8 = make_engine();
-    n_engine_note_on(e8, 69, 100);
+    ignore(n_engine_note_on(e8, 69, 100));
     var buf8 = vec_new(); var z8 = 0; while (z8 < 200) { vec_push(buf8, 0); z8 = z8 + 1; }
     n_engine_fill_buffer_stereo(e8, buf8, 200);
     var any8 = 0; var i8 = 0;
@@ -160,8 +205,8 @@ fn main() {
 
     test_group("all_notes_off");
     var e9 = make_engine();
-    n_engine_note_on(e9, 69, 100);
-    n_engine_note_on(e9, 72, 100);
+    ignore(n_engine_note_on(e9, 69, 100));
+    ignore(n_engine_note_on(e9, 72, 100));
     assert_eq(n_engine_active_voice_count(e9), 2, "2 voices");
     n_engine_all_notes_off(e9);
     run_samples(e9, 44100);
@@ -173,7 +218,7 @@ fn main() {
     z10 = n_zone_with_root_note(z10, 69);
     z10 = n_zone_with_adsr(z10, n_adsr_config_new(500, 0, F64_ONE, 100));
     var e10 = make_engine_with_zone(z10);
-    n_engine_note_on(e10, 69, 127);
+    ignore(n_engine_note_on(e10, 69, 127));
     var first10 = f64_abs(n_engine_next_sample(e10));
     run_samples(e10, 249);
     var mid10 = f64_abs(n_engine_next_sample(e10));
@@ -187,14 +232,14 @@ fn main() {
     var zhb = n_zone_new(idh); zhb = n_zone_with_key_range(zhb, 46, 46); zhb = n_zone_with_choke_group(zhb, 1);
     var insth = n_instrument_new(str_from("hh")); n_instrument_add_zone(insth, zha); n_instrument_add_zone(insth, zhb);
     var eh = n_engine_new(8, srh); n_engine_set_bank(eh, bankh); n_engine_set_instrument(eh, insth);
-    n_engine_note_on(eh, 46, 100);
+    ignore(n_engine_note_on(eh, 46, 100));
     assert_eq(n_engine_active_voice_count(eh), 1, "open hh: 1 voice");
-    n_engine_note_on(eh, 42, 100);
+    ignore(n_engine_note_on(eh, 42, 100));
     assert_eq(n_engine_active_voice_count(eh), 1, "closed hh chokes open: still 1");
 
     test_group("pitch bend");
     var e12 = make_engine();
-    n_engine_note_on(e12, 69, 100);
+    ignore(n_engine_note_on(e12, 69, 100));
     run_samples(e12, 100);
     n_engine_apply_pitch_bend(e12, 69, F64_ONE);
     var sum12 = 0; var j12 = 0;
@@ -204,8 +249,8 @@ fn main() {
     test_group("steal mode none");
     var e13 = make_engine_n(2);
     n_engine_set_steal_mode(e13, STEAL_MODE_NONE);
-    n_engine_note_on(e13, 60, 100);
-    n_engine_note_on(e13, 64, 100);
+    ignore(n_engine_note_on(e13, 60, 100));
+    ignore(n_engine_note_on(e13, 64, 100));
     assert_eq(n_engine_active_voice_count(e13), 2, "2 voices full");
     assert_eq(n_engine_note_on(e13, 67, 100), 0 - 1, "none rejects when full");
     assert_eq(n_engine_active_voice_count(e13), 2, "still 2");
@@ -213,25 +258,75 @@ fn main() {
     test_group("steal mode oldest");
     var e14 = make_engine_n(2);
     n_engine_set_steal_mode(e14, STEAL_MODE_OLDEST);
-    n_engine_note_on(e14, 60, 100);
+    ignore(n_engine_note_on(e14, 60, 100));
     run_samples(e14, 100);
-    n_engine_note_on(e14, 64, 100);
+    ignore(n_engine_note_on(e14, 64, 100));
     assert_eq(n_engine_active_voice_count(e14), 2, "2 voices");
-    n_engine_note_on(e14, 67, 100);
+    ignore(n_engine_note_on(e14, 67, 100));
     assert_eq(n_engine_active_voice_count(e14), 2, "still 2 after steal");
     assert_eq(n_engine_has_active_note(e14, 67), 1, "note 67 active");
 
     test_group("steal mode lowest");
     var e15 = make_engine_n(2);
     n_engine_set_steal_mode(e15, STEAL_MODE_LOWEST);
-    n_engine_note_on(e15, 60, 100);
-    n_engine_note_on(e15, 72, 100);
+    ignore(n_engine_note_on(e15, 60, 100));
+    ignore(n_engine_note_on(e15, 72, 100));
     assert_eq(n_engine_active_voice_count(e15), 2, "2 voices");
-    n_engine_note_on(e15, 66, 100);
+    ignore(n_engine_note_on(e15, 66, 100));
     assert_eq(n_engine_active_voice_count(e15), 2, "still 2");
     assert_eq(n_engine_has_active_note(e15, 60), 0, "lowest note 60 stolen");
     assert_eq(n_engine_has_active_note(e15, 66), 1, "note 66 active");
     assert_eq(n_engine_has_active_note(e15, 72), 1, "note 72 active");
+
+    test_group("render path is allocation-free (2.0.2)");
+    assert_eq(eng_leak_bytes(8, 0 - 1), 0, "8 voices unfiltered: 0 bytes per 20 blocks");
+    assert_eq(eng_leak_bytes(64, 0 - 1), 0, "64 voices unfiltered: 0 bytes per 20 blocks");
+    assert_eq(eng_leak_bytes(8, FILTER_LOWPASS), 0, "8 voices lowpass: 0 bytes per 20 blocks");
+    assert_eq(eng_leak_bytes(64, FILTER_LOWPASS), 0, "64 voices lowpass: 0 bytes per 20 blocks");
+
+    test_group("engine input validation (2.0.2)");
+    # max_voices below 1 used to build 0 nidhi voices against naad's clamped 1 -> exit(1).
+    var e0 = n_engine_new(0, f64_from(44100));
+    assert(e0 > 0, "n_engine_new(0) returns an engine");
+    var b0 = n_engine_bank(e0);
+    var d0 = vec_new();
+    var q = 0;
+    while (q < 400) { vec_push(d0, F64_HALF); q = q + 1; }
+    var s0 = n_sample_bank_add(b0, n_sample_from_mono(d0, 44100));
+    var i0 = n_instrument_new(str_from("z"));
+    var zz = n_zone_with_key_range(n_zone_new(s0), 0, 127);
+    n_instrument_add_zone(i0, zz);
+    n_engine_set_instrument(e0, i0);
+    ignore(n_engine_note_on(e0, 60, 100));
+    var bb = vec_new();
+    var w = 0;
+    while (w < 64) { vec_push(bb, 0); w = w + 1; }
+    n_engine_fill_buffer_stereo(e0, bb, 64);
+    assert(1, "0-voice engine renders without aborting");
+
+    # A negative error code forwarded from sf2_parse / n_load_wav must be rejected, not
+    # laundered into a pointer.
+    assert_eq(n_engine_set_instrument(e0, NIDHI_ERR_IMPORT), NIDHI_ERR_INVALID_PARAMETER,
+        "set_instrument rejects a negative error code");
+
+    # Hot-swapping to a SMALLER instrument used to leave zone_index past the end of the
+    # new zone vec -> _vec_die -> exit(1) mid-render.
+    var eswap = eng_leak_build(8, 0 - 1);
+    var big = NSamplerEngine_instrument(eswap);
+    var k = 0;
+    while (k < 7) {
+        n_instrument_add_zone(big, n_zone_with_key_range(n_zone_new(0), 0, 127));
+        k = k + 1;
+    }
+    ignore(n_engine_note_on(eswap, 60, 100));
+    var small = n_instrument_new(str_from("small"));
+    n_instrument_add_zone(small, n_zone_with_key_range(n_zone_new(0), 0, 127));
+    n_engine_set_instrument(eswap, small);
+    var sb = vec_new();
+    var y = 0;
+    while (y < 128) { vec_push(sb, 0); y = y + 1; }
+    n_engine_fill_buffer_stereo(eswap, sb, 128);
+    assert(1, "instrument hot-swap to a smaller patch does not abort");
 
     return assert_summary();
 }

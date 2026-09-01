@@ -3,7 +3,13 @@
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
+include "src/error.cyr"
+include "src/f64_util.cyr"
 include "src/effect_chain.cyr"
+
+# Explicitly discard a #must_use result the test does not need. Naming the intent beats
+# leaving a permanent warning that trains everyone to ignore the diagnostic.
+fn ignore(v) { return 0; }
 
 fn approx(a, b, tol) {
     if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
@@ -33,21 +39,21 @@ fn main() {
 
     test_group("bypass skips effect");
     var c3 = n_effect_chain_new(sr);
-    n_effect_chain_add(c3, FX_COMPRESSOR);
+    ignore(n_effect_chain_add(c3, FX_COMPRESSOR));
     NEffectSlot_set_bypass(n_effect_chain_slot(c3, 0), 1);
     assert_eq(approx(n_effect_chain_process_sample(c3, half), half, tol), 1, "bypassed effect -> passthrough");
 
     test_group("remove slot");
     var c4 = n_effect_chain_new(sr);
-    n_effect_chain_add(c4, FX_REVERB);
-    n_effect_chain_add(c4, FX_DELAY);
+    ignore(n_effect_chain_add(c4, FX_REVERB));
+    ignore(n_effect_chain_add(c4, FX_DELAY));
     assert_eq(n_effect_chain_len(c4), 2, "two effects -> len 2");
     n_effect_chain_remove(c4, 0);
     assert_eq(n_effect_chain_len(c4), 1, "len 1 after remove(0)");
 
     test_group("wet dry mix");
     var c5 = n_effect_chain_new(sr);
-    n_effect_chain_add(c5, FX_NONE);
+    ignore(n_effect_chain_add(c5, FX_NONE));
     NEffectSlot_set_mix(n_effect_chain_slot(c5, 0), f64_from(0));
     assert_eq(approx(n_effect_chain_process_sample(c5, half), half, tol), 1, "fully-dry mix -> passthrough");
 

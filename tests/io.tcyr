@@ -3,8 +3,14 @@
 include "lib/sankoch.cyr"
 include "lib/shravan.cyr"
 include "src/error.cyr"
+include "src/f64_util.cyr"
 include "src/sample.cyr"
 include "src/io.cyr"
+
+fn approx(a, b, tol) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
+    return 0;
+}
 
 fn write_file(path, buf, len) {
     var fd = file_open(path, 577, 420);   # O_WRONLY|O_CREAT|O_TRUNC, mode 0644
@@ -69,6 +75,74 @@ fn main() {
     assert_eq(NStreamReader_total_frames(srd), 4, "stream total_frames 4");
     var allsmp = n_stream_reader_read_all(srd);
     assert_eq(NSample_frames(allsmp), 4, "stream read_all frames 4");
+
+    # --- 2.0.2 regression: integer PCM decoded to pure silence ---
+    # Every fixture above encodes PCM_F32, the one format that needs no scale constant,
+    # which is exactly why this went unnoticed. nidhi never called shravan_init_constants(),
+    # so shravan's F64_RCP_* were all +0.0 and every integer sample was multiplied by zero.
+    # Assert VALUES, not just frame counts -- a frame-count assertion passes on silence.
+    test_group("integer PCM decodes to real audio (not silence)");
+    var ipcm = vec_new();
+    vec_push(ipcm, F64_HALF);
+    vec_push(ipcm, f64_neg(F64_HALF));
+    vec_push(ipcm, f64_div(F64_ONE, f64_from(4)));
+    vec_push(ipcm, f64_div(F64_ONE, f64_from(8)));
+    var fmts = vec_new();
+    vec_push(fmts, PCM_I8);
+    vec_push(fmts, PCM_I16);
+    vec_push(fmts, PCM_I24);
+    vec_push(fmts, PCM_I32);
+    var fi = 0;
+    while (fi < vec_len(fmts)) {
+        var fmt = vec_get(fmts, fi);
+        var ibuf = alloc(8192);
+        var ib = wav_encode(ipcm, 44100, 1, fmt, ibuf);
+        assert(ib > 0, "integer PCM encoded");
+        var ism = n_load_wav_from_memory(ibuf, ib);
+        assert(ism > 0, "integer PCM decoded");
+        assert_eq(NSample_frames(ism), 4, "integer PCM frames 4");
+        var idata = NSample_data(ism);
+        var nonzero = 0;
+        var k = 0;
+        while (k < vec_len(idata)) {
+            if (vec_get(idata, k) != 0) { nonzero = nonzero + 1; }
+            k = k + 1;
+        }
+        assert_eq(nonzero, 4, "integer PCM is NOT silence");
+        # 8-bit has ~1/256 resolution, so tolerance has to cover the coarsest format.
+        var tol = f64_div(F64_ONE, f64_from(50));
+        assert_eq(approx(vec_get(idata, 0), F64_HALF, tol), 1, "integer PCM value[0] ~ 0.5");
+        assert_eq(approx(vec_get(idata, 1), f64_neg(F64_HALF), tol), 1, "integer PCM value[1] ~ -0.5");
+        fi = fi + 1;
+    }
+
+    # --- 2.0.2 regression: the streaming reader truncated everything over ~4 KB ---
+    # It fed shravan in 4096-byte slices, but that decoder is buffer-then-decode-once and
+    # wav_decode clamps the declared data size to what is present -- so the first slice
+    # decoded as a complete WAV and every later feed was ignored. 5000 frames came back
+    # as 1013. total_frames stayed correct, so the reader disagreed with itself.
+    test_group("streaming reader returns the whole file, not the first 4 KB");
+    var big = vec_new();
+    var bi = 0;
+    while (bi < 5000) {
+        vec_push(big, f64_div(f64_from(bi % 100), f64_from(200)));
+        bi = bi + 1;
+    }
+    var bigbuf = alloc(131072);
+    var bign = wav_encode(big, 44100, 1, PCM_F32, bigbuf);
+    assert(bign > 20000, "big fixture is well over one 4096-byte slice");
+    write_file("/tmp/nidhi_io_big.wav", bigbuf, bign);
+    var bsr = n_stream_reader_open("/tmp/nidhi_io_big.wav");
+    assert(bsr > 0, "big stream open succeeded");
+    assert_eq(NStreamReader_total_frames(bsr), 5000, "big stream total_frames 5000");
+    var ball = n_stream_reader_read_all(bsr);
+    assert_eq(NSample_frames(ball), 5000, "big stream read_all returns ALL 5000 frames");
+    var bload = n_load_wav("/tmp/nidhi_io_big.wav");
+    assert_eq(NSample_frames(bload), NSample_frames(ball), "stream agrees with load_wav");
+    var bd = NSample_data(ball);
+    var tol2 = f64_div(F64_ONE, f64_from(10000));
+    assert_eq(approx(vec_get(bd, 4999), f64_div(f64_from(4999 % 100), f64_from(200)), tol2), 1,
+        "last frame survives the stream");
 
     return assert_summary();
 }

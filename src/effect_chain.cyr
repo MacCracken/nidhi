@@ -43,17 +43,28 @@ fn n_effect_slot_new() {
 }
 
 # --- EffectChain ---
+# `scratch` is a single reusable ReverbStereo, allocated once. naad's
+# reverb_process_sample is a three-line alloc wrapper over reverb_process_core, and
+# naad's own header says the hot path must call core with a reused scratch. Going
+# through the wrapper cost 32 bytes per frame -- 1,411,200 B/s sustained, and NEVER
+# reclaimed, because lib/alloc.cyr is a bump allocator with a no-op free. The four
+# other effects were already alloc-free; reverb was the only leak in the chain.
 #derive(accessors)
 struct NEffectChain {
     slots;
     sample_rate;
+    scratch;
 }
 
 #must_use
 fn n_effect_chain_new(sample_rate) {
     var c = alloc(sizeof(NEffectChain));
+    if (c == 0) { return 0; }
+    var sc = alloc(sizeof(ReverbStereo));
+    if (sc == 0) { return 0; }
     NEffectChain_set_slots(c, vec_new());
     NEffectChain_set_sample_rate(c, sample_rate);
+    NEffectChain_set_scratch(c, sc);
     return c;
 }
 
@@ -91,6 +102,7 @@ fn n_effect_chain_create_state(chain, effect_type) {
 }
 
 # add(effect_type) -> 1 on success, 0 if the chain is already full (MAX_SLOTS).
+#must_use
 fn n_effect_chain_add(chain, effect_type) {
     var slots = NEffectChain_slots(chain);
     if (vec_len(slots) >= N_FX_MAX_SLOTS) { return 0; }
@@ -135,10 +147,15 @@ fn n_effect_chain_slot(chain, index) {
 }
 
 # apply one effect to a sample -> wet value. Reverb returns a stereo pair; take the left (.0).
+# `state <= 0`, not `== 0`: create_state returns 0 for None, but a naad constructor can
+# also hand back a negative error code, and using that as a pointer is a wild read.
 #inline
-fn n_effect_apply(effect_type, state, input) {
-    if (state == 0) { return input; }
-    if (effect_type == FX_REVERB) { return load64(reverb_process_sample(state, input)); }
+fn n_effect_apply(effect_type, state, input, scratch) {
+    if (state <= 0) { return input; }
+    if (effect_type == FX_REVERB) {
+        reverb_process_core(state, input, scratch);
+        return load64(scratch);
+    }
     if (effect_type == FX_DELAY) { return comb_filter_process_sample(state, input); }
     if (effect_type == FX_CHORUS) { return effects_chorus_process_sample(state, input); }
     if (effect_type == FX_COMPRESSOR) { return dynamics_compressor_process_sample(state, input); }
@@ -158,7 +175,7 @@ fn n_effect_chain_process_sample(chain, input) {
         var etype = NEffectSlot_effect_type(slot);
         if (NEffectSlot_bypass(slot) == 0) {
             if (etype != FX_NONE) {
-                var wet = n_effect_apply(etype, NEffectSlot_state(slot), out);
+                var wet = n_effect_apply(etype, NEffectSlot_state(slot), out, NEffectChain_scratch(chain));
                 var mix = NEffectSlot_mix(slot);
                 out = f64_add(f64_mul(out, f64_sub(F64_ONE, mix)), f64_mul(wet, mix));
             }

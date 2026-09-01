@@ -74,11 +74,27 @@ fn nvf_set_cutoff(vf, cutoff, sample_rate) {
 fn nvf_process_stereo(vf, left, right, out2) {
     if (NVoiceFilter_active(vf) == 0) { store64(out2, left); store64(out2 + 8, right); return 0; }
     var mode = NVoiceFilter_mode(vf);
-    var l = left;
     var fl = NVoiceFilter_filter_l(vf);
+    var fr = NVoiceFilter_filter_r(vf);
+    # Low-pass is the default mode (zone.cyr and SFZ both) and naad exports an alloc-free
+    # entry point for exactly this: filter_svf_process_sample allocates an SvfOutput struct
+    # per channel per voice per sample -- 22.6 MB/s at 8 voices, 180 MB/s at 64 -- and
+    # naad's own header says the hot path must use the _lowpass form. Integrator writes are
+    # identical between the two, so filter state evolves bit-for-bit the same.
+    # NOTE: highpass/bandpass/notch still take the allocating path; naad ships no alloc-free
+    # 4-output core yet. Tracked for 2.1.
+    if (mode == FILTER_LOWPASS) {
+        var ll = left;
+        if (fl != 0) { ll = filter_svf_process_sample_lowpass(fl, left); }
+        var rl = right;
+        if (fr != 0) { rl = filter_svf_process_sample_lowpass(fr, right); }
+        store64(out2, ll);
+        store64(out2 + 8, rl);
+        return 0;
+    }
+    var l = left;
     if (fl != 0) { l = nvf_pick(filter_svf_process_sample(fl, left), mode); }
     var r = right;
-    var fr = NVoiceFilter_filter_r(vf);
     if (fr != 0) { r = nvf_pick(filter_svf_process_sample(fr, right), mode); }
     store64(out2, l);
     store64(out2 + 8, r);
@@ -158,40 +174,83 @@ struct NSamplerEngine {
     sample_rate;
     default_adsr;
     pitch_bend_range;
-    scratch_buf;
+    rv_scratch;
+    rv_xscratch;
+    rv_fscratch;
+    ns_out;
     voice_mgr;
 }
 
 #must_use
 fn n_engine_new(max_voices, sample_rate) {
     var e = alloc(sizeof(NSamplerEngine));
+    if (e == 0) { return 0; }
+    # naad's VoiceManager clamps to [1,128]; nidhi did not, so n_engine_new(0, sr) built
+    # 0 nidhi voices and 1 naad voice. The first note_on then did vec_get(voices, 0) on an
+    # empty vec -> exit(1). Clamp the LOW end only: an upper clamp would silently change
+    # voice-count reporting and choke extents for no safety gain.
+    var mv = max_voices;
+    if (mv < 1) { mv = 1; }
     var voices = vec_new();
     var i = 0;
-    while (i < max_voices) { vec_push(voices, n_voice_new(sample_rate)); i = i + 1; }
+    while (i < mv) { vec_push(voices, n_voice_new(sample_rate)); i = i + 1; }
     NSamplerEngine_set_voices(e, voices);
     NSamplerEngine_set_instrument(e, 0);
     NSamplerEngine_set_bank(e, n_sample_bank_new());
     NSamplerEngine_set_sample_rate(e, sample_rate);
-    var rel = f64_to(f64_max(f64_mul(sample_rate, f64_div(F64_ONE, f64_from(100))), F64_ONE));
+    # f64_to is a raw cvttsd2si: out of range it yields i64::MIN, which collapses to 0
+    # downstream and turns a huge release into an INSTANT one (a click). Saturate first.
+    var rcap = f64_from(4294967295);
+    var rel = f64_to(f64_min(f64_max(f64_mul(sample_rate, f64_div(F64_ONE, f64_from(100))), F64_ONE), rcap));
     NSamplerEngine_set_default_adsr(e, n_adsr_config_new(0, 0, F64_ONE, rel));
     NSamplerEngine_set_pitch_bend_range(e, f64_from(2));
-    var scratch = vec_new();
-    var z = 0;
-    while (z < 2048) { vec_push(scratch, 0); z = z + 1; }
-    NSamplerEngine_set_scratch_buf(e, scratch);
-    NSamplerEngine_set_voice_mgr(e, voice_manager_new(max_voices, POLY_MODE_POLY, STEAL_MODE_OLDEST));
+
+    # Per-engine render scratch, allocated ONCE. These four slots used to be alloc(16)
+    # calls on the per-FRAME path: 48 B/frame stereo (2,116,800 B/s at 44.1 kHz) and
+    # 64 B/frame mono, none of it ever reclaimed -- lib/alloc.cyr is a bump allocator
+    # whose free is a no-op. The endgame was not merely a leak but memory UNSAFETY: once
+    # alloc() returns 0, n_engine_next_sample_stereo does store64(0, ...) and segfaults
+    # inside the audio callback. (These replace a `scratch_buf` vec that was filled with
+    # 2048 zeros at construction and never read -- a vestige of the unported Rust block
+    # renderer. Note it was a vec OBJECT, so it could not have been used as raw scratch
+    # anyway: store64 into it would corrupt the header.)
+    var rv_s = alloc(16);
+    var rv_x = alloc(16);
+    var rv_f = alloc(16);
+    var ns_o = alloc(16);
+    if (rv_s == 0) { return 0; }
+    if (rv_x == 0) { return 0; }
+    if (rv_f == 0) { return 0; }
+    if (ns_o == 0) { return 0; }
+    NSamplerEngine_set_rv_scratch(e, rv_s);
+    NSamplerEngine_set_rv_xscratch(e, rv_x);
+    NSamplerEngine_set_rv_fscratch(e, rv_f);
+    NSamplerEngine_set_ns_out(e, ns_o);
+
+    NSamplerEngine_set_voice_mgr(e, voice_manager_new(mv, POLY_MODE_POLY, STEAL_MODE_OLDEST));
     return e;
 }
 
-fn n_engine_set_instrument(e, inst) { NSamplerEngine_set_instrument(e, inst); return 0; }
+fn n_engine_set_instrument(e, inst) {
+    if (inst <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    NSamplerEngine_set_instrument(e, inst);
+    return 0;
+}
 fn n_engine_set_bank(e, bank) { NSamplerEngine_set_bank(e, bank); return 0; }
 #must_use
 fn n_engine_bank(e) { return NSamplerEngine_bank(e); }
 fn n_engine_set_adsr(e, cfg) { NSamplerEngine_set_default_adsr(e, cfg); return 0; }
+# Builds a NEW config rather than mutating the current one. rust-old's set_adsr takes the
+# config BY VALUE, so the in-place rewrite was port-introduced aliasing: it edited the
+# caller's own object and every zone that had been handed the same pointer via
+# n_zone_with_adsr. The cap is the same f64_to saturation as n_engine_new above.
 fn n_engine_set_release_ms(e, ms) {
     var cfg = NSamplerEngine_default_adsr(e);
-    var rel = f64_to(f64_max(f64_div(f64_mul(NSamplerEngine_sample_rate(e), ms), f64_from(1000)), F64_ONE));
-    NAdsrConfig_set_release_samples(cfg, rel);
+    var rcap = f64_from(4294967295);
+    var rel = f64_to(f64_min(f64_max(f64_div(f64_mul(NSamplerEngine_sample_rate(e), ms), f64_from(1000)), F64_ONE), rcap));
+    var ncfg = n_adsr_config_new(NAdsrConfig_attack_samples(cfg), NAdsrConfig_decay_samples(cfg),
+        NAdsrConfig_sustain_level(cfg), rel);
+    NSamplerEngine_set_default_adsr(e, ncfg);
     return 0;
 }
 fn n_engine_set_pitch_bend_range(e, semitones) { NSamplerEngine_set_pitch_bend_range(e, f64_max(semitones, 0)); return 0; }
@@ -262,6 +321,7 @@ fn n_engine_has_active_note(e, note) {
 }
 
 # note_on(note, velocity) -> voice index, or -1.
+#must_use
 fn n_engine_note_on(e, note, velocity) {
     var inst = NSamplerEngine_instrument(e);
     if (inst == 0) { return 0 - 1; }
@@ -311,6 +371,8 @@ fn n_engine_note_on(e, note, velocity) {
 
     var vidx = voice_manager_note_on(NSamplerEngine_voice_mgr(e), note, f64_div(f64_from(velocity), f64_from(127)));
     if (vidx < 0) { return 0 - 1; }
+    # naad's voice count and nidhi's vec can disagree; never index on naad's word alone.
+    if (vidx >= vec_len(NSamplerEngine_voices(e))) { return 0 - 1; }
 
     var voice = vec_get(NSamplerEngine_voices(e), vidx);
     NSamplerVoice_set_active(voice, 1);
@@ -452,9 +514,15 @@ fn n_advance_position(voice, loop_mode, loop_start, loop_end, frames, released) 
 # render one active voice, adding its stereo contribution to accum2 (2 f64 slots).
 fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscratch) {
     NSamplerVoice_set_age(voice, NSamplerVoice_age(voice) + 1);
-    var zone = vec_get(zones, NSamplerVoice_zone_index(voice));
+    # n_engine_set_instrument swaps the pointer without re-resolving live voices, so a
+    # patch change on a sustaining note can leave zone_index past the end of the NEW zone
+    # vec (8-zone piano at zone 5 -> 1-zone patch) -> _vec_die -> exit(1) mid-render.
+    # Deactivating mirrors the sample guard two lines below -- the house pattern.
+    var zi = NSamplerVoice_zone_index(voice);
+    if (zi >= vec_len(zones)) { NSamplerVoice_set_active(voice, 0); return 0; }
+    var zone = vec_get(zones, zi);
     var sample = n_sample_bank_get(bank, NZone_sample_id(zone));
-    if (sample == 0) { NSamplerVoice_set_active(voice, 0); return 0; }
+    if (sample <= 0) { NSamplerVoice_set_active(voice, 0); return 0; }
     var frames = NSample_frames(sample);
     var eff_frames = frames;
     if (NZone_sample_end(zone) > 0) { if (NZone_sample_end(zone) < eff_frames) { eff_frames = NZone_sample_end(zone); } }
@@ -561,13 +629,15 @@ fn n_engine_next_sample_stereo(e, out2) {
     store64(out2, 0);
     store64(out2 + 8, 0);
     var inst = NSamplerEngine_instrument(e);
-    if (inst == 0) { return 0; }
+    # `<= 0`, not `== 0`: sf2_parse and n_load_wav return NEGATIVE codes, and a consumer
+    # forwarding one unchecked would sail past an `== 0` guard into NInstrument_zones(-5).
+    if (inst <= 0) { return 0; }
     var zones = NInstrument_zones(inst);
     var bank = NSamplerEngine_bank(e);
     var sr = NSamplerEngine_sample_rate(e);
-    var scratch = alloc(16);
-    var xscratch = alloc(16);
-    var fscratch = alloc(16);
+    var scratch = NSamplerEngine_rv_scratch(e);
+    var xscratch = NSamplerEngine_rv_xscratch(e);
+    var fscratch = NSamplerEngine_rv_fscratch(e);
     var voices = NSamplerEngine_voices(e);
     var nv = vec_len(voices);
     var vi = 0;
@@ -583,7 +653,7 @@ fn n_engine_next_sample_stereo(e, out2) {
 
 #must_use
 fn n_engine_next_sample(e) {
-    var o = alloc(16);
+    var o = NSamplerEngine_ns_out(e);
     n_engine_next_sample_stereo(e, o);
     return f64_mul(f64_add(load64(o), load64(o + 8)), F64_HALF);
 }
@@ -599,7 +669,7 @@ fn n_engine_fill_buffer(e, buf, n) {
 # to the Rust per-voice block render).
 fn n_engine_fill_buffer_stereo(e, buf, len) {
     var frames = len / 2;
-    var o = alloc(16);
+    var o = NSamplerEngine_ns_out(e);
     var f = 0;
     while (f < frames) {
         n_engine_next_sample_stereo(e, o);

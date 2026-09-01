@@ -1,5 +1,7 @@
 # sample.tcyr -- parity tests for src/sample.cyr (ports rust-old/src/sample.rs #[test]s).
 
+include "src/error.cyr"
+include "src/f64_util.cyr"
 include "src/sample.cyr"
 
 fn approx(a, b, tol) {

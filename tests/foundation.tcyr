@@ -9,12 +9,12 @@ fn main() {
     alloc_init();
 
     test_group("error codes");
-    assert_eq(ERR_NONE, 0, "ERR_NONE is 0");
-    assert_eq(n_is_err(ERR_SAMPLE_NOT_FOUND), 1, "SAMPLE_NOT_FOUND is an error");
-    assert_eq(n_is_err(ERR_IMPORT), 1, "IMPORT is an error");
-    assert_eq(n_is_err(0), 0, "ERR_NONE is not an error");
+    assert_eq(NIDHI_ERR_NONE, 0, "NIDHI_ERR_NONE is 0");
+    assert_eq(n_is_err(NIDHI_ERR_SAMPLE_NOT_FOUND), 1, "SAMPLE_NOT_FOUND is an error");
+    assert_eq(n_is_err(NIDHI_ERR_IMPORT), 1, "IMPORT is an error");
+    assert_eq(n_is_err(0), 0, "NIDHI_ERR_NONE is not an error");
     assert_eq(n_is_err(5), 0, "a positive result is not an error");
-    assert_eq(ERR_IMPORT, 0 - 5, "ImportError maps to -5");
+    assert_eq(NIDHI_ERR_IMPORT, 0 - 5, "ImportError maps to -5");
 
     test_group("loop modes");
     assert_eq(n_loop_mode_default(), 0, "default LoopMode is OneShot(0)");

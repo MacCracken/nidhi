@@ -3,6 +3,8 @@
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
+include "src/error.cyr"
+include "src/f64_util.cyr"
 include "src/sample.cyr"
 include "src/capture.cyr"
 

@@ -9,6 +9,7 @@
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
+include "src/error.cyr"
 include "src/f64_util.cyr"
 include "src/loop_mode.cyr"
 include "src/envelope.cyr"
@@ -17,6 +18,10 @@ include "src/sample.cyr"
 include "src/instrument.cyr"
 include "src/stretch.cyr"
 include "src/engine.cyr"
+
+# Explicitly discard a #must_use result the test does not need. Naming the intent beats
+# leaving a permanent warning that trains everyone to ignore the diagnostic.
+fn ignore(v) { return 0; }
 
 fn make_sine(freq, n) {
     var v = vec_new();
@@ -54,7 +59,7 @@ fn trigger_notes(e, count) {
     while (i < count) {
         var note = 36 + i * step;
         if (note > 96) { note = 96; }
-        n_engine_note_on(e, note, 100);
+        ignore(n_engine_note_on(e, note, 100));
         i = i + 1;
     }
     return 0;
@@ -143,7 +148,7 @@ fn main(): i64 {
     bench_batch_start(bic);
     var i4 = 0;
     while (i4 < 44100) {
-        n_sample_read_cubic(mono, f64_add(f64_mul(f64_from(i4 % 20000), c073), f64_from(100)));
+        ignore(n_sample_read_cubic(mono, f64_add(f64_mul(f64_from(i4 % 20000), c073), f64_from(100))));
         i4 = i4 + 1;
     }
     bench_batch_stop(bic, 44100);

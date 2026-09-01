@@ -210,8 +210,35 @@ fn sf2_pcm16_to_f32(data, dlen, start_sample, end_sample) {
     return out;
 }
 
+# --- resolve context: shdr memo + zone budget ---
+#
+# preset -> pbag -> ibag is a triple loop over three attacker-declared u16 index fields
+# costing 38/4/4 bytes per step, and NOTHING was shared between iterations: every
+# (preset, pbag, ibag) triple re-converted the SAME shdr's PCM into a fresh f64 vec and
+# pushed another Sample into the bank. Memory therefore grew as the CUBE of file size --
+# measured 229 MB from a 5,674-byte file, and ~7.5 KB was enough to reach `vec: alloc
+# failed` -> syscall(60,1), an unconditional exit(1) of the HOST process (dhvani/shruti),
+# with no error return to catch.
+#
+# Both halves below are load-bearing. The memo alone is not enough: with the PCM removed
+# entirely, ~656 bytes of NZone plus zone-vec growth per triple still reaches ~1 GB from a
+# 20 KB file. The budget alone is not enough either -- 65536 zones each re-converting a
+# multi-megabyte shdr is still fatal. The cap stays well under VEC_CAP_MAX (2^28).
+#
+# Inherited from rust-old (sf2.rs:423-545 has the identical un-memoized walk), not a port
+# regression -- but Rust's OOM is an abort of a process that can be supervised, whereas
+# here it takes the audio host down mid-render.
+var N_SF2_MAX_ZONES = 65536;
+
+#derive(accessors)
+struct Sf2Ctx {
+    memo;
+    zones_left;
+}
+
 # resolve one instrument bag: read igens, apply preset-range clamp, build a zone, add to inst_obj.
-fn sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, prange) {
+# Returns NIDHI_ERR_IMPORT once the zone budget is exhausted, which unwinds the whole walk.
+fn sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, prange, ctx) {
     var igen_start = Sf2Bag_gen_index(vec_get(ibags, ib));
     var igen_end = vec_len(igens);
     if (ib + 1 < vec_len(ibags)) { igen_end = Sf2Bag_gen_index(vec_get(ibags, ib + 1)); }
@@ -268,10 +295,23 @@ fn sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, pran
         if (Sf2PRange_pv_hi(prange) < fv_hi) { fv_hi = Sf2PRange_pv_hi(prange); }
     }
 
-    var pcm = sf2_pcm16_to_f32(smpl_ptr, smpl_len, Sf2Shdr_start(shdr), Sf2Shdr_end(shdr));
-    var sample = n_sample_from_mono(pcm, Sf2Shdr_sample_rate(shdr));
-    sample = n_sample_with_name(sample, Sf2Shdr_name(shdr));
-    var sid = n_sample_bank_add(bank, sample);
+    if (Sf2Ctx_zones_left(ctx) <= 0) { return NIDHI_ERR_IMPORT; }
+    Sf2Ctx_set_zones_left(ctx, Sf2Ctx_zones_left(ctx) - 1);
+
+    # One conversion per shdr, not one per (preset, pbag, ibag) triple. Sharing a SampleId
+    # between zones is safe: nothing mutates a Sample after n_sample_bank_add, and
+    # NZone_sample_id is only ever read.
+    var memo = Sf2Ctx_memo(ctx);
+    var sid = 0 - 1;
+    if (sample_id < vec_len(memo)) { sid = vec_get(memo, sample_id); }
+    if (sid < 0) {
+        var pcm = sf2_pcm16_to_f32(smpl_ptr, smpl_len, Sf2Shdr_start(shdr), Sf2Shdr_end(shdr));
+        var sample = n_sample_from_mono(pcm, Sf2Shdr_sample_rate(shdr));
+        sample = n_sample_with_name(sample, Sf2Shdr_name(shdr));
+        sid = n_sample_bank_add(bank, sample);
+        if (sid < 0) { return NIDHI_ERR_IMPORT; }
+        if (sample_id < vec_len(memo)) { vec_set(memo, sample_id, sid); }
+    }
 
     var zone = n_zone_new(sid);
     zone = n_zone_with_key_range(zone, fk_lo, fk_hi);
@@ -289,7 +329,7 @@ fn sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, pran
 }
 
 # resolve one preset bag: find the referenced instrument + preset ranges, walk its ibags.
-fn sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, bi) {
+fn sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, bi, ctx) {
     var gen_start = Sf2Bag_gen_index(vec_get(pbags, bi));
     var gen_end = vec_len(pgens);
     if (bi + 1 < vec_len(pbags)) { gen_end = Sf2Bag_gen_index(vec_get(pbags, bi + 1)); }
@@ -331,14 +371,15 @@ fn sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, ban
     var ib = ibag_start;
     while (ib < ibag_end) {
         if (ib >= vec_len(ibags)) { return 0; }
-        sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, prange);
+        var ir = sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, prange, ctx);
+        if (ir < 0) { return ir; }
         ib = ib + 1;
     }
     return 0;
 }
 
 # resolve all presets -> instruments -> zones. Fills the presets/instruments vecs + bank.
-fn sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, presets, instruments, bank) {
+fn sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, presets, instruments, bank, ctx) {
     var ph_lim = vec_len(phdrs) - 1;
     if (ph_lim < 0) { ph_lim = 0; }
     var pi = 0;
@@ -357,7 +398,8 @@ fn sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_l
                 if (bi >= vec_len(pbags)) {
                     looping = 0;
                 } else {
-                    sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, bi);
+                    var pr = sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, bi, ctx);
+                    if (pr < 0) { return pr; }
                     bi = bi + 1;
                 }
             }
@@ -377,11 +419,20 @@ fn sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_l
 }
 
 # parse(data, len) -> Sf2Result pointer, or a negative error code.
+# All failures return NIDHI_ERR_IMPORT.
+#
+# These were 15 raw negative literals (-1..-3, -6..-15). Three of them were bit-identical
+# to real codes from a DIFFERENT taxonomy -- -1 = NIDHI_ERR_SAMPLE_NOT_FOUND, -2 =
+# NIDHI_ERR_INVALID_ZONE, -3 = NIDHI_ERR_INVALID_PARAMETER -- so handing a WAV to the SF2
+# importer reported "invalid parameter" and a truncated file reported "sample not found".
+# -6 meanwhile covered three unrelated conditions. rust-old returns NidhiError::ImportError
+# for all 19 corresponding sites: ONE variant, so one code. NIDHI_ERR_IMPORT (-5) is
+# precisely the value this parser never used.
 #must_use
 fn sf2_parse(data, len) {
-    if (len < 12) { return 0 - 1; }
-    if (sf2_fourcc(data, len, 0) != CC_RIFF) { return 0 - 2; }
-    if (sf2_fourcc(data, len, 8) != CC_SFBK) { return 0 - 3; }
+    if (len < 12) { return NIDHI_ERR_IMPORT; }
+    if (sf2_fourcc(data, len, 0) != CC_RIFF) { return NIDHI_ERR_IMPORT; }
+    if (sf2_fourcc(data, len, 8) != CC_SFBK) { return NIDHI_ERR_IMPORT; }
 
     var smpl_ptr = 0;
     var smpl_len = 0;
@@ -397,7 +448,7 @@ fn sf2_parse(data, len) {
         var csize = sf2_u32(data, len, off + 4);
         var cdata_start = off + 8;
         var cdata_end = cdata_start + csize;
-        if (cdata_end > len) { return 0 - 6; }
+        if (cdata_end > len) { return NIDHI_ERR_IMPORT; }
         if (cid == CC_LIST) {
             if (csize >= 4) {
                 var list_type = sf2_fourcc(data, len, cdata_start);
@@ -413,7 +464,7 @@ fn sf2_parse(data, len) {
                             var sdstart = soff + 8;
                             var sdend = sdstart + ssize;
                             if (sdend > cdata_end) {
-                                return 0 - 6;
+                                return NIDHI_ERR_IMPORT;
                             } else {
                                 if (sid == CC_SMPL) {
                                     smpl_ptr = data + sdstart;
@@ -435,8 +486,8 @@ fn sf2_parse(data, len) {
         off = cdata_end + (csize & 1);
     }
 
-    if (smpl_found == 0) { return 0 - 7; }
-    if (pdta_found == 0) { return 0 - 8; }
+    if (smpl_found == 0) { return NIDHI_ERR_IMPORT; }
+    if (pdta_found == 0) { return NIDHI_ERR_IMPORT; }
 
     # pdta sub-chunk scan
     var phdr_ptr = 0; var phdr_len = 0; var phdr_found = 0;
@@ -454,7 +505,7 @@ fn sf2_parse(data, len) {
         var pdstart = poff + 8;
         var pdend = pdstart + psize;
         if (pdend > pdta_len) {
-            return 0 - 6;
+            return NIDHI_ERR_IMPORT;
         } else {
             if (pid == CC_PHDR) { phdr_ptr = pdta_ptr + pdstart; phdr_len = psize; phdr_found = 1; }
             if (pid == CC_PBAG) { pbag_ptr = pdta_ptr + pdstart; pbag_len = psize; pbag_found = 1; }
@@ -467,13 +518,13 @@ fn sf2_parse(data, len) {
         }
     }
 
-    if (phdr_found == 0) { return 0 - 9; }
-    if (pbag_found == 0) { return 0 - 10; }
-    if (pgen_found == 0) { return 0 - 11; }
-    if (inst_found == 0) { return 0 - 12; }
-    if (ibag_found == 0) { return 0 - 13; }
-    if (igen_found == 0) { return 0 - 14; }
-    if (shdr_found == 0) { return 0 - 15; }
+    if (phdr_found == 0) { return NIDHI_ERR_IMPORT; }
+    if (pbag_found == 0) { return NIDHI_ERR_IMPORT; }
+    if (pgen_found == 0) { return NIDHI_ERR_IMPORT; }
+    if (inst_found == 0) { return NIDHI_ERR_IMPORT; }
+    if (ibag_found == 0) { return NIDHI_ERR_IMPORT; }
+    if (igen_found == 0) { return NIDHI_ERR_IMPORT; }
+    if (shdr_found == 0) { return NIDHI_ERR_IMPORT; }
 
     var phdrs = sf2_parse_phdr(phdr_ptr, phdr_len);
     var pbags = sf2_parse_bag(pbag_ptr, pbag_len);
@@ -486,7 +537,18 @@ fn sf2_parse(data, len) {
     var presets = vec_new();
     var instruments = vec_new();
     var bank = n_sample_bank_new();
-    sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, presets, instruments, bank);
+
+    # memo[shdr_index] = SampleId, -1 = not converted yet.
+    var memo = vec_new();
+    var mi = 0;
+    while (mi < vec_len(shdrs)) { vec_push(memo, 0 - 1); mi = mi + 1; }
+    var ctx = alloc(sizeof(Sf2Ctx));
+    if (ctx == 0) { return NIDHI_ERR_IMPORT; }
+    Sf2Ctx_set_memo(ctx, memo);
+    Sf2Ctx_set_zones_left(ctx, N_SF2_MAX_ZONES);
+
+    var rr = sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, presets, instruments, bank, ctx);
+    if (rr < 0) { return rr; }
 
     var result = alloc(sizeof(Sf2Result));
     Sf2Result_set_presets(result, presets);

@@ -3,6 +3,7 @@
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
+include "src/error.cyr"
 include "src/f64_util.cyr"
 include "src/loop_mode.cyr"
 include "src/envelope.cyr"
@@ -152,6 +153,53 @@ fn main() {
     assert_eq(NSfzRegion_tune(reg_plus), 5, "tune=+5 (leading +) accepted -> 5");
     var reg_cc = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav volume_oncc300=6\n")), 0);
     assert_eq(vec_len(NSfzRegion_cc_modulations(reg_cc)), 0, "cc#300 (>255) rejected -> no cc modulation");
+
+    # --- 2.0.2: numeric parse strictness ---
+    # f64_parse_ok reports success on a PREFIX, so every float opcode used to accept
+    # trailing garbage that Rust's parse::<f32>() rejects. `cutoff=1000Hz` low-passed every
+    # note at 1 kHz where the oracle disables the filter; `ampeg_attack=10ms` became a
+    # ten-second fade-in on every note where the oracle applies no envelope at all.
+    test_group("float opcodes reject trailing garbage (2.0.2)");
+    var fo = alloc(8);
+    assert_eq(sfz_f64(str_from("1000Hz"), fo), 0, "1000Hz rejected");
+    assert_eq(sfz_f64(str_from("50%"), fo), 0, "50% rejected");
+    assert_eq(sfz_f64(str_from("-6dB"), fo), 0, "-6dB rejected");
+    assert_eq(sfz_f64(str_from("10ms"), fo), 0, "10ms rejected");
+    assert_eq(sfz_f64(str_from("0.5s"), fo), 0, "0.5s rejected");
+    assert_eq(sfz_f64(str_from("1200cents"), fo), 0, "1200cents rejected");
+    assert_eq(sfz_f64(str_from("1_000"), fo), 0, "1_000 rejected");
+    assert_eq(sfz_f64(str_from("1e"), fo), 0, "bare exponent rejected");
+    assert_eq(sfz_f64(str_from("."), fo), 0, "lone dot rejected");
+    # ...while everything the oracle accepts still parses.
+    assert_eq(sfz_f64(str_from(".5"), fo), 1, ".5 accepted");
+    assert_eq(sfz_f64(str_from("5."), fo), 1, "5. accepted");
+    assert_eq(sfz_f64(str_from("+3"), fo), 1, "+3 accepted");
+    assert_eq(sfz_f64(str_from("-2.5"), fo), 1, "-2.5 accepted");
+    assert_eq(sfz_f64(str_from("1e1"), fo), 1, "1e1 accepted");
+    assert_eq(sfz_f64(str_from("1.5E-3"), fo), 1, "1.5E-3 accepted");
+    assert_eq(sfz_f64(str_from("inf"), fo), 1, "inf accepted");
+    assert_eq(sfz_f64(str_from("NaN"), fo), 1, "NaN accepted");
+
+    # Integer overflow used to WRAP: group=9223372036854775808 became i64::MIN and reached
+    # vec_get as a negative index -> exit(1) from a 47-byte file.
+    test_group("integer opcodes reject overflow (2.0.2)");
+    var io = alloc(8);
+    assert_eq(sfz_i32(str_from("9223372036854775808"), io), 0, "i32 overflow rejected");
+    assert_eq(sfz_u32(str_from("9223372036854775808"), io), 0, "u32 overflow rejected");
+    assert_eq(sfz_u32(str_from("300000000"), io), 1, "valid u32 still accepted");
+    assert_eq(sfz_u32(str_from("4294967296"), io), 0, "above u32::MAX rejected");
+    assert_eq(sfz_u8(str_from("99999999999999999999"), io), 0, "u8 huge rejected");
+    assert_eq(sfz_u8(str_from("255"), io), 1, "u8 255 accepted");
+    assert_eq(sfz_u8(str_from("256"), io), 0, "u8 256 rejected");
+
+    # A group above the rr_counters cap must import as UNGROUPED, not abort.
+    test_group("huge group imports without aborting (2.0.2)");
+    var gsrc = str_from("<region> sample=x.wav group=300000000");
+    var gp = n_sfz_parse(gsrc);
+    assert(gp > 0, "huge group parses");
+    var ginst = n_sfz_to_instrument(gp, str_from("g"), f64_from(44100));
+    assert(ginst > 0, "huge group builds an instrument");
+    assert_eq(n_instrument_find_zone_rr(ginst, 60, 100) >= (0 - 1), 1, "find_zone_rr does not abort");
 
     return assert_summary();
 }

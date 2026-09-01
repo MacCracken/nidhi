@@ -1,16 +1,46 @@
 # io.cyr -- WAV loading + streaming (behind the Rust `io` feature; uses shravan)
 # Requires: alloc, vec, string (strlen), str (str_new), syscalls/fs (file_open/read/write/close,
-#           memcpy, load8/store8), sample (n_sample_from_mono/stereo/with_name), error (ERR_IMPORT),
+#           memcpy, load8/store8), sample (n_sample_from_mono/stereo/with_name), error (NIDHI_ERR_IMPORT),
 #           shravan (wav_decode, decode_file, decode_result_info/samples, fmtinfo_channels/
 #           sample_rate/total_samples, wav_stream_new/feed/flush, stream_evt_type/data,
 #           STREAM_EVT_HEADER/SAMPLES/END)
 #
 # Ports rust-old/src/io.rs. Samples are f64 bit patterns end-to-end (shravan decodes to f64), so
-# the Rust Vec<f32> boundary conversions are no-ops here. All failures collapse to ERR_IMPORT.
-# Success returns a positive Sample pointer; failure returns the negative ERR_IMPORT code.
+# the Rust Vec<f32> boundary conversions are no-ops here. All failures collapse to NIDHI_ERR_IMPORT.
+# Success returns a positive Sample pointer; failure returns the negative NIDHI_ERR_IMPORT code.
+
+# --- MANDATORY one-time dependency initialisation ---
+#
+# shravan's PCM scale constants (F64_RCP_128 / F64_RCP_32768 / F64_RCP_8388608 /
+# F64_RCP_2147483648 and 13 siblings) are declared as plain `0` and are only assigned by
+# shravan_init_constants(). nidhi never called it, and 0 as an f64 bit pattern is +0.0,
+# so ALL 17 were silently +0.0. Two live consequences, not one:
+#   * the little-endian converters MULTIPLY by F64_RCP_*, so every 8/16/24/32-bit integer
+#     PCM file decoded to pure silence -- and integer PCM is the common case for WAV;
+#   * the big-endian converters DIVIDE by them, so an AIFF returned a SUCCESSFUL Sample
+#     whose every frame was +/-inf or NaN, which then latches the SVF for the voice's life.
+# tests/io.tcyr never caught either because every fixture encodes PCM_F32, the one format
+# that needs no scale constant.
+#
+# Called from every public entry point rather than exported as a "remember to call this",
+# because a consumer cannot be expected to know a transitive dependency needs waking up.
+# shravan_init_constants only assigns globals that are currently 0, so it is idempotent;
+# the flag just keeps it off the hot path.
+#
+# Checked and clear: shravan is the ONLY dependency with this pattern. naad's _DB_LUT and
+# hisab's _PERM_TABLE / _grad3 self-initialise behind their own guards; goonj has none.
+var N_INIT_DONE = 0;
+
+fn n_init() {
+    if (N_INIT_DONE == 1) { return 0; }
+    shravan_init_constants();
+    N_INIT_DONE = 1;
+    return 0;
+}
 
 # n_read_file(path, out_len) -> heap byte buffer (or 0 on error); writes byte count to out_len.
 # Mirrors shravan's decode_file read loop (grow-and-read).
+#must_use
 fn n_read_file(path, out_len) {
     var fd = file_open(path, 0, 0);
     if (fd < 0) { return 0; }
@@ -22,7 +52,22 @@ fn n_read_file(path, out_len) {
         var avail = buf_cap - total;
         if (avail <= 0) {
             var new_cap = buf_cap * 2;
+            # lib/alloc.cyr's ALLOC_MAX is 0x80000000 and it rejects with `>`, not `>=`, so
+            # the doubling chain succeeds all the way to 2^31 and the 2^32 request returns 0
+            # -- then memcpy(0, buf, 2147483648) segfaults. No large file is needed to get
+            # here: n_read_file("/dev/zero", slot) reaches it, and n_stream_reader_open is a
+            # public entry point an SFZ `default_path` + `sample=` pair can steer.
+            if (new_cap > 2147483648) {
+                file_close(fd);
+                store64(out_len, 0);
+                return 0;
+            }
             var new_buf = alloc(new_cap);
+            if (new_buf == 0) {
+                file_close(fd);
+                store64(out_len, 0);
+                return 0;
+            }
             memcpy(new_buf, buf, total);
             buf = new_buf;
             buf_cap = new_cap;
@@ -66,23 +111,34 @@ fn n_sample_from_decode(dr) {
     var samples = decode_result_samples(dr);
     var channels = fmtinfo_channels(info);
     var sample_rate = fmtinfo_sample_rate(info);
+    # Trust boundary for foreign audio data. A single non-finite frame is not a local
+    # glitch: it propagates through the SVF state and latches the voice to NaN for its
+    # whole life, and the mix buffer with it. O(n) once at load, zero cost per render.
+    var nsm = vec_len(samples);
+    var si = 0;
+    while (si < nsm) {
+        if (n_is_finite(vec_get(samples, si)) == 0) { vec_set(samples, si, 0); }
+        si = si + 1;
+    }
     if (channels == 1) { return n_sample_from_mono(samples, sample_rate); }
     return n_sample_from_stereo(samples, sample_rate);
 }
 
-# load_wav_from_memory(data, len) -> Sample pointer, or ERR_IMPORT.
+# load_wav_from_memory(data, len) -> Sample pointer, or NIDHI_ERR_IMPORT.
 #must_use
 fn n_load_wav_from_memory(data, len) {
+    n_init();
     var dr = wav_decode(data, len);
-    if (dr < 0) { return ERR_IMPORT; }
+    if (dr < 0) { return NIDHI_ERR_IMPORT; }
     return n_sample_from_decode(dr);
 }
 
-# load_wav(path) -> Sample pointer (named from the file stem), or ERR_IMPORT.
+# load_wav(path) -> Sample pointer (named from the file stem), or NIDHI_ERR_IMPORT.
 #must_use
 fn n_load_wav(path) {
+    n_init();
     var dr = decode_file(path);
-    if (dr < 0) { return ERR_IMPORT; }
+    if (dr < 0) { return NIDHI_ERR_IMPORT; }
     var sample = n_sample_from_decode(dr);
     return n_sample_with_name(sample, n_file_stem(path));
 }
@@ -103,15 +159,16 @@ struct NStreamReader {
     file_offset;
 }
 
-# open(path) -> NStreamReader pointer, or ERR_IMPORT. Does a full decode up front for metadata.
+# open(path) -> NStreamReader pointer, or NIDHI_ERR_IMPORT. Does a full decode up front for metadata.
 #must_use
 fn n_stream_reader_open(path) {
+    n_init();
     var lenslot = alloc(8);
     var file_data = n_read_file(path, lenslot);
-    if (file_data == 0) { return ERR_IMPORT; }
+    if (file_data == 0) { return NIDHI_ERR_IMPORT; }
     var file_len = load64(lenslot);
     var dr = wav_decode(file_data, file_len);
-    if (dr < 0) { return ERR_IMPORT; }
+    if (dr < 0) { return NIDHI_ERR_IMPORT; }
     var info = decode_result_info(dr);
     var r = alloc(sizeof(NStreamReader));
     NStreamReader_set_decoder(r, wav_stream_new(0));
@@ -175,8 +232,14 @@ fn n_stream_reader_read_chunk(reader, chunk_frames) {
                 var file_offset = NStreamReader_file_offset(reader);
                 var file_len = NStreamReader_file_len(reader);
                 if (file_offset < file_len) {
-                    var end = file_offset + 4096;
-                    if (end > file_len) { end = file_len; }
+                    # Feed the WHOLE remainder in one go. shravan's stream decoder is
+                    # buffer-then-decode-once, and wav_decode clamps the declared data size
+                    # to what is present -- so the first 4096-byte slice decoded as a
+                    # COMPLETE valid WAV and latched _WAV_ST_DECODED, after which every
+                    # later feed appended without decoding. Every file over ~4 KB silently
+                    # returned only its first 1013 frames, while total_frames stayed
+                    # correct, so the reader was not even self-consistent.
+                    var end = file_len;
                     var chunk_ptr = NStreamReader_file_data(reader) + file_offset;
                     NStreamReader_set_file_offset(reader, end);
                     var events = wav_stream_feed(decoder, chunk_ptr, end - file_offset);

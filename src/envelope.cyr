@@ -44,12 +44,20 @@ fn n_adsr_config_new(attack_samples, decay_samples, sustain_level, release_sampl
 # from_seconds: samples = (secs * sample_rate), truncated toward zero, with
 # max(0) on attack/decay and max(1) on release. sustain clamped to [0,1].
 # All args are f64 bit patterns.
+#
+# Each count is saturated to u32 range BEFORE f64_to. Rust's `as u32` saturates;
+# Cyrius f64_to is a raw cvttsd2si that returns i64::MIN for anything out of range
+# -- +inf, NaN, or merely 1e30. That i64::MIN then collapses to 0 downstream, so an
+# "infinite" attack/release silently becomes INSTANTANEOUS: a click on note-on and
+# note-off, the exact inverse of the requested envelope. Operand order matters for
+# NaN safety: f64_min(f64_max(x, lo), hi) propagates the clamp, the reverse does not.
 #must_use
 fn n_adsr_config_from_seconds(attack, decay, sustain, release, sample_rate) {
-    var a = f64_to(f64_max(f64_mul(attack, sample_rate), 0));
-    var d = f64_to(f64_max(f64_mul(decay, sample_rate), 0));
+    var cap = f64_from(4294967295);
+    var a = f64_to(f64_min(f64_max(f64_mul(attack, sample_rate), 0), cap));
+    var d = f64_to(f64_min(f64_max(f64_mul(decay, sample_rate), 0), cap));
     var s = f64_min(f64_max(sustain, 0), F64_ONE);
-    var r = f64_to(f64_max(f64_mul(release, sample_rate), F64_ONE));
+    var r = f64_to(f64_min(f64_max(f64_mul(release, sample_rate), F64_ONE), cap));
     return n_adsr_config_new(a, d, s, r);
 }
 
@@ -79,6 +87,16 @@ fn n_amp_envelope_new(config, sample_rate) {
     var d = f64_max(f64_div(f64_from(NAdsrConfig_decay_samples(config)), sample_rate), 0);
     var s = f64_min(f64_max(NAdsrConfig_sustain_level(config), 0), F64_ONE);
     var rel = f64_max(f64_div(f64_from(NAdsrConfig_release_samples(config)), sample_rate), 0);
+    # The raw divide above is parity-faithful for every FINITE result, and tests/envelope.tcyr
+    # pins that (4/0.5 = 8s). It overflows to +inf only for a denormal sample_rate -- most
+    # plausibly a raw i64 44100 passed where an f64 bit pattern was expected, which reads as
+    # 2.18e-319. naad accepts an infinite release (it rejects only release < 0), and the voice
+    # then NEVER reaches IDLE: a hung note burning render cycles for the life of the engine.
+    # Route the non-finite case into the existing fallback rather than clamping the input, so
+    # parity holds everywhere the oracle produced a real number.
+    if (n_is_finite(a) == 0) { a = 0; }
+    if (n_is_finite(d) == 0) { d = 0; }
+    if (n_is_finite(rel) == 0) { rel = 0; }
     var env = envelope_adsr_with_sample_rate(a, d, s, rel, f64_max(sample_rate, F64_ONE));
     if (naad_is_err(env) == 1) {
         # fallback: 0.0 attack, 0.0 decay, 1.0 sustain, 0.01s release, 44100 Hz -- always valid

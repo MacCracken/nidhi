@@ -2,25 +2,33 @@
 # Requires: (nothing -- pure integer constants + a predicate)
 #
 # Ports the Rust `NidhiError` enum to negative integer error codes, matching the
-# naad/hisab/shravan ecosystem convention (functions return 0/ERR_NONE or a valid
-# pointer on success, a negative ERR_* on failure). The Rust variants' String
-# payloads are dropped -- the code IS the error. Config/data types that need a
-# faithful serde round-trip use `#derive(Serialize)` instead (see zone.cyr etc.).
+# naad/hisab/shravan ecosystem convention (functions return 0/NIDHI_ERR_NONE or a
+# valid pointer on success, a negative NIDHI_ERR_* on failure). The Rust variants'
+# String payloads are dropped -- the code IS the error. Config/data types that need
+# a faithful serde round-trip use `#derive(Serialize)` instead (see zone.cyr etc.).
+#
+# The `NIDHI_` prefix is mandatory, not decorative: dist/nidhi.cyr is concatenated
+# into a FLAT namespace alongside naad/goonj/shravan/sankoch, and a bare `ERR_NONE`
+# collides with `lib/goonj.cyr` and shravan's `enum ShravanErr`. They all happen to
+# be 0 today, which is exactly what makes it dangerous -- the clash is invisible
+# until one side renumbers. naad escaped the same trap in 2.2.0 (ERR_* ->
+# NAAD_ERR_*); this is nidhi's half. See docs/port/26-mod-io-bench.md, which
+# specified `NIDHI_ERR_IMPORT` from the start.
 #
 # Rust variant           -> code
-#   (ok)                 ->  ERR_NONE            = 0
-#   SampleNotFound(id)   ->  ERR_SAMPLE_NOT_FOUND = -1
-#   InvalidZone(msg)     ->  ERR_INVALID_ZONE     = -2
-#   InvalidParameter{..} ->  ERR_INVALID_PARAMETER = -3
-#   Playback(msg)        ->  ERR_PLAYBACK         = -4
-#   ImportError(msg)     ->  ERR_IMPORT           = -5
+#   (ok)                 ->  NIDHI_ERR_NONE              =  0
+#   SampleNotFound(id)   ->  NIDHI_ERR_SAMPLE_NOT_FOUND  = -1
+#   InvalidZone(msg)     ->  NIDHI_ERR_INVALID_ZONE      = -2
+#   InvalidParameter{..} ->  NIDHI_ERR_INVALID_PARAMETER = -3
+#   Playback(msg)        ->  NIDHI_ERR_PLAYBACK          = -4
+#   ImportError(msg)     ->  NIDHI_ERR_IMPORT            = -5
 
-var ERR_NONE              = 0;
-var ERR_SAMPLE_NOT_FOUND  = (0 - 1);
-var ERR_INVALID_ZONE      = (0 - 2);
-var ERR_INVALID_PARAMETER = (0 - 3);
-var ERR_PLAYBACK          = (0 - 4);
-var ERR_IMPORT            = (0 - 5);
+var NIDHI_ERR_NONE              = 0;
+var NIDHI_ERR_SAMPLE_NOT_FOUND  = (0 - 1);
+var NIDHI_ERR_INVALID_ZONE      = (0 - 2);
+var NIDHI_ERR_INVALID_PARAMETER = (0 - 3);
+var NIDHI_ERR_PLAYBACK          = (0 - 4);
+var NIDHI_ERR_IMPORT            = (0 - 5);
 
 # n_is_err -- 1 if `code` is a nidhi error (negative), else 0.
 #must_use
