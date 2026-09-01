@@ -2,7 +2,7 @@
 
 > nidhi 2.0.1 (Cyrius port) benchmark comparison.
 >
-> - **Rust**: criterion v0.5, release mode (`rust-old/`, `cargo bench`). f32 samples; naad 1 /
+> - **Rust**: criterion v0.5, release mode (`cargo bench` in the retired `rust-old/`). f32 samples; naad 1 /
 >   shravan 1.0.1 std path; SSE2/NEON SIMD mix + zero-alloc render path.
 > - **Cyrius**: cyrius 6.5.36, `tests/nidhi.bcyr` (`bench_batch_start`/`stop`), 2026-08-31. f64
 >   samples (no f32); naad 2.2.2 / shravan 2.8.0 / hisab 2.11.2; per-sample SVF-output alloc;
@@ -12,8 +12,11 @@
 >
 > Both sides run the SAME 7 operations (from `rust-old/benches/benchmarks.rs`). The parity signal
 > is the **relative shape** across benchmarks, not the absolute nanoseconds (Cyrius is f64-only
-> and does no autovectorization). Reproduce: `cyrius bench tests/nidhi.bcyr` and, in `rust-old/`,
-> `cargo bench`.
+> and does no autovectorization). Reproduce the Cyrius side with `cyrius bench tests/nidhi.bcyr`.
+> The Rust side is **not reproducible from the working tree** — `rust-old/` was retired in 2.0.4.
+> Its numbers survive in `bench-history-rust.csv` (tracked since 2.0.4); to re-measure, restore
+> the crate from git history and see `docs/port/oracle-build-identity.md` for the exact
+> dependency versions and rustc.
 
 ## Head-to-Head
 

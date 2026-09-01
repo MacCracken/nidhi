@@ -5,10 +5,9 @@
 
 ## Version
 
-**2.0.3** — 2026-08-31. Loop-crossfade seam closed, plus two parity divergences found by a full
-`rust-old/` port-coverage audit. Follows the 2.0.2 P-1 sweep, the 2.0.1 toolchain/dependency
-catch-up, and the 2.0.0 Rust → Cyrius port. 7180 lines of Rust preserved at `rust-old/` as the
-parity oracle.
+**2.0.4** — 2026-08-31. The Rust oracle is retired: golden vectors captured, build identity
+recorded, `rust-old/` removed. Follows 2.0.3 (crossfade seam), 2.0.2 (P-1 sweep), 2.0.1
+(toolchain/dependency catch-up) and 2.0.0 (the port).
 
 ## Toolchain
 
@@ -17,7 +16,10 @@ parity oracle.
 
 ## Source
 
-- Rust reference: 7180 lines at `rust-old/` (frozen, do not edit).
+- Rust reference: **retired in 2.0.4.** The 7180-line crate lives in git history
+  (`git show <rev>:rust-old/src/<mod>.rs`); its build identity and full dependency lockfile are
+  recorded at [`docs/port/oracle-build-identity.md`](../port/oracle-build-identity.md), and the
+  behaviour it pinned is asserted by `tests/golden.tcyr`.
 - Cyrius port: **all 14 modules ported**, `src/*.cyr`, listed in dependency order under
   `cyrius.cyml [lib].modules`:
   `error` → `f64_util` → `loop_mode` → `envelope` → `zone` → `sample` → `instrument` →
@@ -71,14 +73,19 @@ bite a consumer first:
 - **Stretch output *values* are untested on both sides** — all 13 Rust and all 40 Cyrius stretch
   assertions check only length/finiteness. Golden vectors pinned to 2.0.5.
 
-## rust-old/
+## rust-old/ — retired (2.0.4)
 
-**Keep for now; delete `rust-old/target/` (218 MB, 99.87 % of the directory) after the 2.0.4
-pre-work.** The folder is git-tracked, so the `.rs` sources survive deletion via `git show` —
-but `Cargo.lock` and `bench-history-rust.csv` are untracked and are the only record of the
-dependency versions the port was written against. The oracle is still earning its place: it
-caught two real divergences in 2.0.3 that the test suite could not see. Full verdict and the
-ordered pre-work are in [`roadmap.md`](roadmap.md).
+Removed from the working tree; **377 MB reclaimed** (repo 525 MB → 148 MB). Nothing was lost:
+
+- The 1002 tracked files are in git history — `git show HEAD~1:rust-old/src/engine.rs` works.
+- The two files that were **not** tracked, and would have been lost, are preserved:
+  `Cargo.lock` (all 88 dependency versions) and the rustc identity, both in
+  [`docs/port/oracle-build-identity.md`](../port/oracle-build-identity.md);
+  `bench-history-rust.csv` is now tracked (the blanket `*.csv` ignore was excluding it *and* the
+  live benchmark series).
+- The behaviour it pinned is asserted by `tests/golden.tcyr` — 43 assertions against values
+  captured from a live oracle build, closing the gap the 2.0.3 audit named as the single largest
+  untested surface in the port (stretch output *values*, previously untested on **both** sides).
 
 ## Next
 

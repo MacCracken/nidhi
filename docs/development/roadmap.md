@@ -15,54 +15,29 @@ release, not left as a wishlist.
 | **2.0.1** (2026-08-31) | Toolchain 6.5.36 + dependency catch-up (naad 2.2.2 / shravan 2.8.0 / hisab 2.11.2) |
 | **2.0.2** (2026-08-31) | P-1 audit: security, memory safety, correctness. `ERR_* → NIDHI_ERR_*` |
 | **2.0.3** (2026-08-31) | Loop-crossfade seam ([ADR 0001](../adr/0001-loop-crossfade-seam.md)); round-half-away parity; signed `inf`/`nan` |
+| **2.0.4** (2026-08-31) | **Rust oracle retired.** Golden vectors captured, build identity recorded, `rust-old/` removed (377 MB) |
 
 ---
 
-## 2.0.4 — Oracle preservation, then reclaim the disk
+## 2.0.5 — Coverage backfill
 
-**Gate for touching `rust-old/`.** The 2.0.3 audit's verdict was *safe after pre-work, and the
-218 MB you want back is `rust-old/target/`, not the oracle*. `rust-old/` is git-tracked (1002
-files), so almost everything survives a `git show` — but two files do not.
+The golden vectors landed in 2.0.4 closed the largest gap (stretch output *values*). These are
+the rest of the Rust `#[test]` cases with no Cyrius counterpart, from the 2.0.3 audit.
 
-- [ ] **Get `rust-old/Cargo.lock` into version control.** Currently untracked (`.gitignore:2`)
-      and the only record of which crate versions the port was written against: naad 1.2.5,
-      shravan 1.1.0, hisab 1.4.0, serde 1.0.228, thiserror 2.0.18, criterion 0.5.1. Record it as
-      `docs/port/oracle-lockfile.md` or an ADR.
-- [ ] **Get `bench-history-rust.csv` into git** — excluded by `.gitignore:6` (`*.csv`), which
-      also silently excludes `bench-history.csv`. Decide whether the benchmark series is
-      tracked; `BENCHMARKS.md` already notes the inconsistency.
-- [ ] **Record the oracle's rustc identity**: `rustc 1.96.0 (ac68faa20 2026-05-25)`, LLVM 22.1.2,
-      x86_64, sse2 — from `rust-old/target/.rustc_info.json`. `rust-toolchain.toml` pins nothing.
-- [ ] **Then `rm -rf rust-old/target/`** — 218 MB of `.fingerprint` JSON, build-script stdout,
-      and `.rlib`/`.rmeta`. Reclaims 99.87 % of the directory at zero oracle cost. Keep
-      `src/` (256 KB), `benches/`, `fuzz/`, `Cargo.*`, `Makefile`.
-- [ ] Fix the two stale dependency claims the audit found: `docs/port/22-mod-dsp.md:348` says
-      "naad 1.0.0 signatures" (the oracle linked 1.2.5).
-
-**`rust-old/src/` stays until 2.0.6.** It is still finding bugs: the 2.0.3 audit caught the
-banker's-rounding divergence and the signed-`inf` rejection, both invisible to a 383-assertion
-suite, both found only by reading the oracle.
-
-## 2.0.5 — Golden vectors (what actually retires the oracle)
-
-**The single largest untested surface in the port is stretch output *values*.** All 13 Rust
-stretch tests and all 40 Cyrius assertions check length, non-emptiness, or finiteness — **not one
-sample value, on either side**. A wholesale algorithmic defect that preserved output length
-passes everything today.
-
-- [ ] Generate golden vectors from `rust-old/` while it still builds: a few hundred WSOLA/OLA
-      output samples, and one `detect_loop_points` top-10 candidate list (where the f32→f64
-      downmix can permute near-ties in exactly the periodic material the test uses).
-- [ ] Check them in and assert against them.
-- [ ] Restore the two strict tolerances that die with the oracle: Hann endpoints at `1e-6`,
-      `trim_silence` at `N_F32_EPSILON` (already available at `src/f64_util.cyr:16`).
-- [ ] Close the highest-value coverage gaps the audit named: `parse_empty_file`,
-      `loop_mode_mapping` (6 assertions), `invalid_opcode_ignored`, `amp_envelope_zero_attack`
-      (the shape of the *default* config and of every SFZ region with no `ampeg` opcodes — the
-      most common config in production and the least tested), and
-      `amp_envelope_smooth_release_from_mid_attack`.
-- [ ] Port the three SFZ wiring paths exercised by nothing in the repo: `fillfo_*`,
-      `pitchlfo_*`, `<curve>` header.
+- [ ] `amp_envelope_zero_attack` — attack_samples=0, decay_samples=0 must reach sustain. This is
+      the shape of the **default** config and of every SFZ region with no `ampeg` opcodes: the
+      most common configuration in production and the least tested.
+- [ ] `amp_envelope_smooth_release_from_mid_attack` — release entered part-way through the attack
+      ramp must start the down-ramp from the *current* level, not from 1.0. A click if it
+      regresses. `tests/envelope.tcyr` only ever releases from a settled sustain.
+- [ ] SFZ: `parse_empty_file`, `loop_mode_mapping` (6 assertions), `invalid_opcode_ignored`,
+      and `loop_start`/`loop_end` **values** (the path 2.0.2 rewrote).
+- [ ] The three SFZ wiring paths exercised by nothing in the repo: `fillfo_*`, `pitchlfo_*`,
+      `<curve>` header. Plus `resonance` / `fil_resonance`.
+- [ ] Restore the two strict tolerances the audit flagged: Hann endpoints at `1e-6`,
+      `trim_silence` at `N_F32_EPSILON` (already at `src/f64_util.cyr:16`).
+- [ ] The maximal `Zone` builder chain — 10 of 23 `n_zone_with_*` builders have no direct
+      assertion anywhere. The oracle's own fixture is recoverable from git history.
 
 ## 2.0.6 — Latent-hazard closeout
 
@@ -155,6 +130,12 @@ before/after in `bench-history.csv` per CLAUDE.md.
       forks DSP CLAUDE.md says must come from naad.
 - [ ] Adopt the guard-page fuzz harnesses (`guard_sf2.fcyr` / `guard_sfz.fcyr`); needs a
       `cyr_mmap == -1` fallback for the agnos target.
+- [ ] **WSOLA output is amplified up to ~588x** (measured: input max 0.97 → output max 588.5).
+      `normalize_by_window_sum` divides by `window_sum` only where it exceeds `1e-6`, so at the
+      output edges — one Hann frame, tiny taper — the division amplifies instead of normalising.
+      **Inherited from the oracle, faithfully ported** (identical threshold and guard), so
+      fixing it is a deliberate divergence needing an ADR. Recorded in
+      `docs/port/oracle-build-identity.md` before the oracle was deleted.
 - [ ] `n_stretch_ola` / `n_stretch` dedup (49 shared lines) — oracle-faithful duplication, so
       cosmetic; extract only the guard prologue and the normalize/truncate epilogue.
 

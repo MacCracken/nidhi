@@ -3,7 +3,8 @@
 **Goal:** port nidhi (Rust sampler, 7180 lines, preserved in `rust-old/`) to Cyrius
 **6.3.33**, reaching **behavioral parity** so the two can be benchmarked against each other.
 
-`rust-old/` is the **parity oracle** — never modify it; cross-check every ported module against it.
+`rust-old/` was the **parity oracle**. The port is complete and it was retired in 2.0.4; it
+lives in git history, and `tests/golden.tcyr` carries the values captured from it.
 
 ## Key decisions (locked)
 
@@ -44,7 +45,7 @@ src/*.cyr           one module per Rust module; self-contained (NO cross-module 
 dist/nidhi.cyr      bundle = [lib].modules concatenated in order (built by `cyrius distlib`)
 tests/*.tcyr        assert suites (cyrius test / cyrius tests)
 tests/*.bcyr        benches (cyrius bench)   tests/*.fcyr  fuzz (cyrius fuzz)
-rust-old/           Rust parity oracle (read-only)
+rust-old/           Rust parity oracle -- REMOVED in 2.0.4 (in git history)
 docs/port/          this plan + the 13 recon briefs (10-26)
 ```
 

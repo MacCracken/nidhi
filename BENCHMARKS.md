@@ -10,8 +10,10 @@ compared head-to-head.
 # Cyrius port:
 cyrius bench tests/nidhi.bcyr
 
-# Rust original (needs the Rust toolchain + published naad/shravan/hisab):
-cd rust-old && cargo bench
+# Rust original: NOT reproducible from the working tree -- rust-old/ was retired in 2.0.4.
+# Its numbers survive in bench-history-rust.csv. To re-measure, restore the crate from git
+# history and see docs/port/oracle-build-identity.md for the exact deps and rustc.
+#   git log --all -- rust-old/            # find the last revision that had it
 ```
 
 Cyrius batches N iterations between one `clock_gettime` pair and reports the per-iteration
@@ -94,5 +96,6 @@ runs of the same binary — read them as indicative only.
 - `wsola_1sec_2x` is dominated by the O(frames × tolerance × frame_size) cross-correlation
   search — the most Cyrius-vs-Rust-divergent case.
 
-History rows are appended to `bench-history.csv` (gitignored by the inherited `.gitignore`;
-un-ignore it if you want the series tracked in git, as the sibling Cyrius repos do).
+History rows are appended to `bench-history.csv`, which is tracked as of 2.0.4 — the inherited
+`.gitignore` excluded it via a blanket `*.csv`, and that also excluded `bench-history-rust.csv`,
+now the only surviving record of the Rust oracle's numbers.

@@ -1,0 +1,17 @@
+date,toolchain,benchmark,mid_ns
+2026-07-02,rust-criterion-0.5,voice_count_scaling/1,54.4
+2026-07-02,rust-criterion-0.5,voice_count_scaling/4,92.0
+2026-07-02,rust-criterion-0.5,voice_count_scaling/8,151.7
+2026-07-02,rust-criterion-0.5,voice_count_scaling/16,264.0
+2026-07-02,rust-criterion-0.5,voice_count_scaling/32,503.3
+2026-07-02,rust-criterion-0.5,voice_count_scaling/64,928.8
+2026-07-02,rust-criterion-0.5,fill_buffer_stereo/1,7419
+2026-07-02,rust-criterion-0.5,fill_buffer_stereo/8,58455
+2026-07-02,rust-criterion-0.5,fill_buffer_stereo/16,115720
+2026-07-02,rust-criterion-0.5,fill_buffer_per_sample/1,28626
+2026-07-02,rust-criterion-0.5,fill_buffer_per_sample/8,76902
+2026-07-02,rust-criterion-0.5,fill_buffer_per_sample/16,137100
+2026-07-02,rust-criterion-0.5,interpolation_cubic_1k,8017
+2026-07-02,rust-criterion-0.5,interpolation_stereo_1k,10344
+2026-07-02,rust-criterion-0.5,fill_buffer_stereo_filtered_8v,70.7
+2026-07-02,rust-criterion-0.5,wsola_1sec_2x,62714000

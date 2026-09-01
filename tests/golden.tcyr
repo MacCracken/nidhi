@@ -1,0 +1,215 @@
+# golden.tcyr -- assert the Cyrius port against values captured from the Rust oracle.
+#
+# rust-old/ was deleted in 2.0.4. Before that, a throwaway crate depending on it by path
+# emitted these vectors; the oracle itself was never modified. The 2.0.3 audit found that
+# stretch output VALUES were untested on BOTH sides -- all 13 Rust and all 40 Cyrius stretch
+# assertions checked only length, non-emptiness or finiteness, so a wholesale algorithmic
+# defect that preserved output length passed everything. This file closes that.
+#
+# Fixture: ((i * 7) % 32) / 32, i.e. k/32 -- EXACTLY representable in both f32 and f64, so a
+# mismatch here is the algorithm and never the input. Goldens are round(value * 1e6).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/error.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+include "src/sample.cyr"
+include "src/capture.cyr"
+include "src/stretch.cyr"
+
+fn fixture(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, f64_div(f64_from((i * 7) % 32), f64_from(32)));
+        i = i + 1;
+    }
+    return v;
+}
+
+# |actual*1e6 - golden| <= tol, compared in the float domain so f64_to never truncates a
+# near-miss into a pass.
+fn near(actual, golden_e6, tol_e6) {
+    var a = f64_mul(actual, f64_from(1000000));
+    var d = f64_abs(f64_sub(a, f64_from(golden_e6)));
+    if (f64_le(d, f64_from(tol_e6)) == 1) { return 1; }
+    return 0;
+}
+
+fn check(out, gold, offset, tol_e6, label) {
+    var n = vec_len(gold);
+    var bad = 0;
+    var i = 0;
+    while (i < n) {
+        if (offset + i < vec_len(out)) {
+            if (near(vec_get(out, offset + i), vec_get(gold, i), tol_e6) == 0) { bad = bad + 1; }
+        } else {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, label);
+    return bad;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("stretch_short values match the Rust oracle");
+
+    var gold_short_1_0 = vec_new();
+    vec_push(gold_short_1_0, 0); vec_push(gold_short_1_0, 218750); vec_push(gold_short_1_0, 437500); vec_push(gold_short_1_0, 656250); vec_push(gold_short_1_0, 875000); vec_push(gold_short_1_0, 93750); vec_push(gold_short_1_0, 312500); vec_push(gold_short_1_0, 531250); vec_push(gold_short_1_0, 750000); vec_push(gold_short_1_0, 968750);
+    vec_push(gold_short_1_0, 187500); vec_push(gold_short_1_0, 406250); vec_push(gold_short_1_0, 625000); vec_push(gold_short_1_0, 843750); vec_push(gold_short_1_0, 62500); vec_push(gold_short_1_0, 281250); vec_push(gold_short_1_0, 500000); vec_push(gold_short_1_0, 718750); vec_push(gold_short_1_0, 937500); vec_push(gold_short_1_0, 156250);
+    vec_push(gold_short_1_0, 375000); vec_push(gold_short_1_0, 593750); vec_push(gold_short_1_0, 812500); vec_push(gold_short_1_0, 31250); vec_push(gold_short_1_0, 250000); vec_push(gold_short_1_0, 468750); vec_push(gold_short_1_0, 687500); vec_push(gold_short_1_0, 906250); vec_push(gold_short_1_0, 125000); vec_push(gold_short_1_0, 343750);
+    vec_push(gold_short_1_0, 562500); vec_push(gold_short_1_0, 781250); vec_push(gold_short_1_0, 0); vec_push(gold_short_1_0, 218750); vec_push(gold_short_1_0, 437500); vec_push(gold_short_1_0, 656250); vec_push(gold_short_1_0, 875000); vec_push(gold_short_1_0, 93750); vec_push(gold_short_1_0, 312500); vec_push(gold_short_1_0, 531250);
+    var st_short_1_0 = n_stretcher_new(fixture(100), f64_from(44100));
+    var out_short_1_0 = n_stretch(st_short_1_0, F64_ONE);
+    assert_eq(vec_len(out_short_1_0), 100, "short_1_0 length matches oracle");
+    check(out_short_1_0, gold_short_1_0, 0, 2, "short_1_0 values match oracle (tol 2e-6)");
+
+    var gold_short_1_5 = vec_new();
+    vec_push(gold_short_1_5, 0); vec_push(gold_short_1_5, 145833); vec_push(gold_short_1_5, 291667); vec_push(gold_short_1_5, 437500); vec_push(gold_short_1_5, 583333); vec_push(gold_short_1_5, 729167); vec_push(gold_short_1_5, 875000); vec_push(gold_short_1_5, 354167); vec_push(gold_short_1_5, 166667); vec_push(gold_short_1_5, 312500);
+    vec_push(gold_short_1_5, 458333); vec_push(gold_short_1_5, 604167); vec_push(gold_short_1_5, 750000); vec_push(gold_short_1_5, 895833); vec_push(gold_short_1_5, 708333); vec_push(gold_short_1_5, 187500); vec_push(gold_short_1_5, 333333); vec_push(gold_short_1_5, 479167); vec_push(gold_short_1_5, 625000); vec_push(gold_short_1_5, 770833);
+    vec_push(gold_short_1_5, 583333); vec_push(gold_short_1_5, 62500); vec_push(gold_short_1_5, 208333); vec_push(gold_short_1_5, 354167); vec_push(gold_short_1_5, 500000); vec_push(gold_short_1_5, 645833); vec_push(gold_short_1_5, 791667); vec_push(gold_short_1_5, 937500); vec_push(gold_short_1_5, 416667); vec_push(gold_short_1_5, 229167);
+    vec_push(gold_short_1_5, 375000); vec_push(gold_short_1_5, 520833); vec_push(gold_short_1_5, 666667); vec_push(gold_short_1_5, 812500); vec_push(gold_short_1_5, 291667); vec_push(gold_short_1_5, 104167); vec_push(gold_short_1_5, 250000); vec_push(gold_short_1_5, 395833); vec_push(gold_short_1_5, 541667); vec_push(gold_short_1_5, 687500);
+    var st_short_1_5 = n_stretcher_new(fixture(100), f64_from(44100));
+    var out_short_1_5 = n_stretch(st_short_1_5, f64_div(f64_from(3), f64_from(2)));
+    assert_eq(vec_len(out_short_1_5), 150, "short_1_5 length matches oracle");
+    check(out_short_1_5, gold_short_1_5, 0, 2, "short_1_5 values match oracle (tol 2e-6)");
+
+    var gold_short_0_5 = vec_new();
+    vec_push(gold_short_0_5, 0); vec_push(gold_short_0_5, 437500); vec_push(gold_short_0_5, 875000); vec_push(gold_short_0_5, 312500); vec_push(gold_short_0_5, 750000); vec_push(gold_short_0_5, 187500); vec_push(gold_short_0_5, 625000); vec_push(gold_short_0_5, 62500); vec_push(gold_short_0_5, 500000); vec_push(gold_short_0_5, 937500);
+    vec_push(gold_short_0_5, 375000); vec_push(gold_short_0_5, 812500); vec_push(gold_short_0_5, 250000); vec_push(gold_short_0_5, 687500); vec_push(gold_short_0_5, 125000); vec_push(gold_short_0_5, 562500); vec_push(gold_short_0_5, 0); vec_push(gold_short_0_5, 437500); vec_push(gold_short_0_5, 875000); vec_push(gold_short_0_5, 312500);
+    vec_push(gold_short_0_5, 750000); vec_push(gold_short_0_5, 187500); vec_push(gold_short_0_5, 625000); vec_push(gold_short_0_5, 62500); vec_push(gold_short_0_5, 500000); vec_push(gold_short_0_5, 937500); vec_push(gold_short_0_5, 375000); vec_push(gold_short_0_5, 812500); vec_push(gold_short_0_5, 250000); vec_push(gold_short_0_5, 687500);
+    vec_push(gold_short_0_5, 125000); vec_push(gold_short_0_5, 562500); vec_push(gold_short_0_5, 0); vec_push(gold_short_0_5, 437500); vec_push(gold_short_0_5, 875000); vec_push(gold_short_0_5, 312500); vec_push(gold_short_0_5, 750000); vec_push(gold_short_0_5, 187500); vec_push(gold_short_0_5, 625000); vec_push(gold_short_0_5, 62500);
+    var st_short_0_5 = n_stretcher_new(fixture(100), f64_from(44100));
+    var out_short_0_5 = n_stretch(st_short_0_5, F64_HALF);
+    assert_eq(vec_len(out_short_0_5), 50, "short_0_5 length matches oracle");
+    check(out_short_0_5, gold_short_0_5, 0, 2, "short_0_5 values match oracle (tol 2e-6)");
+
+    var gold_short_2_0 = vec_new();
+    vec_push(gold_short_2_0, 0); vec_push(gold_short_2_0, 109375); vec_push(gold_short_2_0, 218750); vec_push(gold_short_2_0, 328125); vec_push(gold_short_2_0, 437500); vec_push(gold_short_2_0, 546875); vec_push(gold_short_2_0, 656250); vec_push(gold_short_2_0, 765625); vec_push(gold_short_2_0, 875000); vec_push(gold_short_2_0, 484375);
+    vec_push(gold_short_2_0, 93750); vec_push(gold_short_2_0, 203125); vec_push(gold_short_2_0, 312500); vec_push(gold_short_2_0, 421875); vec_push(gold_short_2_0, 531250); vec_push(gold_short_2_0, 640625); vec_push(gold_short_2_0, 750000); vec_push(gold_short_2_0, 859375); vec_push(gold_short_2_0, 968750); vec_push(gold_short_2_0, 578125);
+    vec_push(gold_short_2_0, 187500); vec_push(gold_short_2_0, 296875); vec_push(gold_short_2_0, 406250); vec_push(gold_short_2_0, 515625); vec_push(gold_short_2_0, 625000); vec_push(gold_short_2_0, 734375); vec_push(gold_short_2_0, 843750); vec_push(gold_short_2_0, 453125); vec_push(gold_short_2_0, 62500); vec_push(gold_short_2_0, 171875);
+    vec_push(gold_short_2_0, 281250); vec_push(gold_short_2_0, 390625); vec_push(gold_short_2_0, 500000); vec_push(gold_short_2_0, 609375); vec_push(gold_short_2_0, 718750); vec_push(gold_short_2_0, 828125); vec_push(gold_short_2_0, 937500); vec_push(gold_short_2_0, 546875); vec_push(gold_short_2_0, 156250); vec_push(gold_short_2_0, 265625);
+    var st_short_2_0 = n_stretcher_new(fixture(100), f64_from(44100));
+    var out_short_2_0 = n_stretch(st_short_2_0, f64_from(2));
+    assert_eq(vec_len(out_short_2_0), 200, "short_2_0 length matches oracle");
+    check(out_short_2_0, gold_short_2_0, 0, 2, "short_2_0 values match oracle (tol 2e-6)");
+
+    test_group("WSOLA / OLA interior values match the Rust oracle");
+    # Sampled at index 2000, inside the fully-overlapped region. The oracle's own output is
+    # amplified up to ~588x at the EDGES, where window_sum falls under the 1e-6 normalise
+    # threshold -- an inherited upstream defect the port reproduces faithfully (identical
+    # threshold and guard). Interior samples are the meaningful comparison; the tolerance is
+    # wide because f32-vs-f64 error is multiplied by the same normalisation.
+
+    var gold_wsola_1_5 = vec_new();
+    vec_push(gold_wsola_1_5, 521355); vec_push(gold_wsola_1_5, 748145); vec_push(gold_wsola_1_5, 974181); vec_push(gold_wsola_1_5, 162093); vec_push(gold_wsola_1_5, 388390); vec_push(gold_wsola_1_5, 613971); vec_push(gold_wsola_1_5, 838863); vec_push(gold_wsola_1_5, 32215); vec_push(gold_wsola_1_5, 257337); vec_push(gold_wsola_1_5, 481808);
+    vec_push(gold_wsola_1_5, 705655); vec_push(gold_wsola_1_5, 928904); vec_push(gold_wsola_1_5, 127953); vec_push(gold_wsola_1_5, 351414); vec_push(gold_wsola_1_5, 574315); vec_push(gold_wsola_1_5, 796681); vec_push(gold_wsola_1_5, 0); vec_push(gold_wsola_1_5, 222548); vec_push(gold_wsola_1_5, 444600); vec_push(gold_wsola_1_5, 666181);
+    vec_push(gold_wsola_1_5, 887316); vec_push(gold_wsola_1_5, 94974); vec_push(gold_wsola_1_5, 316274); vec_push(gold_wsola_1_5, 537166); vec_push(gold_wsola_1_5, 757675); vec_push(gold_wsola_1_5, 977827); vec_push(gold_wsola_1_5, 189102); vec_push(gold_wsola_1_5, 409401); vec_push(gold_wsola_1_5, 629380); vec_push(gold_wsola_1_5, 849064);
+    vec_push(gold_wsola_1_5, 62852); vec_push(gold_wsola_1_5, 282654); vec_push(gold_wsola_1_5, 502197); vec_push(gold_wsola_1_5, 721508); vec_push(gold_wsola_1_5, 940609); vec_push(gold_wsola_1_5, 156693); vec_push(gold_wsola_1_5, 375896); vec_push(gold_wsola_1_5, 594928); vec_push(gold_wsola_1_5, 813813); vec_push(gold_wsola_1_5, 31290);
+    var st_wsola_1_5 = n_stretcher_new(fixture(4096), f64_from(44100));
+    var out_wsola_1_5 = n_stretch(st_wsola_1_5, f64_div(f64_from(3), f64_from(2)));
+    assert_eq(vec_len(out_wsola_1_5), 6144, "wsola_1_5 length matches oracle");
+    check(out_wsola_1_5, gold_wsola_1_5, 2000, 2000, "wsola_1_5 interior values match oracle");
+
+    var gold_wsola_0_5 = vec_new();
+    vec_push(gold_wsola_0_5, 521355); vec_push(gold_wsola_0_5, 748145); vec_push(gold_wsola_0_5, 974181); vec_push(gold_wsola_0_5, 162093); vec_push(gold_wsola_0_5, 388390); vec_push(gold_wsola_0_5, 613971); vec_push(gold_wsola_0_5, 838863); vec_push(gold_wsola_0_5, 32215); vec_push(gold_wsola_0_5, 257337); vec_push(gold_wsola_0_5, 481808);
+    vec_push(gold_wsola_0_5, 705655); vec_push(gold_wsola_0_5, 928904); vec_push(gold_wsola_0_5, 127953); vec_push(gold_wsola_0_5, 351414); vec_push(gold_wsola_0_5, 574315); vec_push(gold_wsola_0_5, 796681); vec_push(gold_wsola_0_5, 0); vec_push(gold_wsola_0_5, 222548); vec_push(gold_wsola_0_5, 444600); vec_push(gold_wsola_0_5, 666181);
+    vec_push(gold_wsola_0_5, 887316); vec_push(gold_wsola_0_5, 94974); vec_push(gold_wsola_0_5, 316274); vec_push(gold_wsola_0_5, 537166); vec_push(gold_wsola_0_5, 757675); vec_push(gold_wsola_0_5, 977827); vec_push(gold_wsola_0_5, 189102); vec_push(gold_wsola_0_5, 409401); vec_push(gold_wsola_0_5, 629380); vec_push(gold_wsola_0_5, 849064);
+    vec_push(gold_wsola_0_5, 62852); vec_push(gold_wsola_0_5, 282654); vec_push(gold_wsola_0_5, 502197); vec_push(gold_wsola_0_5, 721508); vec_push(gold_wsola_0_5, 940609); vec_push(gold_wsola_0_5, 156693); vec_push(gold_wsola_0_5, 375896); vec_push(gold_wsola_0_5, 594928); vec_push(gold_wsola_0_5, 813813); vec_push(gold_wsola_0_5, 31290);
+    var st_wsola_0_5 = n_stretcher_new(fixture(4096), f64_from(44100));
+    var out_wsola_0_5 = n_stretch(st_wsola_0_5, F64_HALF);
+    assert_eq(vec_len(out_wsola_0_5), 2048, "wsola_0_5 length matches oracle");
+    check(out_wsola_0_5, gold_wsola_0_5, 2000, 2000, "wsola_0_5 interior values match oracle");
+
+    var gold_ola_1_5 = vec_new();
+    vec_push(gold_ola_1_5, 525401); vec_push(gold_ola_1_5, 752015); vec_push(gold_ola_1_5, 958153); vec_push(gold_ola_1_5, 165624); vec_push(gold_ola_1_5, 391758); vec_push(gold_ola_1_5, 617179); vec_push(gold_ola_1_5, 825629); vec_push(gold_ola_1_5, 35118); vec_push(gold_ola_1_5, 260093); vec_push(gold_ola_1_5, 484422);
+    vec_push(gold_ola_1_5, 708130); vec_push(gold_ola_1_5, 918763); vec_push(gold_ola_1_5, 130163); vec_push(gold_ola_1_5, 353497); vec_push(gold_ola_1_5, 576275); vec_push(gold_ola_1_5, 798522); vec_push(gold_ola_1_5, 1726); vec_push(gold_ola_1_5, 224163); vec_push(gold_ola_1_5, 446108); vec_push(gold_ola_1_5, 667585);
+    vec_push(gold_ola_1_5, 881663); vec_push(gold_ola_1_5, 96183); vec_push(gold_ola_1_5, 317391); vec_push(gold_ola_1_5, 538194); vec_push(gold_ola_1_5, 758619); vec_push(gold_ola_1_5, 974088); vec_push(gold_ola_1_5, 189888); vec_push(gold_ola_1_5, 410113); vec_push(gold_ola_1_5, 630022); vec_push(gold_ola_1_5, 846567);
+    vec_push(gold_ola_1_5, 63365); vec_push(gold_ola_1_5, 283108); vec_push(gold_ola_1_5, 502597); vec_push(gold_ola_1_5, 721855); vec_push(gold_ola_1_5, 939311); vec_push(gold_ola_1_5, 156948); vec_push(gold_ola_1_5, 376111); vec_push(gold_ola_1_5, 595105); vec_push(gold_ola_1_5, 813191); vec_push(gold_ola_1_5, 31403);
+    var st_ola_1_5 = n_stretcher_new(fixture(4096), f64_from(44100));
+    var out_ola_1_5 = n_stretch_ola(st_ola_1_5, f64_div(f64_from(3), f64_from(2)));
+    assert_eq(vec_len(out_ola_1_5), 6144, "ola_1_5 length matches oracle");
+    check(out_ola_1_5, gold_ola_1_5, 2000, 2000, "ola_1_5 interior values match oracle");
+
+    var gold_ola_0_5 = vec_new();
+    vec_push(gold_ola_0_5, 521355); vec_push(gold_ola_0_5, 748145); vec_push(gold_ola_0_5, 974181); vec_push(gold_ola_0_5, 162093); vec_push(gold_ola_0_5, 388390); vec_push(gold_ola_0_5, 613971); vec_push(gold_ola_0_5, 838863); vec_push(gold_ola_0_5, 32215); vec_push(gold_ola_0_5, 257337); vec_push(gold_ola_0_5, 481808);
+    vec_push(gold_ola_0_5, 705655); vec_push(gold_ola_0_5, 928904); vec_push(gold_ola_0_5, 127953); vec_push(gold_ola_0_5, 351414); vec_push(gold_ola_0_5, 574315); vec_push(gold_ola_0_5, 796681); vec_push(gold_ola_0_5, 0); vec_push(gold_ola_0_5, 222548); vec_push(gold_ola_0_5, 444600); vec_push(gold_ola_0_5, 666181);
+    vec_push(gold_ola_0_5, 887316); vec_push(gold_ola_0_5, 94974); vec_push(gold_ola_0_5, 316274); vec_push(gold_ola_0_5, 537166); vec_push(gold_ola_0_5, 757675); vec_push(gold_ola_0_5, 977827); vec_push(gold_ola_0_5, 189102); vec_push(gold_ola_0_5, 409401); vec_push(gold_ola_0_5, 629380); vec_push(gold_ola_0_5, 849064);
+    vec_push(gold_ola_0_5, 62852); vec_push(gold_ola_0_5, 282654); vec_push(gold_ola_0_5, 502197); vec_push(gold_ola_0_5, 721508); vec_push(gold_ola_0_5, 940609); vec_push(gold_ola_0_5, 156693); vec_push(gold_ola_0_5, 375896); vec_push(gold_ola_0_5, 594928); vec_push(gold_ola_0_5, 813813); vec_push(gold_ola_0_5, 31290);
+    var st_ola_0_5 = n_stretcher_new(fixture(4096), f64_from(44100));
+    var out_ola_0_5 = n_stretch_ola(st_ola_0_5, F64_HALF);
+    assert_eq(vec_len(out_ola_0_5), 2048, "ola_0_5 length matches oracle");
+    check(out_ola_0_5, gold_ola_0_5, 2000, 2000, "ola_0_5 interior values match oracle");
+
+    test_group("round-half-away ties match the Rust oracle");
+    # n = 1,3,5,7,9,11 at ratio 0.5 -> 0.5,1.5,2.5,3.5,4.5,5.5. Rust rounds half AWAY from
+    # zero: 1 2 3 4 5 6. Cyrius f64_round is half-to-EVEN and would give 0 2 2 4 4 6, so
+    # this is a direct discriminator for the 2.0.3 n_round_half_away fix.
+    assert_eq(vec_len(n_stretch(n_stretcher_new(fixture(1), f64_from(44100)), F64_HALF)), 1, "n=1 ratio 0.5 -> 1 frames");
+    assert_eq(vec_len(n_stretch(n_stretcher_new(fixture(3), f64_from(44100)), F64_HALF)), 2, "n=3 ratio 0.5 -> 2 frames");
+    assert_eq(vec_len(n_stretch(n_stretcher_new(fixture(5), f64_from(44100)), F64_HALF)), 3, "n=5 ratio 0.5 -> 3 frames");
+    assert_eq(vec_len(n_stretch(n_stretcher_new(fixture(7), f64_from(44100)), F64_HALF)), 4, "n=7 ratio 0.5 -> 4 frames");
+    assert_eq(vec_len(n_stretch(n_stretcher_new(fixture(9), f64_from(44100)), F64_HALF)), 5, "n=9 ratio 0.5 -> 5 frames");
+    assert_eq(vec_len(n_stretch(n_stretcher_new(fixture(11), f64_from(44100)), F64_HALF)), 6, "n=11 ratio 0.5 -> 6 frames");
+
+    test_group("detect_loop_points ordering matches the Rust oracle");
+    var per = vec_new();
+    var pi = 0;
+    while (pi < 2000) {
+        vec_push(per, f64_sub(f64_div(f64_from(pi % 50), f64_from(50)), F64_HALF));
+        pi = pi + 1;
+    }
+    var psm = n_sample_from_mono(per, 44100);
+    var lps = n_detect_loop_points(psm, 100);
+    assert_eq(vec_len(lps), 10, "candidate count matches oracle");
+    if (vec_len(lps) > 0) {
+        assert_eq(load64(vec_get(lps, 0)), 26, "loop[0].start == 26");
+        assert_eq(load64(vec_get(lps, 0) + 8), 126, "loop[0].end == 126");
+    }
+    if (vec_len(lps) > 1) {
+        assert_eq(load64(vec_get(lps, 1)), 26, "loop[1].start == 26");
+        assert_eq(load64(vec_get(lps, 1) + 8), 176, "loop[1].end == 176");
+    }
+    if (vec_len(lps) > 2) {
+        assert_eq(load64(vec_get(lps, 2)), 26, "loop[2].start == 26");
+        assert_eq(load64(vec_get(lps, 2) + 8), 226, "loop[2].end == 226");
+    }
+    if (vec_len(lps) > 3) {
+        assert_eq(load64(vec_get(lps, 3)), 26, "loop[3].start == 26");
+        assert_eq(load64(vec_get(lps, 3) + 8), 276, "loop[3].end == 276");
+    }
+    if (vec_len(lps) > 4) {
+        assert_eq(load64(vec_get(lps, 4)), 26, "loop[4].start == 26");
+        assert_eq(load64(vec_get(lps, 4) + 8), 326, "loop[4].end == 326");
+    }
+    if (vec_len(lps) > 5) {
+        assert_eq(load64(vec_get(lps, 5)), 26, "loop[5].start == 26");
+        assert_eq(load64(vec_get(lps, 5) + 8), 376, "loop[5].end == 376");
+    }
+    if (vec_len(lps) > 6) {
+        assert_eq(load64(vec_get(lps, 6)), 26, "loop[6].start == 26");
+        assert_eq(load64(vec_get(lps, 6) + 8), 426, "loop[6].end == 426");
+    }
+    if (vec_len(lps) > 7) {
+        assert_eq(load64(vec_get(lps, 7)), 26, "loop[7].start == 26");
+        assert_eq(load64(vec_get(lps, 7) + 8), 476, "loop[7].end == 476");
+    }
+    if (vec_len(lps) > 8) {
+        assert_eq(load64(vec_get(lps, 8)), 26, "loop[8].start == 26");
+        assert_eq(load64(vec_get(lps, 8) + 8), 526, "loop[8].end == 526");
+    }
+    if (vec_len(lps) > 9) {
+        assert_eq(load64(vec_get(lps, 9)), 26, "loop[9].start == 26");
+        assert_eq(load64(vec_get(lps, 9) + 8), 576, "loop[9].end == 576");
+    }
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

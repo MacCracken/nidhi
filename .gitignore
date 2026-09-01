@@ -3,7 +3,12 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 /coverage/
+# Benchmark series are project data, not build output -- BENCHMARKS.md and
+# docs/benchmarks-rust-v-cyrius.md both cite them, and bench-history-rust.csv is the only
+# surviving record of the Rust oracle's numbers now that rust-old/ is gone.
 *.csv
+!bench-history.csv
+!bench-history-rust.csv
 .DS_Store
 *.swp
 *.swo
