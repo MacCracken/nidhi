@@ -65,6 +65,16 @@ fn main() {
     assert_eq(vec_len(n_stretch(st, f64_neg(F64_ONE))), 0, "ratio -1 -> empty");
     assert_eq(vec_len(n_stretch(st, 0x7FF8000000000000)), 0, "ratio NaN -> empty");
     assert_eq(vec_len(n_stretch(st, 0x7FF0000000000000)), 0, "ratio +Inf -> empty");
+    # 2.0.5: the oracle asserted all EIGHT cases -- the same four guards on stretch_ola, which
+    # is a separate function with its own copy of the guard prologue. Only the n_stretch half
+    # was ported, so a regression in stretch_ola's guards would have gone unnoticed.
+    assert_eq(vec_len(n_stretch_ola(st, f64_from(0))), 0, "ola ratio 0 -> empty");
+    assert_eq(vec_len(n_stretch_ola(st, f64_neg(F64_ONE))), 0, "ola ratio -1 -> empty");
+    assert_eq(vec_len(n_stretch_ola(st, 0x7FF8000000000000)), 0, "ola ratio NaN -> empty");
+    assert_eq(vec_len(n_stretch_ola(st, 0x7FF0000000000000)), 0, "ola ratio +Inf -> empty");
+    # -Inf is representable too and neither side ever tested it.
+    assert_eq(vec_len(n_stretch(st, 0xFFF0000000000000)), 0, "ratio -Inf -> empty");
+    assert_eq(vec_len(n_stretch_ola(st, 0xFFF0000000000000)), 0, "ola ratio -Inf -> empty");
 
     test_group("very short input (stretch_short)");
     var shortv = vec_new();
@@ -97,10 +107,14 @@ fn main() {
     test_group("hann window");
     var hw = n_hann_window(256);
     assert_eq(vec_len(hw), 256, "hann len 256");
-    var t2 = f64_div(f64_from(2), f64_from(100));
-    assert_eq(approx(vec_get(hw, 0), f64_from(0), t2), 1, "hann[0] ~ 0");
-    assert_eq(approx(vec_get(hw, 255), f64_from(0), t2), 1, "hann[255] ~ 0");
-    assert_eq(approx(vec_get(hw, 127), F64_ONE, t2), 1, "hann[127] ~ 1.0");
+    # The oracle used TWO tolerances here and the port had flattened both to 0.02: endpoints
+    # at 1e-6 (they are structurally zero, not merely small) and the midpoint at 0.02. A 0.02
+    # endpoint check would pass on a window that never tapers, which is the whole point of it.
+    var t_end = f64_div(F64_ONE, f64_from(1000000));
+    var t_mid = f64_div(f64_from(2), f64_from(100));
+    assert_eq(approx(vec_get(hw, 0), f64_from(0), t_end), 1, "hann[0] ~ 0 (1e-6)");
+    assert_eq(approx(vec_get(hw, 255), f64_from(0), t_end), 1, "hann[255] ~ 0 (1e-6)");
+    assert_eq(approx(vec_get(hw, 127), F64_ONE, t_mid), 1, "hann[127] ~ 1.0 (0.02)");
 
     test_group("builder");
     var bs = n_stretcher_new(vec_new(), f64_from(44100));

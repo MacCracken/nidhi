@@ -1,5 +1,67 @@
 # Changelog
 
+## 2.0.5 — 2026-08-31
+
+Coverage backfill. Every Rust `#[test]` the 2.0.4 audit named as having no Cyrius counterpart now
+has one, recovered from git history now that `rust-old/` is gone.
+
+**518 assertions, up from 441.** Nothing failed on first run — these paths were correct, they
+were simply never asserted, which is exactly what makes them cheap to break later.
+
+### Added — envelope
+
+- **`amp_envelope_zero_attack`.** `attack_samples=0, decay_samples=0` must settle at sustain.
+  Not an edge case: this is the shape of the **default** config and of every SFZ region with no
+  `ampeg` opcodes — the most common configuration in production, and it had no assertion
+  anywhere.
+- **`amp_envelope_smooth_release_from_mid_attack`.** Releasing part-way up the attack ramp must
+  ramp *down* from the current level, not restart from 1.0 — otherwise the envelope jumps up on
+  note-off, an audible click. Every existing release assertion released from a settled sustain,
+  so this path was untested.
+
+### Added — SFZ
+
+- `parse_empty_file`, and `invalid_opcode_ignored` (unknown opcodes must be dropped silently
+  without derailing the rest of the region).
+- **`loop_mode_mapping`, all six oracle cases.** `no_loop` and `one_shot` are not recognised
+  names in the mapper — they reach `OneShot` through the same default as an unknown token, which
+  is exactly why the oracle asserted all six explicitly rather than trusting the fall-through.
+- **`loop_start` / `loop_end` values** — the suite asserted the loop *mode* but never the
+  numbers, on the path 2.0.2 rewrote to `sfz_u32`.
+- **Wiring exercised by nothing in the repo**: `resonance` / `fil_resonance` (both spellings),
+  `pitchlfo_freq` / `pitchlfo_depth`, `fillfo_freq` / `fillfo_depth`, and the `<curve>` header.
+
+### Added — the oracle's maximal Zone builder chain
+
+`rust-old/src/lib.rs`'s round-trip test built a Zone through **23 chained builders**, and
+`docs/port/20-mod-core.md` called it "the single best fixture for Zone field parity" — while
+citing it by *line number* rather than reproducing it, so it died with the oracle. Reconstructed
+from git history in `tests/zone.tcyr`, with every field read back and matching re-checked
+afterwards. **15 of the 23 builders had no direct assertion anywhere** before this.
+
+### Changed — two tolerances restored
+
+The port had flattened both onto the suite's general tolerance, weakening what they tested:
+
+- **Hann window endpoints: 0.02 → `1e-6`.** The oracle used two different tolerances here on
+  purpose — endpoints are *structurally* zero, the midpoint only approximately 1.0. A 0.02
+  endpoint check passes on a window that never tapers, which is the entire property.
+- **`trim_silence` value: 0.01 → `N_F32_EPSILON`.** Trim must copy the surviving frames
+  untouched, so anything but an exact carry is a defect.
+
+### Added — remaining partials
+
+- **`invalid_ratio_returns_empty` was half-ported**: the four guards on `n_stretch` were
+  asserted, the four on `n_stretch_ola` were not — and it is a separate function with its own
+  copy of the guard prologue. Both halves now, plus `-Inf`, which neither side ever tested.
+- `detect_onsets` on an empty sample and on a sample shorter than its window.
+
+### Quality
+- **15 suites / 518 assertions / 0 failures**, fuzz 2/2, zero `#must_use` warnings.
+- Recovery from git history worked exactly as 2.0.4 documented. One wrinkle worth recording:
+  under zsh, `git show $REV:rust-old/src/x.rs` silently mangles the path — `$REV:r` is parsed as
+  a variable modifier. Use `${REV}:rust-old/...`.
+
 ## 2.0.4 — 2026-08-31
 
 **The Rust oracle is retired.** `rust-old/` is gone from the working tree — 377 MB reclaimed,

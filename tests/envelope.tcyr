@@ -9,6 +9,9 @@ include "src/f64_util.cyr"
 include "src/envelope.cyr"
 
 # 1 if |a - b| < tol (all f64 bits).
+# Explicitly discard a #must_use result the test does not need.
+fn ignore(v) { return 0; }
+
 fn approx(a, b, tol) {
     if (f64_lt(f64_abs(f64_sub(a, b)), tol) == 1) { return 1; }
     return 0;
@@ -90,6 +93,52 @@ fn main() {
     var tol3 = f64_div(F64_ONE, f64_from(100));
     assert_eq(approx(Adsr_attack_time(elo), f64_from(8), tol3), 1, "attack_time = 4/0.5 = 8s (raw sr, not clamped)");
     assert_eq(approx(Adsr_release_time(elo), f64_from(40), tol3), 1, "release_time = 20/0.5 = 40s (raw sr, not clamped)");
+
+    # --- 2.0.5: two oracle #[test] cases that had no counterpart ---
+
+    # rust-old/src/envelope.rs amp_envelope_zero_attack.
+    # attack_samples=0 and decay_samples=0 must reach sustain immediately. This is not an edge
+    # case: it is the shape of the DEFAULT config and of every SFZ region with no ampeg
+    # opcodes -- the most common configuration in production, and it had no assertion anywhere.
+    test_group("zero-length attack and decay reach sustain (2.0.5)");
+    var zcfg = n_adsr_config_new(0, 0, f64_div(f64_from(8), f64_from(10)), 100);
+    var zenv = n_amp_envelope_new(zcfg, f64_from(44100));
+    ignore(n_amp_envelope_trigger(zenv));
+    var zi = 0;
+    while (zi < 10) { ignore(n_amp_envelope_tick(zenv)); zi = zi + 1; }
+    var zlevel = n_amp_envelope_tick(zenv);
+    var ztol = f64_div(f64_from(5), f64_from(100));
+    assert_eq(approx(zlevel, f64_div(f64_from(8), f64_from(10)), ztol), 1,
+        "zero attack/decay settles at sustain 0.8");
+    assert_eq(n_amp_envelope_is_active(zenv), 1, "still active while held");
+
+    # rust-old/src/envelope.rs amp_envelope_smooth_release_from_mid_attack.
+    # Releasing part-way up the attack ramp must start the down-ramp from the CURRENT level,
+    # not from 1.0 -- otherwise the envelope jumps UP on note-off, which is an audible click.
+    # Every existing release assertion here releases from a settled sustain, so this path was
+    # untested.
+    test_group("release from mid-attack starts at the current level (2.0.5)");
+    var mcfg = n_adsr_config_new(1000, 0, F64_ONE, 1000);
+    var menv = n_amp_envelope_new(mcfg, f64_from(44100));
+    ignore(n_amp_envelope_trigger(menv));
+    var mi = 0;
+    while (mi < 500) { ignore(n_amp_envelope_tick(menv)); mi = mi + 1; }
+    var at_release = n_amp_envelope_tick(menv);
+    assert_eq(f64_gt(at_release, 0), 1, "mid-attack level > 0");
+    assert_eq(f64_lt(at_release, F64_ONE), 1, "mid-attack level < 1.0");
+
+    ignore(n_amp_envelope_release(menv));
+    var first_release = n_amp_envelope_tick(menv);
+    assert_eq(f64_le(first_release, at_release), 1,
+        "release ramps DOWN from the mid-attack level, never jumps up");
+
+    var mk = 0;
+    while (mk < 10000) {
+        ignore(n_amp_envelope_tick(menv));
+        if (n_amp_envelope_is_active(menv) == 0) { break; }
+        mk = mk + 1;
+    }
+    assert_eq(n_amp_envelope_is_active(menv), 0, "envelope reaches inactive after release");
 
     return assert_summary();
 }

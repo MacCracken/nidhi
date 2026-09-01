@@ -131,6 +131,23 @@ fn main() {
     assert_eq(vec_get(msl, 1), 500, "slice[1]==500");
     assert_eq(vec_get(msl, 2), 800, "slice[2]==800");
 
+    # --- 2.0.5: oracle detect_onsets edge cases with no counterpart ---
+    # rust-old/src/sample.rs detect_onsets_empty_sample / detect_onsets_very_short_sample.
+    # Both pin that the onset detector degrades gracefully instead of indexing off the end --
+    # the window loop is the kind of code where an empty or sub-window buffer is exactly the
+    # input that walks past the buffer.
+    test_group("detect_onsets on degenerate inputs (2.0.5)");
+    var esm = n_sample_from_mono(vec_new(), 44100);
+    n_sample_detect_onsets(esm, f64_div(F64_ONE, f64_from(10)), 100);
+    assert_eq(vec_len(NSample_slices(esm)), 0, "empty sample -> no slices, no crash");
+
+    var vs = vec_new();
+    vec_push(vs, F64_HALF);
+    vec_push(vs, f64_div(f64_from(3), f64_from(10)));
+    var vsm = n_sample_from_mono(vs, 44100);
+    n_sample_detect_onsets(vsm, f64_div(F64_ONE, f64_from(10)), 100);
+    assert(vec_len(NSample_slices(vsm)) >= 0, "2-frame sample shorter than the window: no crash");
+
     return assert_summary();
 }
 

@@ -63,7 +63,10 @@ fn main() {
     var ts = n_sample_from_mono(td, 44100);
     n_trim_silence(ts, f64_div(F64_ONE, f64_from(100)));
     assert_eq(NSample_frames(ts), 3, "trim -> 3 frames");
-    assert_eq(approx(vec_get(NSample_data(ts), 0), f64_div(f64_from(5), f64_from(10)), tol), 1, "trim data[0] ~ 0.5");
+    # The oracle asserted this at f32::EPSILON, not at the suite's general 0.01 -- trim must
+    # COPY the surviving frames untouched, so anything but an exact carry is a defect.
+    assert_eq(approx(vec_get(NSample_data(ts), 0), f64_div(f64_from(5), f64_from(10)), N_F32_EPSILON), 1,
+        "trim data[0] == 0.5 exactly (f32::EPSILON)");
 
     test_group("trim_silence all silent");
     var sil = vec_new();

@@ -16,28 +16,9 @@ release, not left as a wishlist.
 | **2.0.2** (2026-08-31) | P-1 audit: security, memory safety, correctness. `ERR_* → NIDHI_ERR_*` |
 | **2.0.3** (2026-08-31) | Loop-crossfade seam ([ADR 0001](../adr/0001-loop-crossfade-seam.md)); round-half-away parity; signed `inf`/`nan` |
 | **2.0.4** (2026-08-31) | **Rust oracle retired.** Golden vectors captured, build identity recorded, `rust-old/` removed (377 MB) |
+| **2.0.5** (2026-08-31) | Coverage backfill — every named oracle test now has a counterpart; 441 → 518 assertions |
 
 ---
-
-## 2.0.5 — Coverage backfill
-
-The golden vectors landed in 2.0.4 closed the largest gap (stretch output *values*). These are
-the rest of the Rust `#[test]` cases with no Cyrius counterpart, from the 2.0.3 audit.
-
-- [ ] `amp_envelope_zero_attack` — attack_samples=0, decay_samples=0 must reach sustain. This is
-      the shape of the **default** config and of every SFZ region with no `ampeg` opcodes: the
-      most common configuration in production and the least tested.
-- [ ] `amp_envelope_smooth_release_from_mid_attack` — release entered part-way through the attack
-      ramp must start the down-ramp from the *current* level, not from 1.0. A click if it
-      regresses. `tests/envelope.tcyr` only ever releases from a settled sustain.
-- [ ] SFZ: `parse_empty_file`, `loop_mode_mapping` (6 assertions), `invalid_opcode_ignored`,
-      and `loop_start`/`loop_end` **values** (the path 2.0.2 rewrote).
-- [ ] The three SFZ wiring paths exercised by nothing in the repo: `fillfo_*`, `pitchlfo_*`,
-      `<curve>` header. Plus `resonance` / `fil_resonance`.
-- [ ] Restore the two strict tolerances the audit flagged: Hann endpoints at `1e-6`,
-      `trim_silence` at `N_F32_EPSILON` (already at `src/f64_util.cyr:16`).
-- [ ] The maximal `Zone` builder chain — 10 of 23 `n_zone_with_*` builders have no direct
-      assertion anywhere. The oracle's own fixture is recoverable from git history.
 
 ## 2.0.6 — Latent-hazard closeout
 

@@ -217,6 +217,66 @@ fn main() {
     ignore(n_instrument_find_zone_rr(ginst, 60, 100));
     assert(1, "find_zone_rr over a capped group does not abort");
 
+    # --- 2.0.5: oracle #[test] cases with no counterpart ---
+
+    # rust-old/src/sfz.rs parse_empty_file
+    test_group("empty input parses to an empty file (2.0.5)");
+    var ef = n_sfz_parse("");
+    assert(ef > 0, "empty input parses (does not error)");
+    assert_eq(vec_len(NSfzFile_regions(ef)), 0, "no regions");
+    assert_eq(vec_len(NSfzFile_groups(ef)), 0, "no groups");
+
+    # rust-old/src/sfz.rs loop_mode_mapping -- all six cases, including the two that must
+    # fall through to OneShot. `no_loop` and `one_shot` are NOT recognised names in the
+    # mapper; they reach OneShot via the same default as an unknown token, and the oracle
+    # asserted all six explicitly rather than trusting that.
+    test_group("loop_mode mapping, all six oracle cases (2.0.5)");
+    assert_eq(n_sfz_map_loop_mode(0), LOOP_ONESHOT, "None -> OneShot");
+    assert_eq(n_sfz_map_loop_mode(str_from("no_loop")), LOOP_ONESHOT, "no_loop -> OneShot");
+    assert_eq(n_sfz_map_loop_mode(str_from("one_shot")), LOOP_ONESHOT, "one_shot -> OneShot");
+    assert_eq(n_sfz_map_loop_mode(str_from("loop_continuous")), LOOP_FORWARD, "loop_continuous -> Forward");
+    assert_eq(n_sfz_map_loop_mode(str_from("loop_sustain")), LOOP_SUSTAIN, "loop_sustain -> LoopSustain");
+    assert_eq(n_sfz_map_loop_mode(str_from("unknown_mode")), LOOP_ONESHOT, "unknown -> OneShot");
+
+    # rust-old/src/sfz.rs invalid_opcode_ignored -- unknown opcodes must be dropped silently
+    # WITHOUT derailing the rest of the region.
+    test_group("unknown opcodes are ignored, not fatal (2.0.5)");
+    var iv = n_sfz_parse("<region>\nsample=test.wav\ntotally_fake_opcode=999\nanother_invalid=hello\nlokey=60\n");
+    assert(iv > 0, "parses despite unknown opcodes");
+    assert_eq(vec_len(NSfzFile_regions(iv)), 1, "one region");
+    var ivr = vec_get(NSfzFile_regions(iv), 0);
+    assert_eq(NSfzRegion_lokey(ivr), 60, "lokey survives the unknown opcodes");
+    assert_eq(str_eq_cstr(NSfzRegion_sample(ivr), "test.wav"), 1, "sample survives");
+
+    # loop_start / loop_end VALUES -- the path 2.0.2 rewrote to sfz_u32. The suite asserted
+    # the loop MODE but never the numbers.
+    test_group("loop point values reach the zone (2.0.5)");
+    var lz = zone0(n_sfz_parse("<region> sample=a.wav key=60 loop_mode=loop_continuous loop_start=1000 loop_end=2000\n"), sr);
+    assert_eq(NZone_loop_mode(lz), LOOP_FORWARD, "loop_mode -> Forward");
+    assert_eq(NZone_loop_start(lz), 1000, "loop_start 1000");
+    assert_eq(NZone_loop_end(lz), 2000, "loop_end 2000");
+
+    # Wiring paths exercised by NOTHING in the repo before 2.0.5.
+    test_group("resonance / fil_resonance wiring (2.0.5)");
+    var rz = zone0(n_sfz_parse("<region> sample=a.wav key=60 cutoff=1000 resonance=3\n"), sr);
+    assert_eq(approx(NZone_filter_resonance(rz), f64_from(3), tol), 1, "resonance -> zone");
+    var rz2 = zone0(n_sfz_parse("<region> sample=a.wav key=60 cutoff=1000 fil_resonance=5\n"), sr);
+    assert_eq(approx(NZone_filter_resonance(rz2), f64_from(5), tol), 1, "fil_resonance alias -> zone");
+
+    test_group("pitchlfo / fillfo wiring (2.0.5)");
+    var pz = zone0(n_sfz_parse("<region> sample=a.wav key=60 pitchlfo_freq=5 pitchlfo_depth=50\n"), sr);
+    assert_eq(approx(NZone_pitchlfo_rate(pz), f64_from(5), tol), 1, "pitchlfo_freq -> rate");
+    assert_eq(approx(NZone_pitchlfo_depth(pz), f64_from(50), tol), 1, "pitchlfo_depth -> depth");
+    var fz = zone0(n_sfz_parse("<region> sample=a.wav key=60 cutoff=1000 fillfo_freq=2 fillfo_depth=1200\n"), sr);
+    assert_eq(approx(NZone_fillfo_rate(fz), f64_from(2), tol), 1, "fillfo_freq -> rate");
+    assert_eq(approx(NZone_fillfo_depth(fz), f64_from(1200), tol), 1, "fillfo_depth -> depth");
+
+    test_group("<curve> header is recognised (2.0.5)");
+    assert_eq(n_sfz_parse_header(str_from("<curve>")), SFZ_HDR_CURVE, "<curve> -> SFZ_HDR_CURVE");
+    var cv = n_sfz_parse("<curve>\nv000=0\n<region> sample=a.wav key=60\n");
+    assert(cv > 0, "a file containing <curve> still parses");
+    assert_eq(vec_len(NSfzFile_regions(cv)), 1, "<curve> does not swallow the region");
+
     return assert_summary();
 }
 

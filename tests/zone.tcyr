@@ -87,6 +87,86 @@ fn main() {
     assert_eq(NZone_adsr(za), cfg, "adsr stores the config pointer (Some)");
     assert_eq(NAdsrConfig_attack_samples(NZone_adsr(za)), 10, "adsr config readable through zone");
 
+    # --- 2.0.5: the oracle's maximal builder chain ---
+    #
+    # rust-old/src/lib.rs all_public_types_roundtrip built a Zone through 23 chained builders
+    # and serde-round-tripped it. The port cannot reproduce the round-trip (no serde), but the
+    # CHAIN is the valuable half: docs/port/20-mod-core.md called it "the single best fixture
+    # for Zone field parity" and cited it by line number rather than reproducing it -- so it
+    # died with the oracle. Reconstructed here from git history, with every field read back.
+    # 15 of these 23 builders had no direct assertion anywhere in the suite.
+    test_group("maximal zone builder chain (2.0.5)");
+    var mz = n_zone_new(0);
+    mz = n_zone_with_key_range(mz, 36, 84);
+    mz = n_zone_with_vel_range(mz, 1, 127);
+    mz = n_zone_with_root_note(mz, 60);
+    mz = n_zone_with_tune(mz, f64_from(50));
+    mz = n_zone_with_volume(mz, f64_neg(f64_from(3)));
+    mz = n_zone_with_pan(mz, F64_HALF);
+    mz = n_zone_with_loop(mz, LOOP_FORWARD, 100, 5000);
+    mz = n_zone_with_crossfade(mz, 64);
+    mz = n_zone_with_sample_offset(mz, 10);
+    mz = n_zone_with_sample_end(mz, 9000);
+    mz = n_zone_with_filter(mz, f64_from(2000), F64_HALF);
+    mz = n_zone_with_filter_resonance(mz, f64_from(2));
+    mz = n_zone_with_filter_type(mz, FILTER_LOWPASS);
+    mz = n_zone_with_group(mz, 1);
+    mz = n_zone_with_choke_group(mz, 1);
+    mz = n_zone_with_velocity_curve(mz, VEL_CURVE_CONVEX);
+    mz = n_zone_with_adsr(mz, n_adsr_config_from_seconds(
+        f64_div(F64_ONE, f64_from(100)), f64_div(F64_ONE, f64_from(10)),
+        f64_div(f64_from(7), f64_from(10)), f64_div(f64_from(3), f64_from(10)), f64_from(44100)));
+    mz = n_zone_with_filter_envelope(mz, n_adsr_config_from_seconds(
+        f64_div(f64_from(5), f64_from(100)), f64_div(f64_from(2), f64_from(10)),
+        F64_HALF, f64_div(F64_ONE, f64_from(10)), f64_from(44100)), f64_from(2400));
+    mz = n_zone_with_pitch_lfo(mz, f64_from(5), f64_from(50));
+    mz = n_zone_with_filter_lfo(mz, f64_from(3), f64_from(600));
+    mz = n_zone_with_key_tracking(mz, F64_HALF);
+    mz = n_zone_with_time_stretch(mz, f64_div(f64_from(3), f64_from(2)));
+    mz = n_zone_with_output_bus(mz, 2);
+
+    var mt = f64_div(F64_ONE, f64_from(1000));
+    assert_eq(NZone_sample_id(mz), 0, "chain: sample_id 0");
+    assert_eq(NZone_key_lo(mz), 36, "chain: key_lo 36");
+    assert_eq(NZone_key_hi(mz), 84, "chain: key_hi 84");
+    assert_eq(NZone_vel_lo(mz), 1, "chain: vel_lo 1");
+    assert_eq(NZone_vel_hi(mz), 127, "chain: vel_hi 127");
+    assert_eq(NZone_root_note(mz), 60, "chain: root_note 60");
+    assert_eq(approx(NZone_tune_cents(mz), f64_from(50), mt), 1, "chain: tune 50");
+    assert_eq(approx(NZone_volume_db(mz), f64_neg(f64_from(3)), mt), 1, "chain: volume -3");
+    assert_eq(approx(NZone_pan(mz), F64_HALF, mt), 1, "chain: pan 0.5");
+    assert_eq(NZone_loop_mode(mz), LOOP_FORWARD, "chain: loop_mode Forward");
+    assert_eq(NZone_loop_start(mz), 100, "chain: loop_start 100");
+    assert_eq(NZone_loop_end(mz), 5000, "chain: loop_end 5000");
+    assert_eq(NZone_crossfade_length(mz), 64, "chain: crossfade 64");
+    assert_eq(NZone_sample_offset(mz), 10, "chain: sample_offset 10");
+    assert_eq(NZone_sample_end(mz), 9000, "chain: sample_end 9000");
+    assert_eq(approx(NZone_filter_cutoff(mz), f64_from(2000), mt), 1, "chain: cutoff 2000");
+    assert_eq(approx(NZone_filter_vel_track(mz), F64_HALF, mt), 1, "chain: fil_veltrack 0.5");
+    assert_eq(approx(NZone_filter_resonance(mz), f64_from(2), mt), 1, "chain: resonance 2");
+    assert_eq(NZone_filter_type(mz), FILTER_LOWPASS, "chain: filter_type LowPass");
+    assert_eq(NZone_group(mz), 1, "chain: group 1");
+    assert_eq(NZone_choke_group(mz), 1, "chain: choke_group 1");
+    assert_eq(NZone_vel_curve(mz), VEL_CURVE_CONVEX, "chain: vel_curve Convex");
+    assert(NZone_adsr(mz) > 0, "chain: adsr set");
+    assert_eq(NAdsrConfig_attack_samples(NZone_adsr(mz)), 441, "chain: adsr attack 0.01s @44.1k = 441");
+    assert(NZone_fileg(mz) > 0, "chain: filter envelope set");
+    assert_eq(NAdsrConfig_attack_samples(NZone_fileg(mz)), 2205, "chain: fileg attack 0.05s = 2205");
+    assert_eq(approx(NZone_fileg_depth(mz), f64_from(2400), mt), 1, "chain: fileg_depth 2400");
+    assert_eq(approx(NZone_pitchlfo_rate(mz), f64_from(5), mt), 1, "chain: pitchlfo_rate 5");
+    assert_eq(approx(NZone_pitchlfo_depth(mz), f64_from(50), mt), 1, "chain: pitchlfo_depth 50");
+    assert_eq(approx(NZone_fillfo_rate(mz), f64_from(3), mt), 1, "chain: fillfo_rate 3");
+    assert_eq(approx(NZone_fillfo_depth(mz), f64_from(600), mt), 1, "chain: fillfo_depth 600");
+    assert_eq(approx(NZone_fil_keytrack(mz), F64_HALF, mt), 1, "chain: fil_keytrack 0.5");
+    assert_eq(approx(NZone_time_stretch(mz), f64_div(f64_from(3), f64_from(2)), mt), 1, "chain: time_stretch 1.5");
+    assert_eq(NZone_output_bus(mz), 2, "chain: output_bus 2");
+
+    # The chain must not have disturbed matching: key 36..84, vel 1..127.
+    assert_eq(n_zone_matches(mz, 60, 100), 1, "chain: matches note 60 vel 100");
+    assert_eq(n_zone_matches(mz, 35, 100), 0, "chain: rejects note below key_lo");
+    assert_eq(n_zone_matches(mz, 85, 100), 0, "chain: rejects note above key_hi");
+    assert_eq(n_zone_matches(mz, 60, 0), 0, "chain: rejects vel below vel_lo");
+
     return assert_summary();
 }
 
