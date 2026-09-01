@@ -80,8 +80,11 @@ Modules are **self-contained**: NO `include` between `src/*.cyr` files; stdlib a
   `f64_add/mul/div/...`, `f64_from(int)` / `f64_to(bits)` (truncates). Matches naad/shravan.
 - **Symbols are `n_`/`N`-prefixed** (`NSample`, `n_zone_new`) to avoid collisions in the flat
   concatenated bundle namespace.
-- **Errors are negative integer codes** (naad/hisab convention); config types use
-  `#derive(Serialize)` (bayan JSON) for the serde-roundtrip requirement.
+- **Errors are negative integer codes** (naad/hisab convention).
+- **Serde is NOT ported** — `#derive` in `src/` is 100% `accessors`. The Rust crate derived
+  `Serialize + Deserialize` on every public type; the port dropped it and four documents
+  (including this one) claimed otherwise until 2.0.6. See
+  [ADR 0003](docs/adr/0003-serde-is-not-ported.md).
 - **No inline comments inside a `struct { }` body** (breaks the Cyrius parser — put them above).
 - Playback accuracy over speed; sample-accurate loop points and crossfades.
 

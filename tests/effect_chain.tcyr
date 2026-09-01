@@ -61,6 +61,25 @@ fn main() {
     n_effect_chain_clear(c5);
     assert_eq(n_effect_chain_is_empty(c5), 1, "clear empties the chain");
 
+    # --- 2.0.6: retagging a live slot must not reinterpret its state ---
+    # Rust's EffectType enum carried the state, so tag and payload could not disagree.
+    # #derive(accessors) generates a public NEffectSlot_set_effect_type, which re-opened it:
+    # retagging a REVERB slot to CHORUS handed a Reverb* to effects_chorus_process_sample.
+    # Dispatch now reads state_type, so a mismatched slot passes through untouched.
+    test_group("retagged slot passes through (2.0.6)");
+    var rc = n_effect_chain_new(f64_from(44100));
+    ignore(n_effect_chain_add(rc, FX_REVERB));
+    var rslot = n_effect_chain_slot(rc, 0);
+    assert_eq(NEffectSlot_state_type(rslot), FX_REVERB, "state_type records what was built");
+    var wet_before = n_effect_chain_process_sample(rc, F64_HALF);
+    assert_eq(n_is_finite(wet_before), 1, "reverb output finite before retag");
+
+    NEffectSlot_set_effect_type(rslot, FX_CHORUS);
+    var after = n_effect_chain_process_sample(rc, F64_HALF);
+    assert_eq(n_is_finite(after), 1, "retagged slot still finite (no wild read)");
+    assert_eq(after, F64_HALF, "retagged slot is passthrough: input returned unchanged");
+    assert_eq(NEffectSlot_state_type(rslot), FX_REVERB, "state_type unchanged by the retag");
+
     return assert_summary();
 }
 

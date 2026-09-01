@@ -203,7 +203,17 @@ fn sfz_f64(s, out) {
         if (edig == 0) { return 0; }
     }
     if (i != len) { return 0; }
-    return f64_parse_ok(str_cstr(s), out);
+    if (f64_parse_ok(str_cstr(s), out) == 0) { return 0; }
+    # Normalise -0.0 to +0.0. sfz_inh decides "was this opcode explicitly set?" by comparing
+    # the stored value against the default as a RAW BIT PATTERN, and -0.0 is 0x8000...0, which
+    # is not bit-equal to +0.0. The oracle compared with `== 0.0`, where -0.0 IS equal -- so
+    # `<global> volume=-6` + `<region> volume=-0` inherited -6.0 in Rust and stayed at -0.0
+    # here. Same trap at the has_ampeg / has_fileg gates, where `ampeg_attack=-0` made the port
+    # wire a 1-sample-release ADSR the oracle never wired at all.
+    # Normalising is behaviour-preserving downstream: -0.0 and +0.0 give the same amplitude,
+    # the same pan, and the same envelope.
+    if (load64(out) == 0x8000000000000000) { store64(out, 0); }
+    return 1;
 }
 
 # strip a single leading/trailing double-quote from a Str (trim_matches('"')).

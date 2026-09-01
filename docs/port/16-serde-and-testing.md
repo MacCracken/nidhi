@@ -1,3 +1,10 @@
+> **STATUS (2.0.6): serde was NOT ported.** `grep '#derive' src/` is 100% `accessors`. This
+> document records what the first-party requirement asked for and what the options were; it is
+> kept as the design record, not as a description of the code. The decision and its reasoning
+> are in [ADR 0003](../adr/0003-serde-is-not-ported.md). Note in particular that `NZone` has 32
+> fields against the 16-field guidance below, and that Cyrius has no traits, so there is no
+> `Deserialize` to derive.
+
 # Port Brief 16 — Serde & Testing in Cyrius
 
 Read-only reconnaissance for the Rust→Cyrius port of **nidhi**. Covers two

@@ -277,6 +277,21 @@ fn main() {
     assert(cv > 0, "a file containing <curve> still parses");
     assert_eq(vec_len(NSfzFile_regions(cv)), 1, "<curve> does not swallow the region");
 
+    # --- 2.0.6: -0.0 must satisfy the "unset" sentinel, as `== 0.0` did in Rust ---
+    # sfz_inh compares raw BIT PATTERNS, and -0.0 is 0x8000...0, not bit-equal to +0.0. So
+    # `<global> volume=-6` + `<region> volume=-0` inherited -6.0 in the oracle and stayed at
+    # -0.0 here. sfz_f64 now normalises -0.0 to +0.0 at the parse site, which is
+    # behaviour-preserving downstream (same amplitude, same pan, same envelope).
+    test_group("-0.0 is treated as unset for inheritance (2.0.6)");
+    var nz = alloc(8);
+    assert_eq(sfz_f64(str_from("-0"), nz), 1, "-0 parses");
+    assert_eq(load64(nz), 0, "-0 normalised to +0.0 bit pattern");
+    assert_eq(sfz_f64(str_from("-0.0"), nz), 1, "-0.0 parses");
+    assert_eq(load64(nz), 0, "-0.0 normalised to +0.0 bit pattern");
+    var negz = zone0(n_sfz_parse("<global> volume=-6\n<region> sample=a.wav key=60 volume=-0\n"), sr);
+    assert_eq(approx(NZone_volume_db(negz), f64_neg(f64_from(6)), tol), 1,
+        "volume=-0 inherits the group's -6, matching the oracle");
+
     return assert_summary();
 }
 

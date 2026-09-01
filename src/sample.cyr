@@ -120,6 +120,9 @@ fn n_cubic_hermite(y0, y1, y2, y3, t) {
 #must_use
 fn n_sample_read_cubic(s, position) {
     if (NSample_frames(s) == 0) { return 0; }
+    # See the note in n_sample_read_stereo_interpolated: f64_to on a non-finite position
+    # yields i64::MIN, and idx-1 wraps past every range guard.
+    if (n_is_finite(position) == 0) { return 0; }
     var idx = f64_to(f64_floor(position));
     var frac = f64_sub(position, f64_from(idx));
     var y0 = n_sample_read_mono_frame(s, idx - 1);
@@ -139,6 +142,14 @@ fn n_sample_read_interpolated(s, position) {
 #inline
 fn n_sample_read_stereo_interpolated(s, position, out) {
     if (NSample_frames(s) == 0) {
+        store64(out, 0);
+        store64(out + 8, 0);
+        return 0;
+    }
+    # f64_to is a raw cvttsd2si: a NaN or out-of-range position yields i64::MIN, and idx-1
+    # then WRAPS to i64::MAX, so the "before the start" and "past the end" guards below both
+    # read as in-range. Reject non-finite up front instead.
+    if (n_is_finite(position) == 0) {
         store64(out, 0);
         store64(out + 8, 0);
         return 0;

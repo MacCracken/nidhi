@@ -12,10 +12,13 @@ lives in git history, and `tests/golden.tcyr` carries the values captured from i
   f64 bit-patterns). naad stores samples as "vec of f64"; shravan: "all samples are f64 bit
   patterns in vecs." So every Rust `f32` → f64. The port will NOT be bit-identical to Rust's
   f32 internals; that's expected and fine for benchmarking parity.
-- **D2 — Errors are negative integer codes** (`ERR_* = (0 - N)`), matching the naad/hisab/
-  shravan convention (`n_is_err`). The Rust `NidhiError` String payloads are dropped.
-  Config/data types satisfy the "Serialize+Deserialize roundtrip" requirement natively via
-  **`#derive(Serialize)`** (compiler-generated `X_to_json`/`X_from_json_str`, uses `lib/bayan.cyr`).
+- **D2 — Errors are negative integer codes** (`NIDHI_ERR_* = (0 - N)`, renamed from bare `ERR_*`
+  in 2.0.2), matching the naad/hisab/shravan convention (`n_is_err`). The Rust `NidhiError`
+  String payloads are dropped.
+  ⚠ **REVISED 2.0.6:** this decision also claimed config types would satisfy the
+  "Serialize+Deserialize roundtrip" requirement via `#derive(Serialize)`. **That was never
+  implemented** — `grep '#derive' src/` is 100% `accessors`. See
+  [ADR 0003](../adr/0003-serde-is-not-ported.md).
 - **D3 — Symbol prefix `n_` / `N`** on every nidhi symbol (`NSample`, `NZone`, `n_flush_denormal`)
   to avoid collisions with naad/shravan/hisab in the flat concatenated bundle namespace.
 - **D4 — Use naad FULLY** (user, 2026-07-02). Prefer naad's implementations over reproducing

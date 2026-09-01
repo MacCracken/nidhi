@@ -22,3 +22,5 @@ Decisions about nidhi — what we chose, the context, and the consequences we ac
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-loop-crossfade-seam.md) | Loop crossfade reads its fade-in source backward from `loop_start` | Accepted |
+| [0002](0002-nan-clamps-to-the-bound.md) | A NaN parameter clamps to a bound instead of propagating | Accepted |
+| [0003](0003-serde-is-not-ported.md) | Serde serialization is not ported | Accepted |

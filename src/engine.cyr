@@ -239,7 +239,15 @@ fn n_engine_set_instrument(e, inst) {
 fn n_engine_set_bank(e, bank) { NSamplerEngine_set_bank(e, bank); return 0; }
 #must_use
 fn n_engine_bank(e) { return NSamplerEngine_bank(e); }
-fn n_engine_set_adsr(e, cfg) { NSamplerEngine_set_default_adsr(e, cfg); return 0; }
+# COPIES the config -- same aliasing class as n_zone_with_adsr and the set_release_ms fix in
+# 2.0.2. Rust's set_adsr took AdsrConfig by value.
+fn n_engine_set_adsr(e, cfg) {
+    if (cfg <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    NSamplerEngine_set_default_adsr(e, n_adsr_config_new(
+        NAdsrConfig_attack_samples(cfg), NAdsrConfig_decay_samples(cfg),
+        NAdsrConfig_sustain_level(cfg), NAdsrConfig_release_samples(cfg)));
+    return 0;
+}
 # Builds a NEW config rather than mutating the current one. rust-old's set_adsr takes the
 # config BY VALUE, so the in-place rewrite was port-introduced aliasing: it edited the
 # caller's own object and every zone that had been handed the same pointer via
@@ -696,16 +704,23 @@ fn n_engine_next_sample(e) {
 }
 
 # fill_buffer(buf vec, n): mono, each element = next_sample.
+# `n` is clamped to the buffer. Rust derived the frame count FROM buffer.len(), so a caller
+# could not ask for more than it supplied; the port took a separate length and trusted it, and
+# vec_set past the end is _vec_die -> exit(1) inside the audio callback.
 fn n_engine_fill_buffer(e, buf, n) {
+    var lim = n;
+    if (lim > vec_len(buf)) { lim = vec_len(buf); }
     var i = 0;
-    while (i < n) { vec_set(buf, i, n_engine_next_sample(e)); i = i + 1; }
+    while (i < lim) { vec_set(buf, i, n_engine_next_sample(e)); i = i + 1; }
     return 0;
 }
 
 # fill_buffer_stereo(buf vec, len): interleaved stereo, rendered per-frame (output-identical
 # to the Rust per-voice block render).
 fn n_engine_fill_buffer_stereo(e, buf, len) {
-    var frames = len / 2;
+    var lim = len;
+    if (lim > vec_len(buf)) { lim = vec_len(buf); }
+    var frames = lim / 2;
     var o = NSamplerEngine_ns_out(e);
     var f = 0;
     while (f < frames) {

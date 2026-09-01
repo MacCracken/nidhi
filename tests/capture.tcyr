@@ -132,6 +132,19 @@ fn main() {
     assert_eq(NSample_frames(fp), 200, "finish_processed trims to 200 frames");
     assert_eq(approx(naad_peak(NSample_data(fp)), F64_ONE, tol), 1, "finish_processed peak ~ 1.0");
 
+    # --- 2.0.6: #derive(accessors) re-opens states Rust made unrepresentable ---
+    # n_recorder_new clamps channels to 1..2, but the derive also emits a public setter that
+    # bypasses it. Rust kept the field private, so 0 could not exist; here it was an integer
+    # divide-by-zero in n_recorder_frames.
+    test_group("recorder survives channels=0 via the derive setter (2.0.6)");
+    var zr = n_recorder_new(44100, 1);
+    var zd = vec_new();
+    push_n(zd, F64_HALF, 8);
+    n_recorder_write(zr, zd);
+    assert_eq(n_recorder_frames(zr), 8, "mono frames before the bypass");
+    NSampleRecorder_set_channels(zr, 0);
+    assert_eq(n_recorder_frames(zr), 8, "channels=0 treated as mono, no divide-by-zero");
+
     return assert_summary();
 }
 

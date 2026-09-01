@@ -4,8 +4,9 @@
 # Ports the Rust `NidhiError` enum to negative integer error codes, matching the
 # naad/hisab/shravan ecosystem convention (functions return 0/NIDHI_ERR_NONE or a
 # valid pointer on success, a negative NIDHI_ERR_* on failure). The Rust variants'
-# String payloads are dropped -- the code IS the error. Config/data types that need
-# a faithful serde round-trip use `#derive(Serialize)` instead (see zone.cyr etc.).
+# String payloads are dropped -- the code IS the error. (Serde is NOT ported: this note
+# used to claim config types carry `#derive(Serialize)` and pointed at zone.cyr, which
+# never had it. See docs/adr/0003-serde-is-not-ported.md.)
 #
 # The `NIDHI_` prefix is mandatory, not decorative: dist/nidhi.cyr is concatenated
 # into a FLAT namespace alongside naad/goonj/shravan/sankoch, and a bare `ERR_NONE`

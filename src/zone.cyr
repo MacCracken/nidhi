@@ -210,14 +210,28 @@ fn n_zone_with_velocity_curve(z, curve) {
 }
 
 # adsr = Some(config): store the NAdsrConfig pointer
+# COPIES the config. Rust's with_adsr took AdsrConfig BY VALUE; the port stored the caller's
+# pointer, so one config handed to several zones made them share mutable state -- and a later
+# n_engine_set_release_ms or a direct NAdsrConfig_set_* rewrote every one of them at once.
+# Same class as the set_release_ms aliasing fixed in 2.0.2.
 fn n_zone_with_adsr(z, config) {
-    NZone_set_adsr(z, config);
+    if (config <= 0) { NZone_set_adsr(z, config); return z; }
+    NZone_set_adsr(z, n_adsr_config_new(
+        NAdsrConfig_attack_samples(config), NAdsrConfig_decay_samples(config),
+        NAdsrConfig_sustain_level(config), NAdsrConfig_release_samples(config)));
     return z;
 }
 
 # fileg = Some(config); fileg_depth = clamp(depth_cents, -4800, 4800)
+# COPIES the config, for the same reason as n_zone_with_adsr above.
 fn n_zone_with_filter_envelope(z, config, depth_cents) {
-    NZone_set_fileg(z, config);
+    if (config > 0) {
+        NZone_set_fileg(z, n_adsr_config_new(
+            NAdsrConfig_attack_samples(config), NAdsrConfig_decay_samples(config),
+            NAdsrConfig_sustain_level(config), NAdsrConfig_release_samples(config)));
+    } else {
+        NZone_set_fileg(z, config);
+    }
     NZone_set_fileg_depth(z, f64_min(f64_max(depth_cents, f64_from(0 - 4800)), f64_from(4800)));
     return z;
 }

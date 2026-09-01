@@ -1,5 +1,79 @@
 # Changelog
 
+## 2.0.6 — 2026-08-31
+
+Latent-hazard closeout. Every item is reachable by a **consumer** rather than by nidhi's own
+code — and `dist/nidhi.cyr` is a public bundle, so "no in-tree caller does this" was never a
+defence. Three ADRs, 556 assertions (up from 518).
+
+### Fixed — `#derive(accessors)` re-opened states Rust made unrepresentable
+
+This is the through-line for most of the release. Rust kept these fields **private**, so the bad
+states could not be constructed; the derive generates a public setter for every one of them.
+
+- **`n_effect_apply` dispatched on a mutable tag.** Rust's `EffectType` was an enum whose
+  variant *carried* the state, so tag and payload could not disagree. Retagging a live
+  `FX_REVERB` slot to `FX_CHORUS` handed a `Reverb*` to `effects_chorus_process_sample` — a wild
+  read inside the audio callback. `NEffectSlot` now records a `state_type` at construction and
+  dispatches on that; a mismatched slot passes through untouched. **Highest-severity item here.**
+- **`NSampleRecorder_set_channels(r, 0)`** was an integer divide-by-zero in `n_recorder_frames`.
+  Treated as mono.
+- `NTimeStretcher_set_frame_size(s, -1000)` was already closed at the consumer in 2.0.3.
+
+### Fixed — memory safety
+
+- **`n_engine_fill_buffer(e, buf, n)` never checked `n` against `vec_len(buf)`.** Rust derived
+  the frame count *from* `buffer.len()`, so over-asking was unrepresentable; the port took a
+  separate length and trusted it, and `vec_set` past the end is `_vec_die` → `exit(1)` inside the
+  audio callback. Both the mono and stereo fills now clamp.
+- **A non-finite read position wrapped past every range guard.** `f64_to` is a raw `cvttsd2si`:
+  `NaN` or an out-of-range position yields `i64::MIN`, and `idx - 1` then wraps to `i64::MAX`, so
+  the "before the start" *and* "past the end" checks both read as in-range. `n_sample_read_cubic`
+  and `n_sample_read_stereo_interpolated` reject non-finite up front.
+- **The fourth unsaturated `f64_to`** (`n_adsr_config_is_default_sfz`) — an absurd `sample_rate`
+  made the threshold negative, which *inverts* that predicate rather than merely widening it.
+
+### Fixed — aliasing where Rust took by value
+
+Same class as the `set_release_ms` fix in 2.0.2, now swept: `n_zone_with_adsr`,
+`n_zone_with_filter_envelope` and `n_engine_set_adsr` stored the caller's `NAdsrConfig` pointer.
+One config handed to several zones made them share mutable state, and a later
+`NAdsrConfig_set_*` rewrote every one of them at once. All three now copy.
+
+⚠ `tests/zone.tcyr` previously asserted `NZone_adsr(za) == cfg` — it was **pinning the aliasing
+itself**. Replaced with value equality plus a proof that mutating the source config reaches
+neither of two zones built from it.
+
+### Fixed — `-0.0` broke the SFZ inheritance sentinel
+
+`sfz_inh` decides "was this opcode explicitly set?" by comparing against the default as a raw
+**bit pattern**, and `-0.0` is `0x8000…0`, not bit-equal to `+0.0`. The oracle compared with
+`== 0.0`, where `-0.0` *is* equal. So `<global> volume=-6` + `<region> volume=-0` inherited
+`-6.0` in Rust and stayed at `-0.0` here — and at the `has_ampeg` gate, `ampeg_attack=-0` made
+the port wire a 1-sample-release ADSR the oracle never wired at all. `sfz_f64` now normalises
+`-0.0` at the parse site: one fix for all 36 inheritance sites, and behaviour-preserving
+downstream (same amplitude, same pan, same envelope).
+
+### Decided — two open questions closed with ADRs
+
+- **[ADR 0002](docs/adr/0002-nan-clamps-to-the-bound.md) — a NaN parameter clamps to a bound.**
+  `f64_min`/`f64_max` are built on `f64_lt`/`f64_gt`, which return 0 for a NaN operand, so
+  `n_zone_with_tune(z, NaN)` → `-12800` and `n_zone_with_pan(z, NaN)` → hard left, both finite,
+  where Rust's `f32::clamp` propagates NaN. **Kept deliberately**: a NaN reaching the SVF latches
+  the voice for its whole life, and nidhi stops non-finite audio at every other boundary already.
+  Now pinned — finiteness *and* the specific bound.
+- **[ADR 0003](docs/adr/0003-serde-is-not-ported.md) — serde is not ported.** The Rust crate
+  derived `Serialize + Deserialize` on ~18 public types. **Four documents claimed the port
+  carried this forward and none of it exists** — `grep '#derive' src/` is 100 % `accessors`. The
+  2.0.3 audit found this independently in five of its six module groups. `CLAUDE.md`,
+  `src/error.cyr` (which pointed readers at `zone.cyr` "for an example" that never had it),
+  `docs/port/01-PLAN.md` D2 and `docs/port/16-serde-and-testing.md` are corrected. Implementing
+  it is a feature for 2.1.0, not a repair: `NZone` has 32 fields against a 16-field guidance, and
+  Cyrius has no traits, so there is no `Deserialize` to derive.
+
+### Quality
+- **15 suites / 556 assertions / 0 failures**, fuzz 2/2, zero `#must_use` warnings.
+
 ## 2.0.5 — 2026-08-31
 
 Coverage backfill. Every Rust `#[test]` the 2.0.4 audit named as having no Cyrius counterpart now

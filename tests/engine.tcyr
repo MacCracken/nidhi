@@ -386,6 +386,31 @@ fn main() {
     # Disabling measured 199000 -- far worse than shipping nothing. Pin the no-regression.
     assert_eq(xf_seam(20, 0, 200), 28000, "no-preroll case is no worse than 2.0.2");
 
+    # --- 2.0.6: caller-supplied buffer length must not be trusted ---
+    # Rust derived the frame count FROM buffer.len(), so over-asking was unrepresentable.
+    # The port took a separate length; vec_set past the end is _vec_die -> exit(1) inside
+    # the audio callback.
+    test_group("fill_buffer clamps to the buffer (2.0.6)");
+    var ce = eng_leak_build(4, 0 - 1);
+    ignore(n_engine_note_on(ce, 60, 100));
+    var small_buf = vec_new();
+    var sbi = 0;
+    while (sbi < 16) { vec_push(small_buf, 0); sbi = sbi + 1; }
+    n_engine_fill_buffer(ce, small_buf, 100000);
+    assert_eq(vec_len(small_buf), 16, "mono: over-long n did not grow or overrun the buffer");
+    n_engine_fill_buffer_stereo(ce, small_buf, 100000);
+    assert_eq(vec_len(small_buf), 16, "stereo: over-long len did not overrun the buffer");
+
+    test_group("set_adsr copies its config (2.0.6)");
+    var ae = n_engine_new(2, f64_from(44100));
+    var acfg = n_adsr_config_new(11, 22, F64_ONE, 33);
+    assert_eq(n_engine_set_adsr(ae, acfg), 0, "set_adsr accepts a valid config");
+    NAdsrConfig_set_attack_samples(acfg, 999);
+    assert_eq(NAdsrConfig_attack_samples(NSamplerEngine_default_adsr(ae)), 11,
+        "mutating the caller's config does not reach the engine");
+    assert_eq(n_engine_set_adsr(ae, NIDHI_ERR_IMPORT), NIDHI_ERR_INVALID_PARAMETER,
+        "set_adsr rejects a negative error code");
+
     return assert_summary();
 }
 

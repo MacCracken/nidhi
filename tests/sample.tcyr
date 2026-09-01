@@ -148,6 +148,26 @@ fn main() {
     n_sample_detect_onsets(vsm, f64_div(F64_ONE, f64_from(10)), 100);
     assert(vec_len(NSample_slices(vsm)) >= 0, "2-frame sample shorter than the window: no crash");
 
+    # --- 2.0.6: a non-finite read position must not wrap past the range guards ---
+    # f64_to is a raw cvttsd2si: NaN or an out-of-range position yields i64::MIN, and idx-1
+    # then wraps to i64::MAX, so both the "before the start" and "past the end" guards read
+    # as in-range.
+    test_group("non-finite read position returns silence (2.0.6)");
+    var nfd = vec_new();
+    var nfi = 0;
+    while (nfi < 64) { vec_push(nfd, F64_HALF); nfi = nfi + 1; }
+    var nfs = n_sample_from_mono(nfd, 44100);
+    assert_eq(n_sample_read_cubic(nfs, 0x7FF8000000000000), 0, "read_cubic(NaN) -> 0");
+    assert_eq(n_sample_read_cubic(nfs, 0x7FF0000000000000), 0, "read_cubic(+Inf) -> 0");
+    assert_eq(n_sample_read_cubic(nfs, 0xFFF0000000000000), 0, "read_cubic(-Inf) -> 0");
+    var nfo = alloc(16);
+    n_sample_read_stereo_interpolated(nfs, 0x7FF8000000000000, nfo);
+    assert_eq(load64(nfo), 0, "read_stereo(NaN) -> L 0");
+    assert_eq(load64(nfo + 8), 0, "read_stereo(NaN) -> R 0");
+    # A valid position still reads real audio -- the guard must not have swallowed everything.
+    assert_eq(approx(n_sample_read_cubic(nfs, f64_from(10)), F64_HALF, f64_div(F64_ONE, f64_from(1000))), 1,
+        "a finite position still reads the sample");
+
     return assert_summary();
 }
 

@@ -84,8 +84,28 @@ fn main() {
     var za = n_zone_new(0);
     var cfg = n_adsr_config_new(10, 20, F64_ONE, 30);
     za = n_zone_with_adsr(za, cfg);
-    assert_eq(NZone_adsr(za), cfg, "adsr stores the config pointer (Some)");
+    # 2.0.6: the zone COPIES the config; it no longer aliases the caller's pointer. This
+    # assertion used to pin the aliasing itself (NZone_adsr(za) == cfg), which is exactly the
+    # behaviour Rust did not have -- with_adsr took AdsrConfig by VALUE.
+    assert(NZone_adsr(za) > 0, "adsr set (Some)");
     assert_eq(NAdsrConfig_attack_samples(NZone_adsr(za)), 10, "adsr config readable through zone");
+    assert_eq(NAdsrConfig_decay_samples(NZone_adsr(za)), 20, "adsr decay copied");
+    assert_eq(NAdsrConfig_release_samples(NZone_adsr(za)), 30, "adsr release copied");
+
+    # The copy is the point: mutating the caller's config, or handing it to a second zone,
+    # must not reach through into a zone that was already built from it.
+    var zb = n_zone_with_adsr(n_zone_new(0), cfg);
+    NAdsrConfig_set_attack_samples(cfg, 999);
+    assert_eq(NAdsrConfig_attack_samples(NZone_adsr(za)), 10, "mutating the source config does not reach zone A");
+    assert_eq(NAdsrConfig_attack_samples(NZone_adsr(zb)), 10, "mutating the source config does not reach zone B");
+    assert(NZone_adsr(za) != NZone_adsr(zb), "two zones from one config do not share state");
+
+    # Same for the filter envelope.
+    var zfe = n_zone_with_filter_envelope(n_zone_new(0), cfg, f64_from(1200));
+    assert_eq(NAdsrConfig_attack_samples(NZone_fileg(zfe)), 999, "fileg copies the config as it stands");
+    NAdsrConfig_set_attack_samples(cfg, 111);
+    assert_eq(NAdsrConfig_attack_samples(NZone_fileg(zfe)), 999, "mutating the source does not reach fileg");
+    assert_eq(n_zone_with_filter_envelope(n_zone_new(0), 0, 0) > 0, 1, "fileg None (0) still accepted");
 
     # --- 2.0.5: the oracle's maximal builder chain ---
     #
@@ -166,6 +186,28 @@ fn main() {
     assert_eq(n_zone_matches(mz, 35, 100), 0, "chain: rejects note below key_lo");
     assert_eq(n_zone_matches(mz, 85, 100), 0, "chain: rejects note above key_hi");
     assert_eq(n_zone_matches(mz, 60, 0), 0, "chain: rejects vel below vel_lo");
+
+    # --- 2.0.6: NaN parameters clamp to a bound, never propagate (ADR 0002) ---
+    # Every clamped builder is f64_min(f64_max(x, lo), hi), and f64_min/f64_max are built on
+    # f64_lt/f64_gt, which return 0 for a NaN operand -- so NaN falls through to the bound.
+    # Rust's f32::clamp propagates NaN instead. Keeping the port's behaviour is deliberate: a
+    # NaN reaching the SVF latches the voice for its whole life, and nidhi already stops
+    # non-finite audio at every other boundary. Pin the finiteness AND the specific bound so
+    # neither drifts silently.
+    test_group("NaN parameters clamp to a bound, never propagate (2.0.6)");
+    var NANBITS = 0x7FF8000000000000;
+    var nt = n_zone_with_tune(n_zone_new(0), NANBITS);
+    assert_eq(n_is_finite(NZone_tune_cents(nt)), 1, "tune(NaN) stays finite");
+    assert_eq(f64_to(NZone_tune_cents(nt)), 0 - 12800, "tune(NaN) lands on the low bound");
+    var np = n_zone_with_pan(n_zone_new(0), NANBITS);
+    assert_eq(n_is_finite(NZone_pan(np)), 1, "pan(NaN) stays finite");
+    assert_eq(f64_to(f64_mul(NZone_pan(np), f64_from(1000))), 0 - 1000, "pan(NaN) lands on -1.0");
+    var nfc = n_zone_with_filter(n_zone_new(0), NANBITS, NANBITS);
+    assert_eq(n_is_finite(NZone_filter_cutoff(nfc)), 1, "cutoff(NaN) stays finite");
+    assert_eq(n_is_finite(NZone_filter_vel_track(nfc)), 1, "fil_veltrack(NaN) stays finite");
+    # A .max()-only site does NOT diverge -- Rust's f32::max also drops NaN. Same result here.
+    var nr = n_zone_with_filter_resonance(n_zone_new(0), NANBITS);
+    assert_eq(n_is_finite(NZone_filter_resonance(nr)), 1, "resonance(NaN) stays finite");
 
     return assert_summary();
 }

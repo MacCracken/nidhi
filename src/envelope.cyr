@@ -70,7 +70,11 @@ fn n_adsr_config_is_default_sfz(config, sample_rate) {
     if (f64_lt(f64_abs(f64_sub(NAdsrConfig_sustain_level(config), F64_ONE)), N_F32_EPSILON) == 0) {
         return 0;
     }
-    var thresh = f64_to(f64_mul(sample_rate, f64_div(F64_ONE, f64_from(1000))));
+    # Saturate before f64_to -- it is a raw cvttsd2si returning i64::MIN out of range, and a
+    # non-finite or absurd sample_rate would otherwise make the threshold negative, which
+    # inverts this predicate rather than merely widening it.
+    var tcap = f64_from(4294967295);
+    var thresh = f64_to(f64_min(f64_max(f64_mul(sample_rate, f64_div(F64_ONE, f64_from(1000))), 0), tcap));
     if (NAdsrConfig_release_samples(config) > thresh) { return 0; }
     return 1;
 }

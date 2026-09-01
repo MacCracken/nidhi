@@ -5,10 +5,10 @@
 
 ## Version
 
-**2.0.5** — 2026-08-31. Coverage backfill: every Rust `#[test]` the 2.0.4 audit named as
-uncovered now has a Cyrius counterpart, recovered from git history. Follows 2.0.4 (oracle
-retired), 2.0.3 (crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up), 2.0.0 (the
-port).
+**2.0.6** — 2026-08-31. Latent-hazard closeout: the consumer-reachable hazards the 2.0.3 audit
+found, plus ADRs settling the NaN-clamp and serde questions. Follows 2.0.5 (coverage backfill),
+2.0.4 (oracle retired), 2.0.3 (crossfade seam), 2.0.2 (P-1 sweep), 2.0.1 (toolchain catch-up),
+2.0.0 (the port).
 
 ## Toolchain
 
@@ -30,7 +30,7 @@ port).
 
 ## Tests
 
-- **15 suites / 518 assertions / 0 failures** (`cyrius test`), zero `#must_use` warnings
+- **15 suites / 556 assertions / 0 failures** (`cyrius test`), zero `#must_use` warnings
 - Render path asserted **allocation-free**: `alloc_used()` delta of 0 across 20 blocks at 8 and
   64 voices, filtered and unfiltered (`tests/engine.tcyr`)
 - **Fuzz**: `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` — 2 passed, 0 crashes
@@ -60,17 +60,19 @@ Transitive, resolved into `lib/`: **goonj** 2.0.4, **sankoch** 2.7.10, **sakshi*
 _(Everything listed here at 2.0.1 — the `ERR_NONE` collision, the `src/main.cyr` CI break, the
 sf2 magic literals, and the integer-PCM silence — is resolved in 2.0.2.)_
 
-Every open item is now pinned to a release in [`roadmap.md`](roadmap.md). The ones that would
-bite a consumer first:
+Every open item is now pinned to a release in [`roadmap.md`](roadmap.md). What remains:
 
-- **`n_effect_apply` dispatches on the slot tag, not the state variant** — retagging a live slot
-  hands the wrong struct to a naad processor. Pinned to 2.0.6.
-- **`#derive(accessors)` generates public setters that bypass every clamp** Rust enforced by
-  keeping the fields private. Pinned to 2.0.6.
-- **High-pass / band-pass / notch voices still allocate** ~180 MB/s at 64 voices; naad ships an
-  alloc-free core for low-pass only. Pinned to 2.1.0, gated on naad.
-- **The serde claim is false.** CLAUDE.md and three port docs say config types carry
-  `#derive(Serialize)`; none does. Pinned to 2.0.6 — implement or document the drop.
+- **Performance** (2.0.7) — all measured, all verified output-preserving: the interpolation
+  hoist (163 → 41–61 ns), the WSOLA rewrite (880 → 239 ms), and four smaller hoists.
+- **Structural** (2.1.0) — the `n_`/`N` prefix sweep over 100 top-level names (zero measured
+  collisions today), the voice-major block render, the streaming-reader restructure, per-note-on
+  allocation, `fill_buses_stereo`, `NZone_volume_db` being parsed and never read, and serde if
+  it is ever wanted ([ADR 0003](../adr/0003-serde-is-not-ported.md)).
+- **Upstream-gated**: high-pass / band-pass / notch voices still allocate ~180 MB/s at 64 voices;
+  naad ships an alloc-free SVF core for low-pass only.
+- **Inherited, not a port defect**: WSOLA amplifies output up to ~588x where `window_sum` falls
+  under the `1e-6` normalise threshold. Reproduced faithfully from the oracle; fixing it is a
+  deliberate divergence needing its own ADR.
 
 ## rust-old/ — retired (2.0.4)
 

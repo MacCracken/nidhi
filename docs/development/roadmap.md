@@ -17,45 +17,9 @@ release, not left as a wishlist.
 | **2.0.3** (2026-08-31) | Loop-crossfade seam ([ADR 0001](../adr/0001-loop-crossfade-seam.md)); round-half-away parity; signed `inf`/`nan` |
 | **2.0.4** (2026-08-31) | **Rust oracle retired.** Golden vectors captured, build identity recorded, `rust-old/` removed (377 MB) |
 | **2.0.5** (2026-08-31) | Coverage backfill — every named oracle test now has a counterpart; 441 → 518 assertions |
+| **2.0.6** (2026-08-31) | Latent-hazard closeout; ADRs 0002 (NaN clamps) and 0003 (serde not ported) |
 
 ---
-
-## 2.0.6 — Latent-hazard closeout
-
-The 2.0.3 audit's behavioural hazards. None is currently reachable through nidhi's own code;
-all are reachable by a consumer, and `dist/nidhi.cyr` is a public bundle.
-
-- [ ] **`n_effect_apply` dispatches on the slot tag; Rust matched on the state variant.**
-      `NEffectSlot_set_effect_type(slot, FX_CHORUS)` on a slot built as `FX_REVERB` hands a
-      `Reverb*` to `effects_chorus_process_sample` — a wild read in the audio callback. Rust's
-      variant match made this passthrough-safe. Highest-severity item in this release.
-- [ ] **`#derive(accessors)` re-opens states Rust made unrepresentable.** Every `Zone` /
-      `SampleRecorder` / `TimeStretcher` field is private in Rust; the derive generates public
-      setters that bypass every clamp. `NZone_set_pan(z, 50.0)` reads back 50.0;
-      `NSampleRecorder_set_channels(r, 0)` divides by zero at `src/capture.cyr:42`;
-      `NTimeStretcher_set_frame_size(s, -1000)` reaches the non-terminating loop the 2.0.2
-      builder guard only closed at the builder.
-- [ ] **NaN clamps invert.** `f64_min`/`f64_max` are built on `f64_lt`/`f64_gt`, which return 0
-      for a NaN operand, so `clamp(NaN)` yields the *bound* where Rust's `f32::clamp` yields NaN.
-      Confirmed: `n_zone_with_tune(z, NaN)` → −12800; `n_zone_with_pan(z, NaN)` → hard left. The
-      port is *safer*; it is also undocumented and untested. Decide and pin.
-- [ ] **`-0.0` breaks the SFZ inheritance sentinel.** `sfz_inh` compares raw bit patterns;
-      the oracle used `== 0.0`, which `-0.0` satisfies. `<global> volume=-6` + `<region>
-      volume=-0` gives −6.0 in Rust and −0.0 here. Audible.
-- [ ] **`n_engine_fill_buffer(e, buf, n)` never checks `n` against `vec_len(buf)`** → `_vec_die`
-      → `exit(1)` inside the audio callback. Rust derived frame count from `buffer.len()`.
-- [ ] Four unsaturated `f64_to` sites the 2.0.2 sweep missed: `src/envelope.cyr:73`,
-      `src/sample.cyr:123`, `:146`, `src/stretch.cyr:192`. (CHANGELOG 2.0.2 claims "all three
-      live sites" — the audit found four more.)
-- [ ] Remaining aliasing-where-Rust-took-by-value: `n_zone_with_adsr`,
-      `n_zone_with_filter_envelope`, `n_engine_set_adsr`, and `n_instrument_add_zone` writing
-      `NZone_set_group` through the caller's pointer. Same class 2.0.2 fixed for
-      `set_release_ms`.
-- [ ] **Resolve the serde decision.** `CLAUDE.md`, `src/error.cyr:8`, `docs/port/01-PLAN.md` D2
-      and `docs/port/16-serde-and-testing.md` all state that config types carry
-      `#derive(Serialize)`. **None does** — `grep '#derive' src/` is 100 % `accessors`. Either
-      implement it or record the drop in an ADR and fix all four documents. Note `NZone` has 32
-      fields against a historically conservative 16-field derive guidance.
 
 ## 2.0.7 — Performance (all bit-identical)
 

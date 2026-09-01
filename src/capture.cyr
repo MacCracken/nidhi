@@ -38,8 +38,13 @@ fn n_recorder_write(r, data) {
 }
 
 #must_use
+# n_recorder_new clamps channels to 1..2, but #derive(accessors) also generates a public
+# NSampleRecorder_set_channels that bypasses it -- Rust kept the field private, so 0 was
+# unrepresentable. A 0 here is an integer divide-by-zero, so treat it as mono.
 fn n_recorder_frames(r) {
-    return vec_len(NSampleRecorder_buffer(r)) / NSampleRecorder_channels(r);
+    var ch = NSampleRecorder_channels(r);
+    if (ch < 1) { ch = 1; }
+    return vec_len(NSampleRecorder_buffer(r)) / ch;
 }
 
 fn n_recorder_clear(r) {

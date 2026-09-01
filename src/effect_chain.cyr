@@ -25,8 +25,18 @@ var N_FX_MAX_SLOTS = 5;
 # Fields: effect_type (FX_* tag), bypass (0/1), mix (f64 bits, 0=dry 1=wet),
 # state (naad effect pointer, or 0 for None/failed-construction).
 #derive(accessors)
+# `state_type` records what `state` was actually CONSTRUCTED as, and is what dispatch reads.
+#
+# Rust's EffectType was an enum whose variant CARRIED the state, so the tag and the payload
+# could not disagree. #derive(accessors) generates a public NEffectSlot_set_effect_type, which
+# re-opens exactly that: retagging a live FX_REVERB slot to FX_CHORUS used to hand a Reverb*
+# to effects_chorus_process_sample -- a wild read inside the audio callback. Dispatching on
+# state_type makes the tag non-load-bearing, and a mismatch is treated as an inconsistent slot
+# and passed through untouched.
+#derive(accessors)
 struct NEffectSlot {
     effect_type;
+    state_type;
     bypass;
     mix;
     state;
@@ -36,6 +46,7 @@ struct NEffectSlot {
 fn n_effect_slot_new() {
     var s = alloc(sizeof(NEffectSlot));
     NEffectSlot_set_effect_type(s, FX_NONE);
+    NEffectSlot_set_state_type(s, FX_NONE);
     NEffectSlot_set_bypass(s, 0);
     NEffectSlot_set_mix(s, F64_ONE);
     NEffectSlot_set_state(s, 0);
@@ -109,6 +120,7 @@ fn n_effect_chain_add(chain, effect_type) {
     var slot = n_effect_slot_new();
     NEffectSlot_set_effect_type(slot, effect_type);
     NEffectSlot_set_state(slot, n_effect_chain_create_state(chain, effect_type));
+    NEffectSlot_set_state_type(slot, effect_type);
     vec_push(slots, slot);
     return 1;
 }
@@ -150,8 +162,11 @@ fn n_effect_chain_slot(chain, index) {
 # `state <= 0`, not `== 0`: create_state returns 0 for None, but a naad constructor can
 # also hand back a negative error code, and using that as a pointer is a wild read.
 #inline
-fn n_effect_apply(effect_type, state, input, scratch) {
+fn n_effect_apply(effect_type, state_type, state, input, scratch) {
     if (state <= 0) { return input; }
+    # The tag was changed without rebuilding the state: the slot is inconsistent, so pass
+    # through rather than reinterpreting one effect's struct as another's.
+    if (effect_type != state_type) { return input; }
     if (effect_type == FX_REVERB) {
         reverb_process_core(state, input, scratch);
         return load64(scratch);
@@ -175,7 +190,7 @@ fn n_effect_chain_process_sample(chain, input) {
         var etype = NEffectSlot_effect_type(slot);
         if (NEffectSlot_bypass(slot) == 0) {
             if (etype != FX_NONE) {
-                var wet = n_effect_apply(etype, NEffectSlot_state(slot), out, NEffectChain_scratch(chain));
+                var wet = n_effect_apply(etype, NEffectSlot_state_type(slot), NEffectSlot_state(slot), out, NEffectChain_scratch(chain));
                 var mix = NEffectSlot_mix(slot);
                 out = f64_add(f64_mul(out, f64_sub(F64_ONE, mix)), f64_mul(wet, mix));
             }
