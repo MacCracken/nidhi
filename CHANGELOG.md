@@ -1,5 +1,122 @@
 # Changelog
 
+## 2.1.3 — 2026-11-07
+
+Toolchain and dependency release: `cyrius` 6.6.3 → **6.6.20**, and every dependency moved to the
+set that toolchain pins. The move itself was the small part. One of its fixes stopped `n_load_wav`
+working at all, and a second broke two paths with the whole suite still green.
+
+### Changed — toolchain and dependencies
+
+| Dependency | Was | Now | Why this tag |
+|---|---|---|---|
+| naad | 2.2.2 | **2.2.5** | pins 6.6.20; its changelog calls this the matched set |
+| hisab | 2.11.2 | **3.3.7** | pins 6.6.20; 3.4.0 onward needs 6.7.x |
+| shravan | 2.8.0 | **2.8.2** | pins 6.6.20 |
+| goonj (transitive) | 2.0.4 | **2.0.6** | pins 6.6.20 |
+| sankoch | 2.7.10, transitive | **2.8.1**, declared | the copy the 6.6.20 snapshot bundles |
+| sakshi (transitive) | 2.4.11 | **2.5.7** | the copy the 6.6.20 snapshot bundles |
+
+- **hisab's major version does not reach nidhi.** Its 3.0.0 `Result` migration changed 48
+  signatures, but `src/` calls no hisab symbol directly, and naad 2.2.5 moved its own call sites.
+- **`lib/` was regenerated from empty.** `cyrius deps` over the 2.1.2 tree left 6.6.3 copies of
+  `callback`, `mmap`, `sync*` and `thread*` beside 6.6.20's `alloc` and `vec`, and kept the old and
+  new commit line for every dep in `cyrius.lock`. `deps --verify` passed anyway, because it hashes
+  what is on disk. Now 47 files are byte-identical to the snapshot and the four first-party bundles
+  to their tags' `dist/`. `callback.cyr` is gone; `alloc_cx`, `chrono`, `hashmap_fast` and `poison`
+  are new.
+- **`thread` joins `[deps] stdlib`.** sankoch includes `lib/thread.cyr` and calls `mutex_lock`.
+  Only shravan's old sidecar put that file in `lib/`; on a clean resolve it came from outside `lib/`
+  and outside the lock.
+- **`dist/` regenerated with `cyrius distlib --all`, and `dist/nidhi.deps` is gone.** Since 6.6.18 a
+  sidecar lists only what the bundle's named deps do not already bring, which here is nothing.
+  naad 2.2.5 publishes the same way. A program including `dist/nidhi.cyr`, with nidhi's deps
+  declared, loads a WAV through `decode_file`, renders and stretches.
+
+### Fixed — regressions this toolchain would have shipped
+
+- **`n_load_wav` refused every audio file.** sankoch and shravan both define a global
+  `detect_format`, and sankoch resolved transitively, after shravan. Under 6.6.3 shravan's own call
+  bound shravan's definition, the latest one seen at that point. 6.6.20 fixed that: "a redefined fn
+  binds every call to its LAST definition, as the warning always said". So `decode_file` ran
+  sankoch's detector, got `-4` for a valid WAV, and failed. `tests/io.tcyr` caught it as a SIGSEGV.
+  `[deps.sankoch]` is now declared above `[deps.shravan]`, and a named assertion reports a
+  reordered manifest before the crash. Both repos still define the name at their latest tags, so
+  this order is a standing rule, and a consumer on 6.6.20 or later needs it too. dhvani and jalwa
+  already have it.
+- **`n_stretch` and `n_stretch_ola` hung on a huge ratio.** `f64_to` has saturated since 6.6.8. With
+  input shorter than a frame and `input_len * ratio` at or past 2^63, the length used to cast to
+  `i64::MIN` and skip the push loop by accident; it now casts to `i64::MAX` and pushes until the
+  process dies. Both now test in f64 against `VEC_CAP_MAX` first and return an empty result, as
+  they do for a non-positive or non-finite ratio. Lengths from 2^28 to 2^63, which no vec can hold
+  on any toolchain, are refused the same way.
+- **`FX_DELAY` ended the process at an absurd sample rate**, the same way: `sr * 0.3` reached
+  naad's floor-only `delay_line_new` as `i64::MAX`. It now tests `delay_len_overflows` first and
+  leaves a None slot, as the reverb and chorus branches already did. **This changes behaviour:**
+  +Inf, f64::MAX, 1e300 and 1e30 used to build a working 1-sample delay and are now passthrough.
+
+The suite and both fuzzers passed through both of the last two. The bug was found by reading naad's
+and goonj's changelogs, which record the same failure.
+
+### Fixed — already wrong before this release
+
+- **A finite read position at or past 2^63 read outside the sample.** `n_sample_read_cubic` and
+  `n_sample_read_stereo_interpolated` guarded with `n_is_finite`, which a position like 1e30 passes.
+  `idx - 1` or `idx + 2` then wraps, both bounds tests succeed, and the fast path loads from just
+  before the buffer, returning garbage or ±Inf instead of silence. It happened on 6.6.3 and 6.6.20
+  alike; only the garbage differed. The guard is now `n_pos_in_range`, |x| < 2^53, which is the same
+  one mask and one compare, and also covers NaN and ±Inf.
+- **`n_engine_new` with a NaN, ±Inf, zero or negative sample rate segfaulted on the first render.**
+  A 2.1.1 regression. Moving LFO construction into `n_voice_new` dropped the check note-on had, so
+  naad's error code sat in the LFO slot, and render, which gates on `!= 0`, dereferenced it. The slot
+  now holds 0, the oracle's `Lfo::new(..).ok()`. The engine still builds and the note still plays,
+  without its filter or LFOs. It does not refuse the rate: the oracle's constructor cannot fail, and
+  an error code from a function nobody checks would only move the wild pointer to the caller.
+- **A +Inf sample rate put non-finite samples in the mix**, hidden behind that crash. Also 2.1.1:
+  `n_amp_envelope_rearm` wrote the rate through a setter that skips validation, where the oracle
+  rebuilt the envelope per note and took its fallback of (0, 0, 1.0, 0.01, 44100). naad then computed
+  `0 * Inf` on every tick. `rearm` now asks `validate_sample_rate` and takes the same fallback.
+
+### Numerics moved
+
+Render output is **not bit-identical** to 2.1.2, with no intended audio change. Upstream rewrote
+`f64_sin`/`f64_cos` (6.6.9) and `f64_pow` (6.6.10) and naad moved; this measures the sum of it, not
+each cause. Same arithmetic-only input on both toolchains, 145,408 samples across three full engine
+configurations, five stretch cases and four effects:
+
+- Worst difference **6.8e-13**, or **−243 dB** relative to peak. The floor of 24-bit audio is about
+  −144 dB.
+- Delay, chorus and limiter are bit-identical. `tests/golden.tcyr` passes unchanged.
+- The guards above contribute nothing: 2.1.2's `src/` and this `src/` on 6.6.20 are byte-identical
+  over the same run.
+
+### Verified
+
+- **15 suites, 666 assertions, 0 failures** (573 existing, 93 new). Fuzz 2 of 2. `deps --verify`,
+  `build --check-lib-sync` and `distlib --check` all pass.
+- **176 extreme inputs through both toolchains**, one process per case, with a timeout and a memory
+  cap. On 6.6.20 no stretch or effect case hangs or aborts, and every read outside the sample is
+  silent.
+- **120 sample-rate combinations** on 6.6.20: 12 rates from NaN to f64::MAX, across all five loop
+  modes, with a plain and a fully modulated zone. No crash, no hang, no non-finite sample.
+- **Each new test was mutation-checked.** Removing either length guard, restoring `n_is_finite`,
+  moving sankoch below shravan, dropping the LFO check or dropping `rearm`'s fallback each fails its
+  suite. Dropping the LFO check reproduces the original SIGSEGV.
+- **Benchmarks show no measurable change**, on a noisy machine: see `BENCHMARKS.md`.
+
+### Not fixed
+
+- **shravan's `silk_div32_varq` is defined twice with different overflow handling**, and its decoder
+  now binds the encoder's copy under the same 6.6.20 rule. That is Opus decode only, no nidhi test
+  reaches it, and shravan 2.8.2 reports no numeric movement. Not checked here.
+- **Seven `cyrius fmt --check` failures** carry over unchanged. CI does not gate them.
+
+### Also
+
+- `tests/io.tcyr` spells `O_WRONLY | O_CREAT | O_TRUNC` instead of a bare `577`.
+- `programs/smoke.cyr` printed `nidhi 2.0.0` through every release since the port.
+- Comments describing `f64_to` as returning `i64::MIN` are corrected.
+
 ## 2.1.2 — Unblocked by cyrius 6.6.3
 
 Toolchain-pin release. `cyrius` 6.6.2 → **6.6.3**; no source change.

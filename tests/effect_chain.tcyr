@@ -78,6 +78,28 @@ fn main() {
     var after = n_effect_chain_process_sample(rc, F64_HALF);
     assert_eq(n_is_finite(after), 1, "retagged slot still finite (no wild read)");
     assert_eq(after, F64_HALF, "retagged slot is passthrough: input returned unchanged");
+
+    # --- 2.1.3: a delay that cannot exist is a None slot, not a dead process ---
+    # f64_to has saturated since cyrius 6.6.8, so these reached delay_line_new as i64::MAX,
+    # past its floor-only guard. 1 << 30 is the finite case: 0.3 of it is past VEC_CAP_MAX,
+    # which aborted on every toolchain.
+    test_group("delay length past VEC_CAP_MAX is a None slot (2.1.3)");
+    var bad_sr = vec_new();
+    vec_push(bad_sr, 0x7FF0000000000000);
+    vec_push(bad_sr, 0x7FEFFFFFFFFFFFFF);
+    vec_push(bad_sr, 0x46293E5939A08CEA);
+    vec_push(bad_sr, f64_from(1 << 30));
+    var bsi = 0;
+    while (bsi < vec_len(bad_sr)) {
+        var bc = n_effect_chain_new(vec_get(bad_sr, bsi));
+        assert_eq(n_effect_chain_add(bc, FX_DELAY), 1, "delay slot still added");
+        assert_eq(NEffectSlot_state(n_effect_chain_slot(bc, 0)), 0, "impossible delay has no state");
+        assert_eq(n_effect_chain_process_sample(bc, F64_HALF), F64_HALF, "None slot is passthrough");
+        bsi = bsi + 1;
+    }
+    var okc = n_effect_chain_new(f64_from(44100));
+    ignore(n_effect_chain_add(okc, FX_DELAY));
+    assert(NEffectSlot_state(n_effect_chain_slot(okc, 0)) > 0, "a sane sample rate still builds the delay");
     assert_eq(NEffectSlot_state_type(rslot), FX_REVERB, "state_type unchanged by the retag");
 
     return assert_summary();

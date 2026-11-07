@@ -2,7 +2,7 @@
 # Requires: alloc, vec, math, naad (reverb_new/reverb_process_sample, comb_filter_new/
 #           comb_filter_process_sample, effects_chorus_new/effects_chorus_process_sample,
 #           dynamics_compressor_new/_process_sample, dynamics_limiter_new/_process_sample,
-#           naad_is_err)
+#           naad_is_err, delay_len_overflows)
 #
 # Ports rust-old/src/effect_chain.rs. "Use naad fully": slots hold real naad effect objects
 # (the Rust no_std passthrough is dropped). Effects run SERIALLY with per-slot bypass + wet/dry
@@ -90,8 +90,13 @@ fn n_effect_chain_create_state(chain, effect_type) {
         return st;
     }
     if (effect_type == FX_DELAY) {
-        var samples = f64_to(f64_mul(sr, f64_div(f64_from(3), f64_from(10))));   # (sr * 0.3) as usize
-        return comb_filter_new(samples, f64_div(f64_from(4), f64_from(10)));      # feedback 0.4
+        # (sr * 0.3) as usize. Tested in f64 BEFORE the cast: f64_to has saturated since
+        # cyrius 6.6.8, so an absurd sr reaches delay_line_new as i64::MAX, past its floor-only
+        # guard, and its push loop ends the process. A slot that cannot exist is None, like
+        # the reverb and chorus branches above and below. naad ADR-0004.
+        var delay_len = f64_mul(sr, f64_div(f64_from(3), f64_from(10)));
+        if (delay_len_overflows(delay_len) == 1) { return 0; }
+        return comb_filter_new(f64_to(delay_len), f64_div(f64_from(4), f64_from(10)));      # feedback 0.4
     }
     if (effect_type == FX_CHORUS) {
         # (3, 0.02, 0.002, 1.5, 0.5, sr)

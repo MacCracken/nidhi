@@ -26,10 +26,14 @@ consumed by **dhvani** (audio engine) and thereby **shruti** (DAW), replacing
 
 Declared in `cyrius.cyml [deps.*]` (git + tag + `dist/*.cyr` bundle), resolved by `cyrius deps`:
 
-- **naad** (2.2.2) — DSP: SVF/biquad filters, ADSR, LFOs, effects, voice management, interpolation,
+- **naad** (2.2.5) — DSP: SVF/biquad filters, ADSR, LFOs, effects, voice management, interpolation,
   onset/normalize helpers. **Use naad fully** — do not reimplement DSP naad already provides.
-- **shravan** (2.8.0) — audio codecs (WAV decode/encode + streaming), behind the `io` module.
-- **hisab** (2.11.2) — math (pulled transitively by naad; also directly available).
+- **shravan** (2.8.2) — audio codecs (WAV decode/encode + streaming), behind the `io` module.
+- **sankoch** (2.8.1) — compression, shravan's dep; the copy the 6.6.20 snapshot bundles. **Must
+  stay above `[deps.shravan]` in `cyrius.cyml`:** both define a global `detect_format`, deps are
+  prepended in manifest order, and every call binds the last definition since cyrius 6.6.20.
+  Reversed, `decode_file` refuses every audio file.
+- **hisab** (3.3.7) — math (pulled transitively by naad; also directly available).
 
 ## Quick Start
 
@@ -86,6 +90,9 @@ Modules are **self-contained**: NO `include` between `src/*.cyr` files; stdlib a
   (including this one) claimed otherwise until 2.0.6. See
   [ADR 0003](docs/adr/0003-serde-is-not-ported.md).
 - **No inline comments inside a `struct { }` body** (breaks the Cyrius parser — put them above).
+- **Test a length in f64 BEFORE `f64_to`.** The cast has saturated since cyrius 6.6.8, so a floor
+  such as `if (n < 1)` no longer catches an overflow. Compare against `VEC_CAP_MAX` first
+  (naad ADR-0004); `delay_len_overflows` does it for delays.
 - Playback accuracy over speed; sample-accurate loop points and crossfades.
 
 ## Testing / benchmarking
@@ -97,6 +104,10 @@ Modules are **self-contained**: NO `include` between `src/*.cyr` files; stdlib a
 - Fuzz: `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` — parsers must return an error code, never
   crash, on any input.
 - Never claim a perf win without before/after numbers in `bench-history.csv`.
+- A pin bump regenerates `lib/` from empty: `rm -rf lib cyrius.lock`, `mkdir lib`,
+  `cyrius lib sync`, `cyrius deps`. Over an old tree `cyrius deps` keeps stale leaves and old lock
+  lines, and `--verify` still passes. Then run `cyrius distlib --all`. A green suite does not clear
+  a pin bump; drive extreme inputs through both toolchains and compare.
 
 ## Rules (Hard Constraints)
 

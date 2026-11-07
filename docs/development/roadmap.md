@@ -4,7 +4,7 @@
 > Shipped work lives in [`CHANGELOG.md`](../../CHANGELOG.md); current state is in
 > [`state.md`](state.md); decisions are in [`docs/adr/`](../adr/).
 
-Current: **2.1.1**. Every item below carries a release pin and a reason. Nothing here blocks a
+Current: **2.1.3**. Every item below carries a release pin and a reason. Nothing here blocks a
 release — 2.1.0 is complete and green.
 
 ---
@@ -69,3 +69,48 @@ Each of these was examined and consciously not done. The reason is the point.
       describes a live `rust-old/`. Harmless here, but it is the file a future port would copy.
 - [ ] `docs/port/13-hisab-lib-template.md` shows bare `ERR_*` in its snippet. A warning was added
       in 2.0.2, but the snippet itself is still the wrong pattern to copy.
+
+## Moving the cyrius pin to 6.6.6 — done; 2.1.3 went to 6.6.20
+
+**Current pin: `cyrius = "6.6.20"`.** These notes were written against 6.6.3 and are kept as
+written. The `577` respell is done. The seven `cyrius fmt --check` failures are still open,
+unchanged under 6.6.20. "Nothing must change" held for 6.6.6 but not for 6.6.20: the
+[2.1.3 changelog](../../CHANGELOG.md) has what that bump needed.
+
+
+**Windows: one grep hit, and it is test-only.** `tests/io.tcyr:16` opens with a
+bare literal — `file_open(path, 577, 420)` with the comment
+`# O_WRONLY|O_CREAT|O_TRUNC, mode 0644`. That is the flag set 6.6.6 fixed on PE
+(before 6.6.6 an undecoded `O_TRUNC` left the old tail of a rewritten file
+behind), but nidhi has no `_TARGET_PE` / `CYRIUS_TARGET_WIN` guard anywhere in
+`src/`, `programs/` or `tests/` and does not build for PE, so no nidhi behaviour
+changes. Worth respelling `577` as `O_WRONLY | O_CREAT | O_TRUNC` while you are
+in there — a bare 577 is the shape that hid the aarch64 `O_NOFOLLOW`/`O_LARGEFILE`
+collision in a sibling.
+
+**The struct tightening misses nidhi for the same reason it misses naad.** 27
+structs (`NSamplerVoice`, `NZone`, `Sf2Phdr`, …), all used as heap layouts via
+`alloc(sizeof(X))` + generated accessors. Zero `: <StructName>` annotations,
+zero `StructName { … }` initializers, zero struct-to-struct copies — so the new
+"copying between two different struct types is a compile error" and the
+by-value-parameter deep-copy change have nothing to act on. Likewise: no `async`
+fns, no `operator` fns, no `ret2`/`rethi` pair returns, no SIMD-typed returns,
+no top-level `{ }` blocks, no duplicate global `var` in `src/`, no locally
+defined `vec_*` (and `[deps] stdlib` already names both `assert` and `vec`, so
+assert.cyr's new transitive `include "lib/vec.cyr"` cannot collide).
+`lib/regression.cyr` is not vendored — the only mention is a comment at
+`lib/syscalls_linux_common.cyr:208` — so the new exec deadline is irrelevant.
+
+**Pre-existing, NOT caused by 6.6.6 — seven `cyrius fmt --check` failures.**
+`src/engine.cyr:324`, `src/sample.cyr:217`, `src/zone.cyr:290`,
+`tests/envelope.tcyr:28`, `tests/sample.tcyr:169`, `tests/zone.tcyr:27` and
+`dist/nidhi.cyr:600` all report *"not canonically formatted … canonical
+continuation indent is 2 spaces per open paren (4 also accepted)"*. **Measured
+under 6.6.3, 6.6.4, 6.6.5 and 6.6.6 — identical in all four**, so the pin bump
+does not introduce them, and nidhi's CI does not gate `cyrius fmt`. Clear them
+with `cyrius fmt <file>` (rewrites in place) whenever, and regenerate the dist
+after; not a pin blocker.
+
+**Verify after bumping:** re-run `cyrius deps`, then `cyrius build`,
+`cyrius test`, `cyrius distlib`. Measured: `cyrius build` under 6.6.3 and under
+6.6.6 both exit 0 with the identical 123-line diagnostic set.

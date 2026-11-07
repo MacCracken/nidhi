@@ -158,6 +158,17 @@ fn n_stretcher_with_frame_size(s, size) {
     return s;
 }
 
+# n_stretch_fits(input_len, frame_size, ratio) -> 1 when the stretched buffers can exist.
+# Tested in f64 BEFORE any cast. f64_to has saturated since cyrius 6.6.8, so a length past 2^63
+# arrives as i64::MAX and every push loop below runs until the process dies; it used to arrive
+# as i64::MIN and skip them by accident. VEC_CAP_MAX is the most vec_push holds before it ends
+# the process, so anything at or past it could never have succeeded. naad ADR-0004.
+#must_use
+fn n_stretch_fits(input_len, frame_size, ratio) {
+    var need = f64_add(f64_mul(f64_from(input_len), ratio), f64_from(frame_size));
+    return f64_lt(need, f64_from(VEC_CAP_MAX));
+}
+
 # stretch_short(ratio) -- linear-interpolation resample for input_len < frame_size.
 #must_use
 fn n_stretch_short(s, ratio) {
@@ -192,6 +203,7 @@ fn n_stretch(s, ratio) {
     if (frame_size <= 0) { return out; }
     if (f64_le(ratio, 0) == 1) { return out; }
     if (n_is_finite(ratio) == 0) { return out; }
+    if (n_stretch_fits(input_len, frame_size, ratio) == 0) { return out; }
     if (input_len < frame_size) { return n_stretch_short(s, ratio); }
 
     var overlap = NTimeStretcher_overlap(s);
@@ -303,6 +315,7 @@ fn n_stretch_ola(s, ratio) {
     if (frame_size <= 0) { return out; }
     if (f64_le(ratio, 0) == 1) { return out; }
     if (n_is_finite(ratio) == 0) { return out; }
+    if (n_stretch_fits(input_len, frame_size, ratio) == 0) { return out; }
     if (input_len < frame_size) { return n_stretch_short(s, ratio); }
 
     var overlap = NTimeStretcher_overlap(s);

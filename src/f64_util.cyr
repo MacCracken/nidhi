@@ -24,6 +24,16 @@ fn n_is_finite(x) {
     return 1;
 }
 
+# n_pos_in_range(x) -> 1 when |x| < 2^53, the most a read position can be and still survive
+# f64_to + idx +/- 2 without wrapping. NaN and +/-Inf answer 0 too: with the sign masked off,
+# IEEE-754 magnitudes order as integers, and both sit above every finite value. Same cost as
+# n_is_finite, one mask and one compare.
+#inline
+fn n_pos_in_range(x) {
+    if ((x & 0x7FFFFFFFFFFFFFFF) >= 0x4340000000000000) { return 0; }
+    return 1;
+}
+
 # n_flush_denormal -- flush subnormal-magnitude values to +0.0 to avoid the 10-100x
 # x86 slowdown on denormals. Mirrors Rust `flush_denormal`:
 #   if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x }

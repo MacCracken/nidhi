@@ -20,7 +20,40 @@ Cyrius batches N iterations between one `clock_gettime` pair and reports the per
 average (`bench_batch_start` → tight loop → `bench_batch_stop(N)` → `bench_report`). Criterion
 reports a statistical estimate per call. Compare the **per-operation** figures.
 
-## Cyrius current (toolchain 6.5.36, x86_64 Linux, 2026-08-31, nidhi 2.0.7)
+## Cyrius current (toolchain 6.6.20, x86_64 Linux, 2026-11-07, nidhi 2.1.3)
+
+naad 2.2.5 · shravan 2.8.2 · hisab 3.3.7. Best of three alternating runs per tree, same machine,
+same session. **Compare within this table only:** this machine read about twice the August figures
+below on both toolchains that day, so the absolute numbers do not line up with the older sections.
+
+| Benchmark | 6.6.3 (2.1.2) | 6.6.20 (2.1.3) | Δ | Spread on 6.6.20 |
+|---|---|---|---|---|
+| `voice_count_scaling/1` | 1.23 µs | 1.28 µs | +3.6 % | 48 % |
+| `voice_count_scaling/4` | 3.04 µs | 2.32 µs | -23.7 % | 57 % |
+| `voice_count_scaling/8` | 5.28 µs | 3.93 µs | -25.6 % | 30 % |
+| `voice_count_scaling/16` | 7.49 µs | 6.96 µs | -7.2 % | 24 % |
+| `voice_count_scaling/32` | 13.18 µs | 12.88 µs | -2.3 % | 27 % |
+| `voice_count_scaling/64` | 25.94 µs | 24.69 µs | -4.8 % | 30 % |
+| `fill_buffer_stereo/1` | 683.59 µs | 669.58 µs | -2.0 % | 36 % |
+| `fill_buffer_stereo/8` | 2.049 ms | 2.131 ms | +4.0 % | 32 % |
+| `fill_buffer_stereo/16` | 3.715 ms | 3.801 ms | +2.3 % | 36 % |
+| `fill_buffer_per_sample/1` | 683.39 µs | 669.72 µs | -2.0 % | 36 % |
+| `fill_buffer_per_sample/8` | 2.073 ms | 2.124 ms | +2.5 % | 35 % |
+| `fill_buffer_per_sample/16` | 3.618 ms | 3.762 ms | +4.0 % | 35 % |
+| `interpolation_cubic` | 77 ns | 76 ns | -1.3 % | 8 % |
+| `interpolation_stereo` | 128 ns | 122 ns | -4.7 % | 50 % |
+| `fill_buffer_stereo_filtered_8v` | 3.131 ms | 3.349 ms | +7.0 % | 30 % |
+| `fill_buffer_stereo_filtered_hp_8v` | 3.501 ms | 3.865 ms | +10.4 % | 27 % |
+| `wsola_1sec_2x` | 522.435 ms | 531.510 ms | +1.7 % | 27 % |
+
+**No measurable change.** The runs spread 2–67 % within a single tree, and every Δ sits inside that.
+`interpolation_cubic` and `interpolation_stereo`, the paths that gained the 2.1.3 position guard,
+read −1.3 % and −4.7 %. The filtered 8-voice cases read +7–10 % with 27–42 % spread: not evidence of
+a regression, and not evidence against one. A quiet machine would settle it.
+
+Output is **not** bit-identical to 2.1.2. See the 2.1.3 changelog entry.
+
+## Cyrius 2.0.7 (toolchain 6.5.36, x86_64 Linux, 2026-08-31)
 
 naad 2.2.2 · shravan 2.8.0 · hisab 2.11.2. **Every 2.0.7 change is bit-identical** — verified by
 a render differential over 24,576 samples across 8 configurations (mono/stereo source, forward

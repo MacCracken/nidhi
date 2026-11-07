@@ -143,6 +143,32 @@ fn main() {
     var outq = n_stretch(stq, f64_div(f64_from(3), f64_from(2)));
     assert_eq(vec_len(outq), 8, "5 frames x1.5 -> 8 (was 7 before 2.0.3)");
 
+    # --- 2.1.3: a length no vec can hold is an empty result, not a dead process ---
+    # f64_to has saturated since cyrius 6.6.8, so the short path's target_len arrived as
+    # i64::MAX and its push loop ran until the process died; it used to arrive as i64::MIN
+    # and skip the loop by accident. 1 << 30 is the finite case: past VEC_CAP_MAX on any
+    # toolchain, so it aborted before and after 6.6.8 alike.
+    test_group("length past VEC_CAP_MAX is refused (2.1.3)");
+    var big_r = vec_new();
+    vec_push(big_r, 0x43ABC16D674EC800);
+    vec_push(big_r, 0x46293E5939A08CEA);
+    vec_push(big_r, 0x7FEFFFFFFFFFFFFF);
+    vec_push(big_r, f64_from(1 << 30));
+    var fsh = n_stretcher_new(din, f64_from(44100));
+    var fln_in = vec_new();
+    var fli = 0;
+    while (fli < 4096) { vec_push(fln_in, F64_HALF); fli = fli + 1; }
+    var fln = n_stretcher_new(fln_in, f64_from(44100));
+    var bri = 0;
+    while (bri < vec_len(big_r)) {
+        var br = vec_get(big_r, bri);
+        assert_eq(vec_len(n_stretch(fsh, br)), 0, "wsola short path refuses");
+        assert_eq(vec_len(n_stretch_ola(fsh, br)), 0, "ola short path refuses");
+        assert_eq(vec_len(n_stretch(fln, br)), 0, "wsola long path refuses");
+        assert_eq(vec_len(n_stretch_ola(fln, br)), 0, "ola long path refuses");
+        bri = bri + 1;
+    }
+
     return assert_summary();
 }
 

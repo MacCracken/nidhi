@@ -149,9 +149,8 @@ fn main() {
     assert(vec_len(NSample_slices(vsm)) >= 0, "2-frame sample shorter than the window: no crash");
 
     # --- 2.0.6: a non-finite read position must not wrap past the range guards ---
-    # f64_to is a raw cvttsd2si: NaN or an out-of-range position yields i64::MIN, and idx-1
-    # then wraps to i64::MAX, so both the "before the start" and "past the end" guards read
-    # as in-range.
+    # idx-1 and idx+2 are integer tests, and a position past 2^63 casts to the end of the i64
+    # range, where one of them wraps and both guards read as in-range.
     test_group("non-finite read position returns silence (2.0.6)");
     var nfd = vec_new();
     var nfi = 0;
@@ -167,6 +166,32 @@ fn main() {
     # A valid position still reads real audio -- the guard must not have swallowed everything.
     assert_eq(approx(n_sample_read_cubic(nfs, f64_from(10)), F64_HALF, f64_div(F64_ONE, f64_from(1000))), 1,
         "a finite position still reads the sample");
+
+    # --- 2.1.3: a FINITE position past 2^63 reached the same wrap. n_is_finite let it through
+    # on every toolchain, and the fast path read from just before the buffer. Only the garbage
+    # differed: cyrius 6.6.8 moved the saturation. 0x43E0... is 2^63, 0x7FEF... is f64::MAX.
+    test_group("finite position past the wrap returns silence (2.1.3)");
+    var hup = vec_new();
+    vec_push(hup, 0x43E0000000000000);
+    vec_push(hup, 0x7FEFFFFFFFFFFFFF);
+    vec_push(hup, 0x46293E5939A08CEA);
+    vec_push(hup, 0x4340000000000000);
+    var hus = n_sample_from_stereo(nfd, 44100);
+    var hui = 0;
+    while (hui < vec_len(hup)) {
+        var hp = vec_get(hup, hui);
+        assert_eq(n_sample_read_cubic(nfs, hp), 0, "read_cubic(+huge) mono -> 0");
+        assert_eq(n_sample_read_cubic(nfs, f64_neg(hp)), 0, "read_cubic(-huge) mono -> 0");
+        assert_eq(n_sample_read_cubic(hus, hp), 0, "read_cubic(+huge) stereo -> 0");
+        assert_eq(n_sample_read_cubic(hus, f64_neg(hp)), 0, "read_cubic(-huge) stereo -> 0");
+        n_sample_read_stereo_interpolated(hus, hp, nfo);
+        assert_eq(load64(nfo), 0, "read_stereo(+huge) -> L 0");
+        assert_eq(load64(nfo + 8), 0, "read_stereo(+huge) -> R 0");
+        n_sample_read_stereo_interpolated(hus, f64_neg(hp), nfo);
+        assert_eq(load64(nfo), 0, "read_stereo(-huge) -> L 0");
+        assert_eq(load64(nfo + 8), 0, "read_stereo(-huge) -> R 0");
+        hui = hui + 1;
+    }
 
     return assert_summary();
 }

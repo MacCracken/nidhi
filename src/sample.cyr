@@ -125,9 +125,8 @@ fn n_cubic_hermite(y0, y1, y2, y3, t) {
 fn n_sample_read_cubic(s, position) {
     var frames = NSample_frames(s);
     if (frames == 0) { return 0; }
-    # See the note in n_sample_read_stereo_interpolated: f64_to on a non-finite position
-    # yields i64::MIN, and idx-1 wraps past every range guard.
-    if (n_is_finite(position) == 0) { return 0; }
+    # See the note in n_sample_read_stereo_interpolated.
+    if (n_pos_in_range(position) == 0) { return 0; }
     var idx = f64_to(f64_floor(position));
     var frac = f64_sub(position, f64_from(idx));
 
@@ -179,10 +178,11 @@ fn n_sample_read_stereo_interpolated(s, position, out) {
         store64(out + 8, 0);
         return 0;
     }
-    # f64_to is a raw cvttsd2si: a NaN or out-of-range position yields i64::MIN, and idx-1
-    # then WRAPS to i64::MAX, so the "before the start" and "past the end" guards below both
-    # read as in-range. Reject non-finite up front instead.
-    if (n_is_finite(position) == 0) {
+    # The guards below are integer tests on idx-1 and idx+2, so idx must be small enough that
+    # neither WRAPS. Past 2^63 f64_to saturates, and at either end one of the two wraps, both
+    # guards read as in-range, and the fast path loads from just before the buffer. So refuse
+    # the position in f64 first: finite and absurd is silence, same as non-finite.
+    if (n_pos_in_range(position) == 0) {
         store64(out, 0);
         store64(out + 8, 0);
         return 0;

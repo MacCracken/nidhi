@@ -13,7 +13,7 @@ fn approx(a, b, tol) {
 }
 
 fn write_file(path, buf, len) {
-    var fd = file_open(path, 577, 420);   # O_WRONLY|O_CREAT|O_TRUNC, mode 0644
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);   # mode 0644
     if (fd < 0) { return 0 - 1; }
     file_write(fd, buf, len);
     file_close(fd);
@@ -58,6 +58,13 @@ fn main() {
     store8(badbuf + 2, 2);
     store8(badbuf + 3, 3);
     assert_eq(n_is_err(n_load_wav_from_memory(badbuf, 4)), 1, "invalid bytes -> error");
+
+    # sankoch and shravan both define a global detect_format, and since cyrius 6.6.20 every
+    # call binds the LAST definition. cyrius.cyml keeps sankoch above shravan so that is
+    # shravan's. Reordered, decode_file refuses every audio file; this names the cause
+    # before the load_wav asserts below fail on it and dereference the error code.
+    test_group("detect_format binds shravan's definition");
+    assert_eq(detect_format(wavbuf, nbytes), FMT_WAV, "RIFF -> FMT_WAV (sankoch above shravan in cyrius.cyml)");
 
     test_group("load_wav file + file_stem");
     write_file("/tmp/nidhi_io_test.wav", wavbuf, nbytes);

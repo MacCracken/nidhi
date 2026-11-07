@@ -192,6 +192,18 @@ struct NSamplerVoice {
 fn n_ignore(v) { return 0; }
 
 #must_use
+# n_voice_lfo_new(sample_rate) -> a persistent SINE LFO, or 0. modulation_lfo_new refuses a NaN,
+# +/-Inf, zero or negative rate with a negative code, and render gates on `!= 0`, so a code in
+# this slot is dereferenced on the first frame. The oracle's `Lfo::new(..).ok()`: a rate naad
+# refuses means no LFO, and the voice plays without one. n_engine_new does not refuse the rate
+# either: the oracle's constructor cannot fail, and no caller checks it for a code.
+#must_use
+fn n_voice_lfo_new(sample_rate) {
+    var lfo = modulation_lfo_new(MODULATION_LFO_SINE, F64_ONE, sample_rate);
+    if (naad_is_err(lfo) == 1) { return 0; }
+    return lfo;
+}
+
 fn n_voice_new(sample_rate) {
     var v = alloc(sizeof(NSamplerVoice));
     NSamplerVoice_set_active(v, 0);
@@ -213,9 +225,9 @@ fn n_voice_new(sample_rate) {
     NSamplerVoice_set_pressure(v, 0);
     NSamplerVoice_set_brightness(v, F64_HALF);
     NSamplerVoice_set_choke_group(v, 0);
-    NSamplerVoice_set_pitch_lfo(v, modulation_lfo_new(MODULATION_LFO_SINE, F64_ONE, sample_rate));
+    NSamplerVoice_set_pitch_lfo(v, n_voice_lfo_new(sample_rate));
     NSamplerVoice_set_pitch_lfo_depth(v, 0);
-    NSamplerVoice_set_filter_lfo(v, modulation_lfo_new(MODULATION_LFO_SINE, F64_ONE, sample_rate));
+    NSamplerVoice_set_filter_lfo(v, n_voice_lfo_new(sample_rate));
     NSamplerVoice_set_filter_lfo_depth(v, 0);
     NSamplerVoice_set_fil_keytrack(v, 0);
     NSamplerVoice_set_cutoff_smoother(v, smoothing_new(f64_div(f64_from(5), f64_from(1000)), sample_rate, 0));
@@ -262,8 +274,8 @@ fn n_engine_new(max_voices, sample_rate) {
     NSamplerEngine_set_instrument(e, 0);
     NSamplerEngine_set_bank(e, n_sample_bank_new());
     NSamplerEngine_set_sample_rate(e, sample_rate);
-    # f64_to is a raw cvttsd2si: out of range it yields i64::MIN, which collapses to 0
-    # downstream and turns a huge release into an INSTANT one (a click). Saturate first.
+    # Saturate to u32 range before f64_to, as n_adsr_config_from_seconds does: a release is a
+    # sample count naad holds, not an i64, and a huge one must stay huge rather than click.
     var rcap = f64_from(4294967295);
     var rel = f64_to(f64_min(f64_max(f64_mul(sample_rate, f64_div(F64_ONE, f64_from(100))), F64_ONE), rcap));
     NSamplerEngine_set_default_adsr(e, n_adsr_config_new(0, 0, F64_ONE, rel));
