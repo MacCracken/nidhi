@@ -26,14 +26,14 @@ consumed by **dhvani** (audio engine) and thereby **shruti** (DAW), replacing
 
 Declared in `cyrius.cyml [deps.*]` (git + tag + `dist/*.cyr` bundle), resolved by `cyrius deps`:
 
-- **naad** (2.2.5) — DSP: SVF/biquad filters, ADSR, LFOs, effects, voice management, interpolation,
+- **naad** (2.3.0) — DSP: SVF/biquad filters, ADSR, LFOs, effects, voice management, interpolation,
   onset/normalize helpers. **Use naad fully** — do not reimplement DSP naad already provides.
-- **shravan** (2.8.2) — audio codecs (WAV decode/encode + streaming), behind the `io` module.
-- **sankoch** (2.8.1) — compression, shravan's dep; the copy the 6.6.20 snapshot bundles. **Must
+- **shravan** (2.9.0) — audio codecs (WAV decode/encode + streaming), behind the `io` module.
+- **sankoch** (2.8.3) — compression, shravan's dep; the copy the 6.7.9 snapshot bundles. **Must
   stay above `[deps.shravan]` in `cyrius.cyml`:** both define a global `detect_format`, deps are
   prepended in manifest order, and every call binds the last definition since cyrius 6.6.20.
   Reversed, `decode_file` refuses every audio file.
-- **hisab** (3.3.7) — math (pulled transitively by naad; also directly available).
+- **hisab** (3.4.0) — math (pulled transitively by naad; also directly available).
 
 ## Quick Start
 
@@ -41,7 +41,7 @@ Declared in `cyrius.cyml [deps.*]` (git + tag + `dist/*.cyr` bundle), resolved b
 cyrius deps                                     # resolve stdlib + naad/shravan/hisab bundles
 cyrius build programs/smoke.cyr build/nidhi-smoke   # build the [build].entry (smoke, proves the chain links)
 cyrius test                                     # run every tests/*.tcyr
-cyrius tests tests                              # same, explicit dir
+cyrius test tests                               # same, explicit dir
 cyrius bench tests/nidhi.bcyr                   # run the parity benchmarks
 cyrius fuzz                                     # run fuzz/*.fcyr never-crash harnesses
 cyrius distlib                                  # rebuild dist/nidhi.cyr (the consumer bundle)

@@ -20,7 +20,37 @@ Cyrius batches N iterations between one `clock_gettime` pair and reports the per
 average (`bench_batch_start` → tight loop → `bench_batch_stop(N)` → `bench_report`). Criterion
 reports a statistical estimate per call. Compare the **per-operation** figures.
 
-## Cyrius current (toolchain 6.6.20, x86_64 Linux, 2026-11-07, nidhi 2.1.3)
+## Cyrius current (toolchain 6.7.9, x86_64 Linux, 2026-11-07, nidhi 2.2.0)
+
+naad 2.3.0 · shravan 2.9.0 · hisab 3.4.0. Minimum of eight interleaved runs per tree, same session,
+on a quiet machine (run-to-run spread 2–19 %). These line up with the August figures far better
+than the 2.1.3 table below, which was measured on a loaded machine.
+
+| Benchmark | 6.6.20 (2.1.3) | 6.7.9 (2.2.0) | Δ min | Δ median | 6.7.9 slower in |
+|---|---|---|---|---|---|
+| `voice_count_scaling/1` | 567 ns | 564 ns | -0.5 % | -2.1 % | 3 of 8 |
+| `voice_count_scaling/4` | 1.03 µs | 1.03 µs | -0.1 % | -0.3 % | 6 of 8 |
+| `voice_count_scaling/8` | 1.69 µs | 1.68 µs | -0.1 % | -0.8 % | 4 of 8 |
+| `voice_count_scaling/16` | 2.97 µs | 2.98 µs | +0.2 % | +0.6 % | 5 of 8 |
+| `voice_count_scaling/32` | 5.56 µs | 5.57 µs | +0.2 % | +1.0 % | 6 of 8 |
+| `voice_count_scaling/64` | 10.67 µs | 10.64 µs | -0.2 % | +0.5 % | 6 of 8 |
+| `fill_buffer_stereo/1` | 302.08 µs | 301.54 µs | -0.2 % | +0.7 % | 7 of 8 |
+| `fill_buffer_stereo/8` | 941.21 µs | 935.11 µs | -0.6 % | +2.0 % | 6 of 8 |
+| `fill_buffer_stereo/16` | 1.673 ms | 1.661 ms | -0.7 % | +0.3 % | 6 of 8 |
+| `fill_buffer_per_sample/1` | 301.37 µs | 299.41 µs | -0.7 % | -0.6 % | 2 of 8 |
+| `fill_buffer_per_sample/8` | 940.61 µs | 943.95 µs | +0.4 % | +0.7 % | 5 of 8 |
+| `fill_buffer_per_sample/16` | 1.674 ms | 1.652 ms | -1.3 % | +0.5 % | 5 of 8 |
+| `interpolation_cubic` | 36 ns | 36 ns | +0.0 % | +0.0 % | 4 of 8 |
+| `interpolation_stereo` | 60 ns | 59 ns | -1.7 % | -1.6 % | 2 of 8 |
+| `fill_buffer_stereo_filtered_8v` | 1.439 ms | 1.386 ms | -3.7 % | -0.8 % | 2 of 8 |
+| `fill_buffer_stereo_filtered_hp_8v` | 1.658 ms | 1.606 ms | -3.1 % | +1.1 % | 5 of 8 |
+| `wsola_1sec_2x` | 240.935 ms | 235.458 ms | -2.3 % | -1.5 % | 2 of 8 |
+
+**Flat.** The minimums move between −3.7 % and +0.4 %, and every benchmark's ranges overlap. The
+first three runs had all six `voice_count_scaling` cases at +3–5 %; five more runs took them to
+−0.5 % to +0.2 %, so that was noise. Output is byte-identical to 2.1.3.
+
+## Cyrius 2.1.3 (toolchain 6.6.20, x86_64 Linux, 2026-11-07)
 
 naad 2.2.5 · shravan 2.8.2 · hisab 3.3.7. Best of three alternating runs per tree, same machine,
 same session. **Compare within this table only:** this machine read about twice the August figures

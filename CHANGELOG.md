@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.2.0 — 2026-11-07
+
+Toolchain and dependency release: `cyrius` 6.6.20 → **6.7.9**, and every dependency moved to the
+set that toolchain pins. **No `src/` change, and output is byte-identical to 2.1.3.** It is a minor
+because a consumer now needs a newer toolchain: **cyrius 6.7.5 or later.**
+
+### Changed — toolchain and dependencies
+
+| Dependency | Was | Now | Why this tag |
+|---|---|---|---|
+| naad | 2.2.5 | **2.3.0** | pins 6.7.9; 2.3.1 onward needs 6.7.18 |
+| hisab | 3.3.7 | **3.4.0** | pins 6.7.9; 3.4.1 needs 6.7.18 |
+| shravan | 2.8.2 | **2.9.0** | pins 6.7.9; 2.9.1 onward needs 6.7.18 |
+| goonj (transitive) | 2.0.6 | **2.1.0** | pins 6.7.9; 2.1.1 onward needs 6.7.18 |
+| sankoch | 2.8.1 | **2.8.3** | the copy the 6.7.9 snapshot bundles |
+| sakshi (transitive) | 2.5.7 | **2.5.8** | the copy hisab declares and the 6.7.9 snapshot bundles |
+
+- ⚠ **A consumer now needs cyrius 6.7.5 or later.** Measured with a program built on
+  `dist/nidhi.cyr`, resolving each pin's own snapshot and these tags. 6.7.5 and 6.7.9 build and
+  run. 6.7.2 to 6.7.4 fail on sankoch 2.8.3's `loop { }` (`expected '=', got '{'`), and 6.7.1 and
+  below fail earlier. Every failure is at compile time. naad 2.3.0 and goonj 2.1.0 report 6.7.2,
+  which is right for them, since neither pulls sankoch in. dhvani pins 6.6.10 and nidhi 2.1.2, so it
+  moves its toolchain to take this release.
+- **hisab 3.4.0 retires 27 public names, and none reaches nidhi.** None appears in `src/`, the
+  tests, the fuzzers or `programs/`, and `src/` calls no hisab symbol directly.
+- **sakshi stays at 2.5.8.** 2.5.9 and 2.5.10 also pin 6.7.9, but hisab and goonj report that 2.5.10
+  warns on every compile that `lib/` shadows the snapshot's copy.
+- **`lib/` was regenerated from empty.** 47 files are byte-identical to the 6.7.9 snapshot, and the
+  four first-party bundles to their tags' `dist/`. `cyrius deps --locked` confirms `lib/` and the
+  lock are what the tags resolve, and replaying `lib sync` and `deps` from an empty `lib/`
+  reproduces both byte for byte. No file was added or removed.
+- **`dist/nidhi.cyr` differs from 2.1.3 only in its version line.**
+- **sankoch stays above shravan.** Both still define `detect_format` at these tags.
+
+### Verified — nothing moved
+
+- **The 6.7 language changes do not reach nidhi.** Outside comments and strings it has no lone `!`
+  (a no-op until 6.7.3, so a real one would have flipped), no `~`, no `>>>`, no unary minus, and no
+  `true`, `false`, `const`, `do`, `dyn`, `impl` or `trait` used as a name. Every build passes the
+  6.7.7 forward-call arity check, and the warnings match 6.6.20's class by class.
+- **Render output is byte-identical to 2.1.3**: the same 145,420-line differential used for 2.1.3,
+  with three full engine configurations, five stretch cases and four effects.
+- **All 176 extreme inputs give identical results on 6.6.20 and 6.7.9**, exit codes and output
+  digests included, and the 120 sample-rate combinations give an identical table. Every 2.1.3 guard
+  holds.
+- **15 suites, 666 assertions, 0 failures.** Fuzz 2 of 2. `deps --verify`, `build --check-lib-sync`
+  and `distlib --check` pass.
+- **Benchmarks are flat** over eight interleaved runs per toolchain: see `BENCHMARKS.md`.
+
+### Also
+
+- `CLAUDE.md`'s Quick Start uses `cyrius test tests`. 6.7.6 deprecated `cyrius tests`, which goes in
+  the next release.
+- `programs/smoke.cyr` prints 2.2.0.
+
 ## 2.1.3 — 2026-11-07
 
 Toolchain and dependency release: `cyrius` 6.6.3 → **6.6.20**, and every dependency moved to the

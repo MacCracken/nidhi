@@ -4,7 +4,7 @@
 > Shipped work lives in [`CHANGELOG.md`](../../CHANGELOG.md); current state is in
 > [`state.md`](state.md); decisions are in [`docs/adr/`](../adr/).
 
-Current: **2.1.3**. Every item below carries a release pin and a reason. Nothing here blocks a
+Current: **2.2.0**. Every item below carries a release pin and a reason. Nothing here blocks a
 release — 2.1.0 is complete and green.
 
 ---
@@ -72,7 +72,7 @@ Each of these was examined and consciously not done. The reason is the point.
 
 ## Moving the cyrius pin to 6.6.6 — done; 2.1.3 went to 6.6.20
 
-**Current pin: `cyrius = "6.6.20"`.** These notes were written against 6.6.3 and are kept as
+**Current pin: `cyrius = "6.7.9"`, since 2.2.0.** These notes were written against 6.6.3 and are kept as
 written. The `577` respell is done. The seven `cyrius fmt --check` failures are still open,
 unchanged under 6.6.20. "Nothing must change" held for 6.6.6 but not for 6.6.20: the
 [2.1.3 changelog](../../CHANGELOG.md) has what that bump needed.
