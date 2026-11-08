@@ -1,5 +1,107 @@
 # Changelog
 
+## 2.2.1 — 2026-11-07
+
+Toolchain and dependency release: `cyrius` 6.7.9 → **6.7.18**, and every dependency moved to its
+newest tag, which is also the set that toolchain pins. **Render output is byte-identical to 2.2.0.**
+One `src/` change takes up an API naad shipped for nidhi: **high-pass, band-pass and notch voices
+no longer allocate** on the render path. Most render benchmarks run up to 4.7 % slower, a cost of
+the 6.7.18 toolchain (measured below).
+
+### Changed — toolchain and dependencies
+
+| Dependency | Was | Now | Note |
+|---|---|---|---|
+| naad | 2.3.0 | **2.3.3** | pins 6.7.18 |
+| hisab | 3.4.0 | **3.4.1** | pins 6.7.18 |
+| shravan | 2.9.0 | **2.9.3** | pins 6.7.18 |
+| goonj (transitive) | 2.1.0 | **2.3.1** | pins 6.7.18 |
+| sankoch | 2.8.3 | **2.8.9** | the copy the 6.7.18 snapshot bundles |
+| sakshi (transitive) | 2.5.8 | **2.5.10** | the copy the 6.7.18 snapshot bundles |
+| bayan (transitive, new) | — | **1.11.1** | shravan's own dep: `dist/bayan-json.cyr` |
+
+- **A consumer still needs cyrius 6.7.5 or later.** Measured again with a program built on
+  `dist/nidhi.cyr`, resolving each pin's own snapshot and these tags: every pin from 6.7.5 to 6.7.18
+  (6.7.5 and 6.7.9 to 6.7.18) builds and runs it, including a high-pass render that must allocate
+  nothing. 6.7.2 and 6.7.4 fail at compile time on sankoch's `loop { }`, as with 2.2.0. dhvani pins
+  6.6.10, so it still has to move its toolchain.
+- **The `bayan` stdlib leaf is gone from `[deps].stdlib`.** nidhi listed it in July because shravan's
+  consumers then had to supply bayan themselves. shravan 2.9.2 declares its own `[deps.bayan]`, the
+  JSON-only bundle, and nidhi calls none of bayan. Keeping the leaf made cyrius link the full bayan
+  instead: `build/nidhi-smoke` is 5,460,064 bytes with it and 4,610,552 without (4,182,464 on 2.2.0).
+  `lib/bayan.cyr` is replaced by `lib/bayan-json.cyr`. A consumer's own manifest is unaffected.
+- **`lib/` was regenerated from empty.** 48 files are byte-identical to the 6.7.18 snapshot, and the
+  five git bundles (naad, hisab, shravan, goonj, bayan-json) to their tags' `dist/`. `cyrius deps
+  --locked` confirms `lib/` and the lock are what the tags resolve. New: `lib/simd.cyr` (goonj's row
+  kernels), `lib/slice.cyr`, `lib/bayan-json.cyr`. Gone: `lib/bayan.cyr`.
+- **The sankoch/shravan order no longer decides decoding.** shravan 2.9.2 detects formats through its
+  own `shravan_detect_format`. With sankoch moved below shravan, all 36 WAV/AIFF fixtures below still
+  decode identically, and only `tests/io.tcyr`'s direct `detect_format` assertion fails. sankoch
+  stays above shravan; `cyrius.cyml`, `tests/io.tcyr` and `CLAUDE.md` now say why.
+- Two of the build's three duplicate-function warnings are gone (shravan 2.9.2 removed its duplicate
+  `silk_bwexpander_32` and `silk_div32_varq`). `detect_format` remains.
+
+### Fixed — high-pass, band-pass and notch voices allocated every sample
+
+These three modes took naad's one-shot `filter_svf_process_sample`, which allocates a 32-byte
+`SvfOutput` per channel per voice per sample: 180 MB/s at 64 voices, never freed by the bump
+allocator. Low-pass has been allocation-free since 2.0.2. naad 2.3.2 added
+`filter_svf_process_sample_into`, closing nidhi's request, and `nvf_process_stereo` now writes into
+a 32-byte stack buffer instead. naad's allocating form is `alloc` plus `_into`, so the filter state
+and output are unchanged by construction, and measured unchanged below.
+
+- New test group in `tests/engine.tcyr`: all three modes at 8 and 64 voices allocate 0 bytes over 20
+  blocks. Against the 2.2.0 `engine.cyr` each of its 6 assertions fails, at 531,712 bytes.
+- `fill_buffer_stereo_filtered_hp_8v` is 4.3 % faster than 2.2.0, in all 8 rounds, despite the
+  toolchain cost below (7.1 % faster built with 6.7.9).
+
+### Changed in the dependencies, reaching nidhi
+
+- **More WAV and AIFF files load.** shravan 2.9.2 and 2.9.3 decode 64-bit float WAV, 12-bit WAV and
+  AIFF, and other non-byte depths in their whole-byte containers, where 2.2.0 returned
+  `NIDHI_ERR_IMPORT` (or, for 12-bit AIFF, an empty sample). AIFF-C `fl32` decoded as integers and
+  now decodes as float. Measured over 36 hand-built fixtures, written in Python rather than by
+  shravan's encoder: these 5 differ from 2.2.0, each now correct, and the other 31, hostile headers
+  included, are byte-identical through all three of `n_load_wav`, `n_load_wav_from_memory` and the
+  stream reader.
+- **The one-shot decode ceiling doubled**, to 2^26 interleaved samples (about 12.7 minutes of 44.1 kHz
+  stereo). Past it shravan refuses before allocating, and nidhi still reports `NIDHI_ERR_IMPORT`.
+- naad 2.3.2 lets `comb_filter_new` and `voice_manager_new` return an error. Neither can reach one
+  from nidhi: the delay slot's length is tested against `VEC_CAP_MAX` before the call (2.1.3), and the
+  voice manager gets constant, valid modes.
+- No hisab function is called from `src/`, so hisab 3.4.1's changed answers do not reach nidhi.
+
+### Verified
+
+- **Render output is byte-identical to 2.2.0** on 6.7.9: the same 145,420-line differential, and a
+  wider 268,305-line one with high-pass, band-pass and notch engine cases, before and after the
+  filter change.
+- **All 176 extreme inputs and the 120 sample-rate cases give identical results** on 6.7.9 and 6.7.18.
+- **The 6.7.10 to 6.7.18 language changes do not reach nidhi.** They rework struct values, generics,
+  vectors, multi-value receives and method calls; nidhi has no type annotations in `src/`, no
+  enums, `for` loops, float literals or method calls.
+- **15 suites, 672 assertions, 0 failures**, no `#must_use` warning. Fuzz 2 of 2. `deps --verify`,
+  `deps --locked`, `build --check-lib-sync` and `distlib --check` pass. `dist/nidhi.cyr` differs from
+  2.2.0 in its version line and the filter change.
+- ⚠ **Most render benchmarks are slower, and the 6.7.18 toolchain is why.** A third tree, 2.2.1
+  built with cyrius 6.7.9 (same dependency bundles byte for byte), splits it: on 6.7.9, 2.2.1 is
+  0 to 7.1 % faster than 2.2.0, and the same source built with 6.7.18 is 1.1 to 6.5 % slower than
+  that. Net, `voice_count_scaling` and `fill_buffer*` run −0.5 % to +4.7 % against 2.2.0 (low-pass
+  filtered +4.7 %, 64 voices +3.5 %, slower in all 8 rounds for the 8- to 64-voice cases). The
+  stdlib changes on these paths are cold or unused, which points at 6.7.18's code generation or
+  layout; not narrowed further. Eight rounds per tree: see `BENCHMARKS.md` and
+  `bench-history.csv`.
+
+### Found, not fixed
+
+- **A reverse-loop zone is silent unless it has a start offset.** The voice starts at offset 0, steps
+  backwards and ends after one frame. The Rust oracle does the same, so the fix is a deliberate
+  divergence; it is on the roadmap.
+
+### Also
+
+- `programs/smoke.cyr` prints 2.2.1.
+
 ## 2.2.0 — 2026-11-07
 
 Toolchain and dependency release: `cyrius` 6.6.20 → **6.7.9**, and every dependency moved to the

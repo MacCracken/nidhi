@@ -20,7 +20,45 @@ Cyrius batches N iterations between one `clock_gettime` pair and reports the per
 average (`bench_batch_start` → tight loop → `bench_batch_stop(N)` → `bench_report`). Criterion
 reports a statistical estimate per call. Compare the **per-operation** figures.
 
-## Cyrius current (toolchain 6.7.9, x86_64 Linux, 2026-11-07, nidhi 2.2.0)
+## Cyrius current (toolchain 6.7.18, x86_64 Linux, 2026-11-07, nidhi 2.2.1)
+
+naad 2.3.3 · shravan 2.9.3 · hisab 3.4.1. Three trees, minimum of eight rounds each, run in a
+rotating order in one session on a quiet machine. The middle column is 2.2.1's source and
+dependencies built with cyrius 6.7.9, which isolates the toolchain: its dependency bundles are
+byte-identical to 2.2.1's, and only the compiler and its stdlib differ.
+
+| Benchmark | 2.2.0 on 6.7.9 | 2.2.1 on 6.7.9 | 2.2.1 on 6.7.18 | deps + filter | toolchain | net | 2.2.1 faster in |
+|---|---|---|---|---|---|---|---|
+| `voice_count_scaling/1` | 548 ns | 548 ns | 554 ns | +0.0 % | +1.1 % | +1.1 % | 2 of 8 |
+| `voice_count_scaling/4` | 1.01 µs | 968 ns | 1.01 µs | -4.4 % | +4.1 % | -0.5 % | 1 of 8 |
+| `voice_count_scaling/8` | 1.64 µs | 1.61 µs | 1.65 µs | -1.4 % | +2.3 % | +0.9 % | 0 of 8 |
+| `voice_count_scaling/16` | 2.86 µs | 2.75 µs | 2.93 µs | -3.7 % | +6.4 % | +2.4 % | 0 of 8 |
+| `voice_count_scaling/32` | 5.30 µs | 5.30 µs | 5.47 µs | -0.1 % | +3.2 % | +3.1 % | 0 of 8 |
+| `voice_count_scaling/64` | 10.24 µs | 10.03 µs | 10.59 µs | -2.0 % | +5.6 % | +3.5 % | 0 of 8 |
+| `fill_buffer_stereo/1` | 287.06 µs | 284.32 µs | 293.10 µs | -1.0 % | +3.1 % | +2.1 % | 1 of 8 |
+| `fill_buffer_stereo/8` | 904.40 µs | 874.38 µs | 931.07 µs | -3.3 % | +6.5 % | +2.9 % | 1 of 8 |
+| `fill_buffer_stereo/16` | 1.612 ms | 1.565 ms | 1.645 ms | -2.9 % | +5.1 % | +2.0 % | 1 of 8 |
+| `fill_buffer_per_sample/1` | 286.31 µs | 283.00 µs | 292.56 µs | -1.2 % | +3.4 % | +2.2 % | 2 of 8 |
+| `fill_buffer_per_sample/8` | 905.47 µs | 881.01 µs | 929.21 µs | -2.7 % | +5.5 % | +2.6 % | 1 of 8 |
+| `fill_buffer_per_sample/16` | 1.601 ms | 1.559 ms | 1.651 ms | -2.6 % | +5.9 % | +3.1 % | 1 of 8 |
+| `interpolation_cubic` | 34 ns | 33 ns | 34 ns | -2.9 % | +3.0 % | +0.0 % | 5 of 8 |
+| `interpolation_stereo` | 57 ns | 56 ns | 56 ns | -1.8 % | +0.0 % | -1.8 % | 3 of 8 |
+| `fill_buffer_stereo_filtered_8v` | 1.346 ms | 1.323 ms | 1.409 ms | -1.7 % | +6.5 % | +4.7 % | 2 of 8 |
+| `fill_buffer_stereo_filtered_hp_8v` | 1.569 ms | 1.457 ms | 1.502 ms | -7.1 % | +3.1 % | -4.3 % | 8 of 8 |
+| `wsola_1sec_2x` | 227.894 ms | 226.438 ms | 227.721 ms | -0.6 % | +0.6 % | -0.1 % | 6 of 8 |
+
+**The dependencies and the filter change make 2.2.1 faster, and the 6.7.18 toolchain takes more than
+that back on most render paths.** On 6.7.9, 2.2.1 is 0 to 7.1 % faster than 2.2.0. Built with
+6.7.18, the same source is 1.1 to 6.5 % slower than that on every `voice_count_scaling` and
+`fill_buffer*` row. Net against 2.2.0 those rows run −0.5 % to +4.7 %, and 2.2.1 is faster in at
+most 2 of 8 rounds. The exceptions are high-pass, 4.3 % faster in all 8 rounds
+because it no longer allocates, and `wsola_1sec_2x`, flat. The stdlib changes between the two
+snapshots on these paths are cold (`vec`'s abort messages) or unused here (`math`'s float parsing
+tables, `lcm`). That points at 6.7.18's code generation or layout, not narrowed further. An earlier
+two-tree run of eight interleaved pairs agrees: low-pass filtered +6.0 %, high-pass −3.9 %.
+Output is byte-identical to 2.2.0.
+
+## Cyrius 2.2.0 (toolchain 6.7.9, x86_64 Linux, 2026-11-07)
 
 naad 2.3.0 · shravan 2.9.0 · hisab 3.4.0. Minimum of eight interleaved runs per tree, same session,
 on a quiet machine (run-to-run spread 2–19 %). These line up with the August figures far better

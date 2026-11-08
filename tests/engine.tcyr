@@ -401,6 +401,16 @@ fn main() {
     assert_eq(eng_leak_bytes(8, FILTER_LOWPASS), 0, "8 voices lowpass: 0 bytes per 20 blocks");
     assert_eq(eng_leak_bytes(64, FILTER_LOWPASS), 0, "64 voices lowpass: 0 bytes per 20 blocks");
 
+    # 2.2.1: the other three modes took naad's allocating one-shot SVF, 32 B per channel per
+    # sample, until naad 2.3.2 shipped filter_svf_process_sample_into.
+    test_group("high-pass, band-pass and notch render allocation-free (2.2.1)");
+    assert_eq(eng_leak_bytes(8, FILTER_HIGHPASS), 0, "8 voices highpass: 0 bytes per 20 blocks");
+    assert_eq(eng_leak_bytes(64, FILTER_HIGHPASS), 0, "64 voices highpass: 0 bytes per 20 blocks");
+    assert_eq(eng_leak_bytes(8, FILTER_BANDPASS), 0, "8 voices bandpass: 0 bytes per 20 blocks");
+    assert_eq(eng_leak_bytes(64, FILTER_BANDPASS), 0, "64 voices bandpass: 0 bytes per 20 blocks");
+    assert_eq(eng_leak_bytes(8, FILTER_NOTCH), 0, "8 voices notch: 0 bytes per 20 blocks");
+    assert_eq(eng_leak_bytes(64, FILTER_NOTCH), 0, "64 voices notch: 0 bytes per 20 blocks");
+
     test_group("engine input validation (2.0.2)");
     # max_voices below 1 used to build 0 nidhi voices against naad's clamped 1 -> exit(1).
     var e0 = n_engine_new(0, f64_from(44100));

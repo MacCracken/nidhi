@@ -26,14 +26,16 @@ consumed by **dhvani** (audio engine) and thereby **shruti** (DAW), replacing
 
 Declared in `cyrius.cyml [deps.*]` (git + tag + `dist/*.cyr` bundle), resolved by `cyrius deps`:
 
-- **naad** (2.3.0) — DSP: SVF/biquad filters, ADSR, LFOs, effects, voice management, interpolation,
+- **naad** (2.3.3) — DSP: SVF/biquad filters, ADSR, LFOs, effects, voice management, interpolation,
   onset/normalize helpers. **Use naad fully** — do not reimplement DSP naad already provides.
-- **shravan** (2.9.0) — audio codecs (WAV decode/encode + streaming), behind the `io` module.
-- **sankoch** (2.8.3) — compression, shravan's dep; the copy the 6.7.9 snapshot bundles. **Must
-  stay above `[deps.shravan]` in `cyrius.cyml`:** both define a global `detect_format`, deps are
-  prepended in manifest order, and every call binds the last definition since cyrius 6.6.20.
-  Reversed, `decode_file` refuses every audio file.
-- **hisab** (3.4.0) — math (pulled transitively by naad; also directly available).
+- **shravan** (2.9.3) — audio codecs (WAV decode/encode + streaming), behind the `io` module. It
+  declares its own bayan (the JSON-only bundle), so nidhi does not list the `bayan` stdlib leaf:
+  listing it links the full bayan instead.
+- **sankoch** (2.8.9) — compression, shravan's dep; the copy the 6.7.18 snapshot bundles. Kept above
+  `[deps.shravan]` in `cyrius.cyml`: both define a global `detect_format`, deps are prepended in
+  manifest order, and every call binds the last definition since cyrius 6.6.20. Since shravan 2.9.2
+  only a direct `detect_format` caller sees the order (`tests/io.tcyr` pins it); decoding does not.
+- **hisab** (3.4.1) — math (pulled transitively by naad; also directly available).
 
 ## Quick Start
 

@@ -5,10 +5,12 @@
 
 ## Version
 
-**2.2.0** — 2026-11-07. cyrius 6.7.9 and the dependency set it pins. No `src/` change and no audio
-change; a minor because a consumer now needs cyrius 6.7.5 or later.
-Follows 2.1.3 (cyrius 6.6.20: WAV loading, time-stretch and the delay effect repaired, render
-output moved by at most −243 dB, and a sample rate naad refuses no longer crashes the engine),
+**2.2.1** — 2026-11-07. cyrius 6.7.18 and every dependency at its newest tag, which is also the
+set that toolchain pins. Render output byte-identical to 2.2.0; high-pass, band-pass and notch
+voices no longer allocate (naad's `filter_svf_process_sample_into`).
+Follows 2.2.0 (cyrius 6.7.9; a consumer needs 6.7.5 or later), 2.1.3 (cyrius 6.6.20: WAV
+loading, time-stretch and the delay effect repaired, render output moved by at most −243 dB, and
+a sample rate naad refuses no longer crashes the engine),
 2.1.2 (cyrius 6.6.3), 2.1.1 (`note_on` allocates nothing, and a reused voice no longer
 inherits the previous note's cutoff), 2.1.0 (zone volume applied, streaming reader),
 2.0.7 (performance), 2.0.6 (latent hazards), 2.0.5 (coverage backfill), 2.0.4 (oracle retired),
@@ -16,7 +18,7 @@ inherits the previous note's cutoff), 2.1.0 (zone volume applied, streaming read
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius` — the single source of truth; CI
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius` — the single source of truth; CI
   reads it rather than hardcoding a version)
 
 ## Source
@@ -34,9 +36,10 @@ inherits the previous note's cutoff), 2.1.0 (zone volume applied, streaming read
 
 ## Tests
 
-- **15 suites / 666 assertions / 0 failures** (`cyrius test`), zero `#must_use` warnings
+- **15 suites / 672 assertions / 0 failures** (`cyrius test`), zero `#must_use` warnings
 - Render path **and `note_on`** asserted allocation-free: `alloc_used()` delta of 0 across 20
-  blocks at 8 and 64 voices, and 0 bytes per note_on/note_off pair (`tests/engine.tcyr`)
+  blocks at 8 and 64 voices in every filter mode, and 0 bytes per note_on/note_off pair
+  (`tests/engine.tcyr`)
 - **Fuzz**: `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` — 2 passed, 0 crashes
 - **Benchmarks**: `tests/nidhi.bcyr`, 16 measurements reproducing the 7 Rust criterion
   benchmarks. See [`BENCHMARKS.md`](../../BENCHMARKS.md) and
@@ -47,14 +50,15 @@ inherits the previous note's cutoff), 2.1.0 (zone volume applied, streaming read
 Direct (declared in `cyrius.cyml`):
 
 - **stdlib** — string, fmt, alloc, vec, str, syscalls, io, args, assert, bench, tagged, result,
-  fnptr, math, ganita, hashmap, bayan, thread
-- **naad** 2.3.0 — DSP (SVF filters, ADSR, LFOs, effects, voice management, interpolation)
-- **sankoch** 2.8.3 — compression, shravan's dep. Declared so it stays above shravan: both define
-  `detect_format`, and the last definition wins every call
-- **shravan** 2.9.0 — audio codecs (WAV decode/encode + streaming), behind `src/io.cyr`
-- **hisab** 3.4.0 — math
+  fnptr, math, ganita, hashmap, thread (no `bayan` since 2.2.1: shravan declares its own)
+- **naad** 2.3.3 — DSP (SVF filters, ADSR, LFOs, effects, voice management, interpolation)
+- **sankoch** 2.8.9 — compression, shravan's dep. Kept above shravan: both define `detect_format`,
+  and the last definition wins every call. Since shravan 2.9.2 only a direct caller sees it
+- **shravan** 2.9.3 — audio codecs (WAV decode/encode + streaming), behind `src/io.cyr`
+- **hisab** 3.4.1 — math
 
-Transitive, resolved into `lib/`: **goonj** 2.1.0, **sakshi** 2.5.8.
+Transitive, resolved into `lib/`: **goonj** 2.3.1, **sakshi** 2.5.10, **bayan** 1.11.1
+(`dist/bayan-json.cyr`, shravan's).
 
 ## Consumers
 
@@ -66,17 +70,18 @@ Transitive, resolved into `lib/`: **goonj** 2.1.0, **sakshi** 2.5.8.
 Everything is pinned in [`roadmap.md`](roadmap.md); this is the short list of what a consumer
 could actually hit.
 
-- **A consumer needs cyrius 6.7.5 or later.** sankoch 2.8.3 uses `loop { }`, so anything older fails
-  at compile time. dhvani pins 6.6.10, so it moves its toolchain to take this release.
-- **A consumer must keep sankoch above shravan** in its own manifest once it is on cyrius 6.6.20 or
-  later, or `n_load_wav` refuses every file. dhvani already does.
+- **A consumer needs cyrius 6.7.5 or later.** sankoch uses `loop { }`, so anything older fails at
+  compile time; re-measured for 2.2.1 on every pin from 6.7.5 to 6.7.18. dhvani pins 6.6.10, so it
+  moves its toolchain to take 2.2.0 or later.
+- **A consumer on shravan older than 2.9.2 must keep sankoch above shravan** in its own manifest
+  once it is on cyrius 6.6.20 or later, or `n_load_wav` refuses every file. dhvani already does.
+  From shravan 2.9.2 the order decides only which `detect_format` a direct caller gets.
 - **Per-zone bus routing does not work.** `output=` is parsed from SFZ, inherited and stored,
   and **read by nothing** — the same shape `volume_db` had before 2.1.0. Pinned to 2.1.1. The
   README says so too rather than listing it as a feature.
-- **High-pass / band-pass / notch voices allocate ~180 MB/s at 64 voices** — and this allocator
-  never frees (see [architecture 001](../architecture/001-the-allocator-never-frees.md)).
-  Low-pass, the default, is allocation-free. Filed in **naad's** roadmap. Not blocking: naad's
-  `filter_biquad_process_sample` is an allocation-free alternative covering all three modes.
+- **A reverse-loop zone is silent unless it has a start offset.** `LOOP_REVERSE` starts at
+  `sample_offset` (0 by default), steps backwards and ends after one frame. **Inherited from the
+  oracle**; SFZ never sets this mode, only the API does. On the roadmap.
 - **WSOLA amplifies output up to ~588x** where `window_sum` falls under the `1e-6` normalise
   threshold. **Inherited from the oracle**, identical threshold and guard — a port-faithful
   defect, not a port defect. Fixing it is a deliberate divergence needing its own ADR.

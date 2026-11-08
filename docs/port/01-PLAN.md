@@ -23,7 +23,7 @@ lives in git history, and `tests/golden.tcyr` carries the values captured from i
   to avoid collisions with naad/shravan/hisab in the flat concatenated bundle namespace.
 - **D4 — Use naad FULLY** (user, 2026-07-02). Prefer naad's implementations over reproducing
   nidhi's own duplicated DSP — this also *cleans up* the port (no_std fallbacks, feature gates,
-  duplicated DSP collapse). `[deps.naad] 2.3.0`, `[deps.shravan] 2.9.0`, `[deps.hisab] 3.4.0`
+  duplicated DSP collapse). `[deps.naad] 2.3.3`, `[deps.shravan] 2.9.3`, `[deps.hisab] 3.4.1`
   (git+tag+`modules=["dist/X.cyr"]`) are declared and **resolved** (`cyrius deps` pulled 6 deps
   incl. transitive goonj/sakshi/sankoch; `cyrius.lock` written). naad DSP available: SVF/biquad
   filters, `envelope_adsr_*`, LFOs, effects, `hermite_interpolate`, `naad_crossfade_equal_power`,

@@ -4,7 +4,7 @@
 > Shipped work lives in [`CHANGELOG.md`](../../CHANGELOG.md); current state is in
 > [`state.md`](state.md); decisions are in [`docs/adr/`](../adr/).
 
-Current: **2.2.0**. Every item below carries a release pin and a reason. Nothing here blocks a
+Current: **2.2.1**. Every item below carries a release pin and a reason. Nothing here blocks a
 release — 2.1.0 is complete and green.
 
 ---
@@ -28,6 +28,16 @@ Ordered by measured harm. All of it is nidhi-side; nothing waits on a dependency
       guard), so fixing it is a deliberate divergence: needs an ADR, a listening check, and new
       golden vectors, since `tests/golden.tcyr` currently pins the *current* behaviour by
       sampling the interior deliberately.
+- [ ] **A reverse-loop zone is silent unless it has a start offset.** `LOOP_REVERSE` starts the
+      voice at `sample_offset`, 0 by default, steps backwards and ends on the first sample:
+      measured, one stereo frame from offset 0 and audio from offset 4000. **Inherited from the
+      oracle** (`advance_position`, `LoopMode::Reverse`, and note-on's `position =
+      sample_offset`), so starting at the end is a deliberate divergence and needs an ADR. SFZ
+      never sets this mode; only the API reaches it.
+- [ ] **`NStreamReader` can stream for real.** shravan 2.9.3 made its WAV and AIFF stream
+      decoders incremental (they used to decode the first complete header and drop every later
+      feed), which is the condition `src/io.cyr` set in 2.1.0 for going back to them. Today the
+      reader decodes the whole file once and serves chunks from a cursor.
 - [ ] **Guard-page fuzz harnesses** (`guard_sf2.fcyr` / `guard_sfz.fcyr`). Harness-only, no `src/`
       change; the shipped parsers already pass. Needs a `cyr_mmap == -1` fallback for the agnos
       target.
@@ -35,21 +45,6 @@ Ordered by measured harm. All of it is nidhi-side; nothing waits on a dependency
       no wrong behaviour, so this is tidying, not repair. Extract only the guard prologue and the
       normalize/truncate epilogue; a single mode-flagged helper would make the OLA path carry
       `prev`/`tolerance` bookkeeping it never uses.
-
-## 2.2.0 — one item, filed upstream
-
-- [ ] **Allocation-free four-output SVF core** — filed in **naad's own roadmap**
-      (`~/Repos/naad/docs/development/roadmap.md`, "Allocation-free hot paths"), not here: an
-      issue in nidhi's docs does nothing for naad. **32 B per channel per sample = 180.6 MB/s at
-      64 voices**, measured; `fill_buffer_stereo_filtered_hp_8v` (1.819 ms) vs `..._8v`
-      (1.528 ms) keeps the 19 % penalty visible.
-
-      **Not blocking.** Two in-naad workarounds exist and neither is a fork:
-      route those modes through `filter_biquad_process_sample` (allocation-free, covers
-      HP/BP/notch, different topology so it needs an ADR), or call
-      `_filter_svf_compute_lowpass` and recover the other three outputs from `k` and the
-      pre/post `ic1eq` via derive accessors (bit-identical, but couples to naad's integrator
-      update). Take one if naad does not land the core.
 
 ## Deferred — with the reason, so it is not re-opened blind
 
@@ -72,7 +67,7 @@ Each of these was examined and consciously not done. The reason is the point.
 
 ## Moving the cyrius pin to 6.6.6 — done; 2.1.3 went to 6.6.20
 
-**Current pin: `cyrius = "6.7.9"`, since 2.2.0.** These notes were written against 6.6.3 and are kept as
+**Current pin: `cyrius = "6.7.18"`, since 2.2.1.** These notes were written against 6.6.3 and are kept as
 written. The `577` respell is done. The seven `cyrius fmt --check` failures are still open,
 unchanged under 6.6.20. "Nothing must change" held for 6.6.6 but not for 6.6.20: the
 [2.1.3 changelog](../../CHANGELOG.md) has what that bump needed.

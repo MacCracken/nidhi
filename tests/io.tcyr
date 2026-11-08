@@ -61,8 +61,9 @@ fn main() {
 
     # sankoch and shravan both define a global detect_format, and since cyrius 6.6.20 every
     # call binds the LAST definition. cyrius.cyml keeps sankoch above shravan so that is
-    # shravan's. Reordered, decode_file refuses every audio file; this names the cause
-    # before the load_wav asserts below fail on it and dereference the error code.
+    # shravan's. Since shravan 2.9.2 its decoders detect through shravan_detect_format, so
+    # a reordered manifest fails only this assertion; before that, decode_file refused
+    # every audio file and this named the cause.
     test_group("detect_format binds shravan's definition");
     assert_eq(detect_format(wavbuf, nbytes), FMT_WAV, "RIFF -> FMT_WAV (sankoch above shravan in cyrius.cyml)");
 

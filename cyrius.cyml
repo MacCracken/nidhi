@@ -5,7 +5,7 @@ description = "nidhi — Sample playback engine (Cyrius port): key/velocity zone
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/nidhi"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -34,35 +34,40 @@ modules = [
 ]
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "bench", "tagged", "result", "fnptr", "math", "ganita", "hashmap", "bayan", "thread"]
+# No `bayan` here since 2.2.1: shravan 2.9.2+ declares its own [deps.bayan] (the JSON-only
+# bundle), and nidhi calls none of it. Listing the stdlib leaf made cyrius link the full
+# bayan in its place, 850 KB more in every binary.
+stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "bench", "tagged", "result", "fnptr", "math", "ganita", "hashmap", "thread"]
 
 # nidhi uses naad fully for DSP (ADSR, filters, LFOs, effects, voice mgmt,
 # interpolation, onset/normalize). naad transitively references hisab + goonj, and
 # shravan references sankoch — declared here so the flat bundle resolves.
-# Every tag below is the matched set for cyrius 6.7.9: naad, hisab and shravan pin
-# exactly that toolchain, and the next tag of each needs 6.7.18. goonj 2.1.0 and
-# sakshi 2.5.8 arrive transitively; sankoch 2.8.3 and sakshi 2.5.8 are the copies the
-# 6.7.9 snapshot bundles. sakshi 2.5.9+ also pins 6.7.9, but shadows the snapshot.
+# Every tag below is both the newest upstream tag and the matched set for cyrius 6.7.18:
+# naad, hisab and shravan pin exactly that toolchain. goonj 2.3.1 and sakshi 2.5.10
+# arrive transitively; sankoch 2.8.9 and sakshi 2.5.10 are the copies the 6.7.18
+# snapshot bundles.
 [deps.naad]
 git = "https://github.com/MacCracken/naad.git"
-tag = "2.3.0"
+tag = "2.3.3"
 modules = ["dist/naad.cyr"]
 
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "3.4.0"
+tag = "3.4.1"
 modules = ["dist/hisab.cyr"]
 
-# ORDER MATTERS: sankoch must stay ABOVE shravan. Both define a global
-# `detect_format`, deps are prepended in this order, and since cyrius 6.6.20 every
-# call binds the LAST definition. With sankoch last, shravan's decode_file gets
-# sankoch's detector and refuses every audio file. sankoch never calls its own copy.
+# Keep sankoch ABOVE shravan. Both define a global `detect_format`, deps are prepended
+# in this order, and since cyrius 6.6.20 every call binds the LAST definition, so this
+# order gives a direct caller shravan's. Decoding no longer depends on it: shravan 2.9.2+
+# detects through its own `shravan_detect_format`, and with the order reversed every
+# WAV/AIFF fixture still decodes the same. Before 2.9.2, reversed, `decode_file` refused
+# every audio file. shravan keeps `detect_format` as a wrapper until its 3.0.
 [deps.sankoch]
 git = "https://github.com/MacCracken/sankoch.git"
-tag = "2.8.3"
+tag = "2.8.9"
 modules = ["dist/sankoch.cyr"]
 
 [deps.shravan]
 git = "https://github.com/MacCracken/shravan.git"
-tag = "2.9.0"
+tag = "2.9.3"
 modules = ["dist/shravan.cyr"]
