@@ -19,7 +19,10 @@ fn n_recorder_new(sample_rate, channels) {
     if (ch < 1) { ch = 1; }
     if (ch > 2) { ch = 2; }
     var r = alloc(sizeof(NSampleRecorder));
-    NSampleRecorder_set_buffer(r, vec_new());
+    if (r == 0) { return 0; }
+    var buf = vec_new();
+    if (buf == 0) { return 0; }
+    NSampleRecorder_set_buffer(r, buf);
     NSampleRecorder_set_sample_rate(r, sample_rate);
     NSampleRecorder_set_channels(r, ch);
     return r;
@@ -32,7 +35,8 @@ fn n_recorder_new(sample_rate, channels) {
 var N_RECORDER_MAX_SAMPLES = 0x10000000;
 
 # write(data) -> 0, or a negative code with NOTHING appended (a write is all or nothing):
-#   NIDHI_ERR_INVALID_PARAMETER -- the take would pass N_RECORDER_MAX_SAMPLES.
+#   NIDHI_ERR_INVALID_PARAMETER -- the take would pass N_RECORDER_MAX_SAMPLES, or `r` / `data`
+#                                  is 0 or an error code.
 #   NIDHI_ERR_PLAYBACK          -- the allocator refused to grow the buffer.
 # Either way the samples already recorded are intact, and n_recorder_finish still works.
 #
@@ -43,7 +47,11 @@ var N_RECORDER_MAX_SAMPLES = 0x10000000;
 # The buffer now grows here, once per write, by the same doubling vec_push used (so memory
 # use is unchanged), and a refusal is a return code. Relies on the {data, len, cap} header
 # lib/vec.cyr documents, as naad_vec_zeros does; tests/capture.tcyr pins it.
+# #must_use since 2.3.0: an ignored refusal silently drops that block of audio from the take.
+#must_use
 fn n_recorder_write(r, data) {
+    if (r <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    if (data <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
     var buffer = NSampleRecorder_buffer(r);
     var n = vec_len(data);
     var len = vec_len(buffer);
@@ -103,20 +111,27 @@ fn n_recorder_clear(r) {
 # worse: clear() then a LONGER write() left the old Sample silently playing the NEW
 # take's audio. It also stopped n_normalize_peak / n_trim_silence from rewriting the
 # recorder's live buffer behind its back.
+#
+# -> the Sample, or 0 when an allocation is refused. In that case the recorder keeps the take:
+# the fresh buffer and the Sample are both built BEFORE the hand-off, so a refusal loses nothing.
 #must_use
 fn n_recorder_finish(r) {
+    var fresh = vec_new();
+    if (fresh == 0) { return 0; }
     var buffer = NSampleRecorder_buffer(r);
-    NSampleRecorder_set_buffer(r, vec_new());
     var sr = NSampleRecorder_sample_rate(r);
-    if (NSampleRecorder_channels(r) == 2) {
-        return n_sample_from_stereo(buffer, sr);
-    }
-    return n_sample_from_mono(buffer, sr);
+    var s = 0;
+    if (NSampleRecorder_channels(r) == 2) { s = n_sample_from_stereo(buffer, sr); }
+    else { s = n_sample_from_mono(buffer, sr); }
+    if (s == 0) { return 0; }
+    NSampleRecorder_set_buffer(r, fresh);
+    return s;
 }
 
 #must_use
 fn n_recorder_finish_processed(r, silence_threshold) {
     var sample = n_recorder_finish(r);
+    if (sample == 0) { return 0; }
     n_trim_silence(sample, silence_threshold);
     n_normalize_peak(sample);
     return sample;
@@ -124,6 +139,7 @@ fn n_recorder_finish_processed(r, silence_threshold) {
 
 # --- trim_silence: remove leading + trailing silence (strict > threshold) ---
 fn n_trim_silence(sample, threshold) {
+    if (sample <= 0) { return 0; }
     var thr = f64_max(threshold, 0);
     var ch = NSample_channels(sample);
     var frames = NSample_frames(sample);
@@ -195,6 +211,7 @@ fn n_trim_silence(sample, threshold) {
 #       nidhi with no foreign decoder involved, and it reaches the SVF, which latches.
 # The 1e-10 epsilon matches n_normalize_rms below, which has always had it.
 fn n_normalize_peak(sample) {
+    if (sample <= 0) { return 0; }
     var data = NSample_data(sample);
     var n = vec_len(data);
     if (n == 0) { return 0; }
@@ -219,6 +236,7 @@ fn n_normalize_peak(sample) {
 
 # --- normalize_rms: scale to target RMS (naad_rms + manual gain) ---
 fn n_normalize_rms(sample, target_rms) {
+    if (sample <= 0) { return 0; }
     var data = NSample_data(sample);
     if (vec_len(data) == 0) { return 0; }
     var r = naad_rms(data);
@@ -295,6 +313,7 @@ fn n_loop_top_insert(top_s, top_e, top_sc, start, end, score) {
 #must_use
 fn n_detect_loop_points(sample, min_loop_frames) {
     var out = vec_new();
+    if (sample <= 0) { return out; }
     var frames = NSample_frames(sample);
     if (min_loop_frames > frames / 2) { return out; }
     var data = NSample_data(sample);

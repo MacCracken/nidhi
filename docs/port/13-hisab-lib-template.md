@@ -189,6 +189,11 @@ Two idioms coexist and are both fine:
 - `#inline` is applied the same way (line above `fn`) for hot-path functions. (hisab's math is
   mostly `#must_use`; nidhi's per-sample render loop is where `#inline` matters — put it on the
   hot render/interpolation functions.)
+  ⚠ Corrected in 2.3.0: the compiler honours `#inline` only on a function with at most 2
+  parameters, a body under 32 tokens, and no control flow or `var`. Otherwise it warns and
+  ignores it. 2.2.2 removed 25 such ignored attributes from nidhi with byte-identical binaries,
+  and hand-inlined the cubic Hermite where it mattered. Read the build's `#inline ignored`
+  warnings rather than assume.
 - These are **line-above attributes**, one per line, stacking like Rust:
   ```
   #inline
@@ -198,14 +203,18 @@ Two idioms coexist and are both fine:
 
 ### 5c. Error codes (from `error.cyr`) — replaces the Rust `NidhiError` enum
 
-```
-var ERR_NONE              = 0;
-var ERR_INVALID_TRANSFORM = (0 - 1);      # note: negative literals written as (0 - N)
-var ERR_SINGULAR_MATRIX   = (0 - 2);
-...
-var EPSILON_F64 = 0x3D719799812DEA11;      # 1e-12 as f64 bits — a shared tolerance constant
+The pattern to copy, as nidhi's `src/error.cyr` has it. hisab's own `error.cyr` uses bare `ERR_*`
+names, which is exactly what a sibling library must not copy (see the warning below), so this
+snippet shows the prefixed form instead (corrected in 2.3.0):
 
-fn hisab_is_err(code) {
+```
+var NIDHI_ERR_NONE              = 0;
+var NIDHI_ERR_SAMPLE_NOT_FOUND  = (0 - 1);   # note: negative literals written as (0 - N)
+var NIDHI_ERR_INVALID_ZONE      = (0 - 2);
+var NIDHI_ERR_INVALID_PARAMETER = (0 - 3);
+...
+
+fn n_is_err(code) {
     if (code < 0) { return 1; }
     return 0;
 }
@@ -213,8 +222,8 @@ fn hisab_is_err(code) {
 
 Conventions:
 - `error.cyr` is module #1 in `[lib]` and included first in every test/bench/fuzz file.
-- Functions return `0` (`ERR_NONE`) on success, a negative `ERR_*` on failure, and write
-  real results through **out-param pointers** (`store64(out, value); return ERR_NONE;`).
+- Functions return `0` (`<LIB>_ERR_NONE`) on success, a negative `<LIB>_ERR_*` on failure, and write
+  real results through **out-param pointers** (`store64(out, value); return <LIB>_ERR_NONE;`).
   See `num_newton(f, df, x0, tol, max_iter, out)`.
 - Or, for constructor-style functions, return a pointer (nonzero) on success and `0` on
   failure (see `cmat_new` returning `0` on bad dims).
@@ -224,8 +233,8 @@ Conventions:
   `NIDHI_ERR_INVALID_ZONE = (0 - 2)`, `NIDHI_ERR_INVALID_PARAMETER = (0 - 3)`,
   `NIDHI_ERR_PLAYBACK = (0 - 4)`, `NIDHI_ERR_IMPORT = (0 - 5)`, plus `NIDHI_ERR_NONE = 0`.
   The string payloads in the Rust enum are dropped (no error strings; the code is the error).
-  ⚠ The bare `ERR_*` form shown in the snippet above is the *hisab* template's own naming; do not
-  copy it into a sibling library. In the flat concatenated bundle a bare `ERR_NONE` collides with
+  ⚠ The bare `ERR_*` form is the *hisab* template's own naming (in hisab's source, not shown
+  above); do not copy it into a sibling library. In the flat concatenated bundle a bare `ERR_NONE` collides with
   `lib/goonj.cyr` and shravan's `enum ShravanErr`, and Cyrius does **not** warn on a duplicate
   `var`. Prefix every error constant with the library's own name.
 

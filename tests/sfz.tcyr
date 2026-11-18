@@ -56,6 +56,29 @@ fn region_buf(hdr, nreg, distinct) {
     return b;
 }
 
+# 1 when r is a usable pointer or one of the two codes an SFZ import may answer.
+fn sfz_result_ok(r) {
+    if (r > 0) { return 1; }
+    if (r == NIDHI_ERR_IMPORT) { return 1; }
+    if (r == NIDHI_ERR_INVALID_PARAMETER) { return 1; }
+    return 0;
+}
+
+# Best-of-3 wall time of to_instrument(f), in microseconds.
+fn inst_us(f, sr) {
+    var best = 0 - 1;
+    var k = 0;
+    while (k < 3) {
+        var t0 = now_ns();
+        var r = n_sfz_to_instrument(f, str_from("t"), sr);
+        var dt = now_ns() - t0;
+        if (r <= 0) { return 0 - 1; }
+        if (best < 0 || dt < best) { best = dt; }
+        k = k + 1;
+    }
+    return best / 1000;
+}
+
 # "<control> default_path=" followed by n 'a' bytes.
 fn dp_buf(n) {
     var h = "<control> default_path=";
@@ -485,6 +508,167 @@ fn main() {
     assert_eq(NZone_seq_length(rrd), 1, "no seq opcodes: length 1");
     assert_eq(NZone_seq_position(rrd), 1, "no seq opcodes: position 1");
     assert_eq(NZone_group(zone0(n_sfz_parse("<region> sample=a.wav group=4\n"), sr)), 4, "group= still sets the RR group, as in the oracle");
+    # --- 2.3.0: allocation refusals (the constructors now answer 0 instead of writing through it) ---
+    # ALLOC_MAX caps one allocation's size, so a cap just under a constructor's size refuses that
+    # constructor and nothing smaller. n_zone_new is 272 bytes and every smaller allocation in
+    # to_zones still succeeds at 271. The 2.2.2 parser cloned each region into a 312-byte heap
+    # record first, and wrote the clone through 0 -- a segfault, not a code.
+    test_group("refused allocations return a code, never write through 0 (2.3.0)");
+    var rf = n_sfz_parse("<region> sample=a.wav key=60 ampeg_attack=0.01 fileg_depth=1200\n<region> sample=b.wav\n");
+    var cap_saved = ALLOC_MAX;
+    ALLOC_MAX = 271;
+    var rfz = n_sfz_to_zones(rf, sr);
+    ALLOC_MAX = cap_saved;
+    assert_eq(rfz, NIDHI_ERR_IMPORT, "n_zone_new refused (cap 271) -> to_zones answers NIDHI_ERR_IMPORT");
+    # n_instrument_new needs 128-byte vec buffers; to_instrument builds it before to_zones.
+    ALLOC_MAX = 127;
+    var ri = n_sfz_to_instrument(rf, str_from("r"), sr);
+    ALLOC_MAX = cap_saved;
+    assert_eq(ri, NIDHI_ERR_IMPORT, "n_instrument_new refused (cap 127) -> to_instrument answers NIDHI_ERR_IMPORT");
+    ALLOC_MAX = 0;
+    var rp = n_sfz_parse("<region> sample=a.wav\n");
+    ALLOC_MAX = cap_saved;
+    assert_eq(rp, NIDHI_ERR_IMPORT, "every allocation refused -> parse answers NIDHI_ERR_IMPORT");
+    # A sweep over every allocation size the import uses: whichever one is refused first, the
+    # answer is a pointer or a code. Reaching the end of the loop is half the assertion.
+    var rich = "<control> default_path=s/\n#include \"x.sfz\"\n<global> volume=-3 ampeg_release=0.1 sample=g.wav\n<group> lokey=c3 hikey=g5 loop_mode=loop_continuous group=2 seq_length=2\n<region> sample=a.wav key=60 fil_type=hpf_2p fileg_depth=1200 volume_oncc1=6 seq_position=2\n<region> lokey=48 hikey=59\n";
+    var caps = vec_new();
+    vec_push(caps, 0); vec_push(caps, 8); vec_push(caps, 16); vec_push(caps, 24); vec_push(caps, 31);
+    vec_push(caps, 32); vec_push(caps, 40); vec_push(caps, 127); vec_push(caps, 128); vec_push(caps, 151);
+    vec_push(caps, 255); vec_push(caps, 263); vec_push(caps, 271); vec_push(caps, 272); vec_push(caps, 311);
+    vec_push(caps, 312); vec_push(caps, 391); vec_push(caps, 392); vec_push(caps, 4096);
+    var bad = 0;
+    var ci = 0;
+    while (ci < vec_len(caps)) {
+        var cap = vec_get(caps, ci);
+        ALLOC_MAX = cap;
+        var sf = n_sfz_parse(rich);
+        var sz = 0;
+        var si = 0;
+        if (sf > 0) {
+            sz = n_sfz_to_zones(sf, sr);
+            si = n_sfz_to_instrument(sf, str_from("s"), sr);
+        }
+        ALLOC_MAX = cap_saved;
+        if (sfz_result_ok(sf) == 0) { bad = bad + 1; }
+        if (sf > 0) {
+            if (sfz_result_ok(sz) == 0) { bad = bad + 1; }
+            if (sfz_result_ok(si) == 0) { bad = bad + 1; }
+        }
+        ci = ci + 1;
+    }
+    assert_eq(bad, 0, "19 allocation caps: every result is a pointer or a code");
+    var after = n_sfz_to_instrument(n_sfz_parse(rich), str_from("a"), sr);
+    assert(after > 0, "with the cap restored the same file imports");
+    assert_eq(n_instrument_zone_count(NSfzInstResult_instrument(after)), 2, "both regions");
+    assert_eq(n_sfz_to_zones(0, sr), NIDHI_ERR_INVALID_PARAMETER, "to_zones(0) refused");
+    assert_eq(n_sfz_to_zones(NIDHI_ERR_IMPORT, sr), NIDHI_ERR_INVALID_PARAMETER, "to_zones(code) refused");
+    assert_eq(n_sfz_to_instrument(NIDHI_ERR_IMPORT, str_from("x"), sr), NIDHI_ERR_INVALID_PARAMETER, "to_instrument(code) refused");
+
+    # 20,000 regions sharing one 4 KB joined name: to_instrument re-hashed it per region, 260 ms
+    # against 13 ms for the same regions without the path. Timed as a ratio to that baseline, so
+    # the machine's speed cancels: ~19x before, ~1x with the pointer fast path.
+    test_group("to_instrument skips the content hash for a shared name (2.3.0)");
+    var plain = n_sfz_parse(region_buf("", 20000, 0));
+    var dpshare = n_sfz_parse(region_buf(dp_buf(4096), 20000, 0));
+    var us_plain = inst_us(plain, sr);
+    var us_shared = inst_us(dpshare, sr);
+    assert(us_plain > 0, "plain import timed");
+    assert(us_shared < us_plain * 4, "a shared 4 KB name costs < 4x a short one (was ~19x)");
+    var spi = n_sfz_to_instrument(dpshare, str_from("sp"), sr);
+    assert_eq(vec_len(NSfzInstResult_sample_files(spi)), 1, "one sample file");
+    assert_eq(NZone_sample_id(vec_get(NInstrument_zones(NSfzInstResult_instrument(spi)), 19999)), 0, "every zone id 0");
+    # Ids and order with long and short names mixed, pointers shared (joined, inherited) and not.
+    var mix = n_sfz_to_instrument(n_sfz_parse("<control> default_path=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/\n<global> sample=g.wav\n<region> sample=b.wav\n<region>\n<region> sample=a.wav\n<region> sample=b.wav\n<region> sample=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/a.wav\n<region>\n<region> sample=c.wav\n"), str_from("mix"), sr);
+    var mxz = NInstrument_zones(NSfzInstResult_instrument(mix));
+    var mf = NSfzInstResult_sample_files(mix);
+    assert_eq(vec_len(mf), 4, "b, g, a, c");
+    assert_eq(NZone_sample_id(vec_get(mxz, 0)), 0, "b -> 0");
+    assert_eq(NZone_sample_id(vec_get(mxz, 1)), 1, "inherited g -> 1");
+    assert_eq(NZone_sample_id(vec_get(mxz, 2)), 2, "a -> 2");
+    assert_eq(NZone_sample_id(vec_get(mxz, 3)), 0, "b again -> 0");
+    assert_eq(NZone_sample_id(vec_get(mxz, 4)), 2, "already-prefixed a: same content, another Str -> 2");
+    assert_eq(NZone_sample_id(vec_get(mxz, 5)), 1, "inherited g again -> 1");
+    assert_eq(NZone_sample_id(vec_get(mxz, 6)), 3, "c -> 3");
+
+    # --- 2.3.0: (ptr, len) entry point. The oracle's &str carries a NUL as an ordinary char ---
+    # char::is_whitespace('\0') is false, so a NUL neither splits a token nor trims from a line.
+    # The cstr entry stopped at the first one and dropped everything after it.
+    test_group("n_sfz_parse_n: a NUL is an ordinary byte (2.3.0)");
+    var nb = alloc(64);
+    var s1 = "<region> sample=a.wav // xNy\n<region> sample=b.wav\n";
+    var nl = strlen(s1);
+    memcpy(nb, s1, nl + 1);
+    store8(nb + 26, 0);
+    var nf = n_sfz_parse_n(nb, nl);
+    assert_eq(vec_len(NSfzFile_regions(nf)), 2, "the region after a NUL (here inside a comment token) is parsed");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse(nb))), 1, "n_sfz_parse(cstr) still ends at the NUL");
+    # A NUL is not White_Space, so "\0<region>" is not a header: as in the oracle, the next
+    # line's opcode lands on the region still open.
+    var nb2 = alloc(64);
+    var s3 = "<region> sample=a.wav\nN<region> sample=b.wav\n";
+    var nl2 = strlen(s3);
+    memcpy(nb2, s3, nl2 + 1);
+    store8(nb2 + 22, 0);
+    var nf2 = n_sfz_parse_n(nb2, nl2);
+    assert_eq(vec_len(NSfzFile_regions(nf2)), 1, "a line starting with NUL opens no region");
+    assert_eq(str_eq_cstr(NSfzRegion_sample(vec_get(NSfzFile_regions(nf2), 0)), "b.wav"), 1, "and its sample= reaches the open region");
+    var tb = alloc(32);
+    memcpy(tb, "<region> sample=aXb.wav", 23);
+    store8(tb + 17, 0);
+    var tf = n_sfz_parse_n(tb, 23);
+    assert_eq(vec_len(NSfzFile_regions(tf)), 1, "NUL inside a token: one region");
+    var ts = NSfzRegion_sample(vec_get(NSfzFile_regions(tf), 0));
+    assert_eq(str_len(ts), 7, "the NUL is kept inside the sample name");
+    assert_eq(load8(str_data(ts) + 1), 0, "byte 1 of the name is the NUL");
+    memcpy(tb, "<region>Xsample=a.wav", 21);
+    store8(tb + 8, 0);
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse_n(tb, 21))), 0, "a NUL does not split <region> from the opcode");
+    memcpy(tb, "<region>X", 9);
+    store8(tb + 8, 0);
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse_n(tb, 9))), 0, "a trailing NUL is not trimmed");
+    store8(tb, 0);
+    memcpy(tb + 1, "<region>", 8);
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse_n(tb, 9))), 0, "a leading NUL is not trimmed");
+    var cut = n_sfz_parse_n("<region> sample=a.wav key=60", 17);
+    assert_eq(str_eq_cstr(NSfzRegion_sample(vec_get(NSfzFile_regions(cut), 0)), "a"), 1, "reads exactly len bytes");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse_n(0, 0))), 0, "(0, 0) is the empty file");
+    assert_eq(n_sfz_parse_n(0, 5), NIDHI_ERR_INVALID_PARAMETER, "(0, 5) refused");
+    assert_eq(n_sfz_parse_n("x", 0 - 1), NIDHI_ERR_INVALID_PARAMETER, "negative len refused");
+    assert_eq(n_sfz_parse(0), NIDHI_ERR_INVALID_PARAMETER, "parse(0) refused, not strlen(0)");
+
+    # to_zones builds envelopes with n_sfz_adsr_new, a checked copy of from_seconds' arithmetic.
+    test_group("n_sfz_adsr_new matches n_adsr_config_from_seconds bit for bit (2.3.0)");
+    var vals = vec_new();
+    vec_push(vals, 0); vec_push(vals, f64_div(F64_ONE, f64_from(100))); vec_push(vals, f64_from(3));
+    vec_push(vals, f64_neg(F64_ONE)); vec_push(vals, f64_from(100000000)); vec_push(vals, 0x7FF0000000000000);
+    vec_push(vals, 0xFFF0000000000000); vec_push(vals, 0x7FF8000000000000); vec_push(vals, f64_from(150));
+    var rates = vec_new();
+    vec_push(rates, f64_from(44100)); vec_push(rates, f64_from(96000)); vec_push(rates, f64_from(1));
+    var amis = 0;
+    var ai = 0;
+    while (ai < vec_len(vals)) {
+        var bi = 0;
+        while (bi < vec_len(vals)) {
+            var ri2 = 0;
+            while (ri2 < vec_len(rates)) {
+                var va = vec_get(vals, ai);
+                var vb = vec_get(vals, bi);
+                var vr = vec_get(rates, ri2);
+                var x = n_sfz_adsr_new(va, vb, vb, va, vr);
+                var y = n_adsr_config_from_seconds(va, vb, f64_div(vb, f64_from(100)), va, vr);
+                if (NAdsrConfig_attack_samples(x) != NAdsrConfig_attack_samples(y)) { amis = amis + 1; }
+                if (NAdsrConfig_decay_samples(x) != NAdsrConfig_decay_samples(y)) { amis = amis + 1; }
+                if (NAdsrConfig_sustain_level(x) != NAdsrConfig_sustain_level(y)) { amis = amis + 1; }
+                if (NAdsrConfig_release_samples(x) != NAdsrConfig_release_samples(y)) { amis = amis + 1; }
+                ri2 = ri2 + 1;
+            }
+            bi = bi + 1;
+        }
+        ai = ai + 1;
+    }
+    assert_eq(amis, 0, "243 inputs, NaN and infinities included: identical configs");
+
     return assert_summary();
 }
 

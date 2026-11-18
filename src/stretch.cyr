@@ -90,18 +90,24 @@ fn n_cross_correlate(a, b, max_lag) {
     return best_lag;
 }
 
-# hann_window(size) -> vec of f64: 0.5*(1 - cos(2*PI*i/(size-1))).
+# hann_window(size) -> vec of f64: 0.5*(1 - cos(2*PI*i/(size-1))). An empty vec for size <= 0,
+# and 0 when the window cannot be allocated.
+#
+# Sized once (n_vec_zeros, below) and filled in place. It used to grow by vec_push, which leaves
+# the outgrown buffers behind on the bump allocator: about 8 KB of dead heap per stretch at frame
+# size 1024, and an exit on a refused grow. The values are computed exactly as before.
 #must_use
 fn n_hann_window(size) {
-    var w = vec_new();
-    if (size == 0) { return w; }
+    if (size <= 0) { return vec_new(); }
+    var w = n_vec_zeros(size);
+    if (w == 0) { return 0; }
     var denom = size - 1;
     if (denom < 1) { denom = 1; }
     var denom_f = f64_from(denom);
     var i = 0;
     while (i < size) {
         var ang = f64_div(f64_mul(F64_TAU, f64_from(i)), denom_f);
-        vec_push(w, f64_mul(F64_HALF, f64_sub(F64_ONE, f64_cos(ang))));
+        vec_set(w, i, f64_mul(F64_HALF, f64_sub(F64_ONE, f64_cos(ang))));
         i = i + 1;
     }
     return w;
@@ -314,6 +320,7 @@ fn n_stretch(s, ratio) {
     var ana_hop = f64_div(f64_from(syn_hop), ratio);
     var tolerance = frame_size / 4;
     var window = n_hann_window(frame_size);
+    if (window == 0) { return vec_new(); }
     var out_len = n_stretch_out_len(s, ratio);
     var output = n_vec_zeros(out_len);
     if (output == 0) { return vec_new(); }
@@ -406,6 +413,7 @@ fn n_stretch_ola(s, ratio) {
     var syn_hop = n_stretch_syn_hop(s);
     var ana_hop = f64_div(f64_from(syn_hop), ratio);
     var window = n_hann_window(frame_size);
+    if (window == 0) { return vec_new(); }
     var out_len = n_stretch_out_len(s, ratio);
     var output = n_vec_zeros(out_len);
     if (output == 0) { return vec_new(); }

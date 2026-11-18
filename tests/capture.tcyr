@@ -61,11 +61,11 @@ fn main() {
     vec_push(d1, f64_div(f64_from(1), f64_from(10)));
     vec_push(d1, f64_div(f64_from(2), f64_from(10)));
     vec_push(d1, f64_div(f64_from(3), f64_from(10)));
-    n_recorder_write(r, d1);
+    assert_eq(n_recorder_write(r, d1), 0, "write d1 accepted");
     var d2 = vec_new();
     vec_push(d2, f64_div(f64_from(4), f64_from(10)));
     vec_push(d2, f64_div(f64_from(5), f64_from(10)));
-    n_recorder_write(r, d2);
+    assert_eq(n_recorder_write(r, d2), 0, "write d2 accepted");
     assert_eq(n_recorder_frames(r), 5, "mono recorder frames == 5");
     var sm = n_recorder_finish(r);
     assert_eq(NSample_frames(sm), 5, "finished mono frames == 5");
@@ -75,7 +75,7 @@ fn main() {
     var rs = n_recorder_new(44100, 2);
     var ds = vec_new();
     push_n(ds, half, 4);
-    n_recorder_write(rs, ds);
+    assert_eq(n_recorder_write(rs, ds), 0, "write ds accepted");
     assert_eq(n_recorder_frames(rs), 2, "stereo recorder frames == 2");
     var sst = n_recorder_finish(rs);
     assert_eq(NSample_frames(sst), 2, "finished stereo frames == 2");
@@ -152,13 +152,13 @@ fn main() {
     var rp = n_recorder_new(44100, 1);
     var pre = vec_new();
     push_n(pre, f64_from(0), 100);
-    n_recorder_write(rp, pre);
+    assert_eq(n_recorder_write(rp, pre), 0, "write pre accepted");
     var body = vec_new();
     push_n(body, f64_div(f64_from(1), f64_from(4)), 200);
-    n_recorder_write(rp, body);
+    assert_eq(n_recorder_write(rp, body), 0, "write body accepted");
     var post = vec_new();
     push_n(post, f64_from(0), 100);
-    n_recorder_write(rp, post);
+    assert_eq(n_recorder_write(rp, post), 0, "write post accepted");
     var fp = n_recorder_finish_processed(rp, f64_div(F64_ONE, f64_from(100)));
     assert_eq(NSample_frames(fp), 200, "finish_processed trims to 200 frames");
     assert_eq(approx(naad_peak(NSample_data(fp)), F64_ONE, tol), 1, "finish_processed peak ~ 1.0");
@@ -171,7 +171,7 @@ fn main() {
     var zr = n_recorder_new(44100, 1);
     var zd = vec_new();
     push_n(zd, F64_HALF, 8);
-    n_recorder_write(zr, zd);
+    assert_eq(n_recorder_write(zr, zd), 0, "write zd accepted");
     assert_eq(n_recorder_frames(zr), 8, "mono frames before the bypass");
     NSampleRecorder_set_channels(zr, 0);
     assert_eq(n_recorder_frames(zr), 8, "channels=0 treated as mono, no divide-by-zero");

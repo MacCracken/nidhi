@@ -203,6 +203,93 @@ fn build_walk_sf2(npresets, nbags, ngens) {
     return b;
 }
 
+# One preset -> one instrument with nzones zones; zone z plays sample z % nsamples (each of
+# `frames` frames). With full == 1 a zone also has key range (z % 128)..127 and odd zones loop;
+# with full == 0 its only generator is sampleID, which keeps every record table small (2.2.2's
+# copied tables were refused by a low ALLOC_MAX before any zone was built). Every sample is
+# real, so every zone is built: the shape for the refused-allocation and shdr-count tests.
+fn build_zones_sf2(nzones, nsamples, frames, full) {
+    var b = bb_new(1024 + nzones * 16 + nsamples * (46 + frames * 2));
+    var riff = bb_chunk_begin(b, "RIFF");
+    bb_str4(b, "sfbk");
+    var sdta = bb_chunk_begin(b, "LIST");
+    bb_str4(b, "sdta");
+    var smpl = bb_chunk_begin(b, "smpl");
+    var i = 0;
+    while (i < nsamples * frames) { bb_i16(b, (i * 37) & 0x7FFF); i = i + 1; }
+    bb_chunk_end(b, smpl);
+    bb_chunk_end(b, sdta);
+    var pdta = bb_chunk_begin(b, "LIST");
+    bb_str4(b, "pdta");
+    var phdr = bb_chunk_begin(b, "phdr");
+    bb_fixed_str(b, "Zones", 20); bb_u16(b, 3); bb_u16(b, 1); bb_u16(b, 0);
+    bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_fixed_str(b, "EOP", 20); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 1);
+    bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_chunk_end(b, phdr);
+    var pbag = bb_chunk_begin(b, "pbag");
+    bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 1); bb_u16(b, 0);
+    bb_chunk_end(b, pbag);
+    var pgen = bb_chunk_begin(b, "pgen");
+    bb_u16(b, 41); bb_i16(b, 0); bb_u16(b, 0); bb_i16(b, 0);
+    bb_chunk_end(b, pgen);
+    var inst = bb_chunk_begin(b, "inst");
+    bb_fixed_str(b, "I", 20); bb_u16(b, 0); bb_fixed_str(b, "EOI", 20); bb_u16(b, nzones);
+    bb_chunk_end(b, inst);
+    var ibag = bb_chunk_begin(b, "ibag");
+    i = 0;
+    var per = 1;
+    if (full == 1) { per = 3; }
+    while (i <= nzones) { bb_u16(b, i * per); bb_u16(b, 0); i = i + 1; }
+    bb_chunk_end(b, ibag);
+    var igen = bb_chunk_begin(b, "igen");
+    i = 0;
+    while (i < nzones) {
+        if (full == 1) {
+            bb_u16(b, 43); bb_i16(b, (i % 128) | (127 << 8));
+            bb_u16(b, 54); bb_i16(b, i & 1);
+        }
+        bb_u16(b, 53); bb_i16(b, i % nsamples);
+        i = i + 1;
+    }
+    bb_u16(b, 0); bb_i16(b, 0);
+    bb_chunk_end(b, igen);
+    var shdr = bb_chunk_begin(b, "shdr");
+    i = 0;
+    while (i < nsamples) {
+        bb_fixed_str(b, "S", 20);
+        bb_u32(b, i * frames); bb_u32(b, i * frames + frames);
+        bb_u32(b, i * frames + 1); bb_u32(b, i * frames + frames - 1);
+        bb_u32(b, 44100); bb_u8(b, 60); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 1);
+        i = i + 1;
+    }
+    bb_fixed_str(b, "EOS", 20);
+    bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_u8(b, 0); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 0);
+    bb_chunk_end(b, shdr);
+    bb_chunk_end(b, pdta);
+    bb_chunk_end(b, riff);
+    return b;
+}
+
+# sf2_parse with every allocation larger than `limit` bytes refused (ALLOC_MAX is the stdlib's
+# own per-request ceiling, on every target), restored before returning.
+fn parse_with_alloc_max(b, limit) {
+    var saved = ALLOC_MAX;
+    ALLOC_MAX = limit;
+    var r = sf2_parse(bb_buf(b), bb_len(b));
+    ALLOC_MAX = saved;
+    return r;
+}
+
+fn zone_total(res) {
+    var n = 0;
+    var insts = Sf2Result_instruments(res);
+    var i = 0;
+    while (i < vec_len(insts)) { n = n + n_instrument_zone_count(vec_get(insts, i)); i = i + 1; }
+    return n;
+}
+
 fn main() {
     alloc_init();
     var tol = f64_div(F64_ONE, f64_from(1000));
@@ -309,17 +396,22 @@ fn main() {
     var bgo = build_walk_sf2(1, 4096, 2048);
     assert(sf2_parse(bb_buf(bgo), bb_len(bgo)) > 0, "a 4.2M-visit walk is inside the budget");
 
-    # --- 2.2.2: a record count no vec can hold is an error, not an exit ---
-    # vec_push past VEC_CAP_MAX is _vec_abort -> exit(1), with no error return; a pbag chunk
-    # that large is ~1 GiB, so the test lowers the cap instead of building one. The parser must
-    # refuse the chunk and return, never push it.
-    test_group("record count past VEC_CAP_MAX -> NIDHI_ERR_IMPORT (2.2.2)");
+    # --- 2.2.2 / 2.3.0: no record count can reach vec_push's capacity abort ---
+    # vec_push past VEC_CAP_MAX is _vec_abort -> exit(1), with no error return. 2.2.2 refused a
+    # record chunk too big for a vec; 2.3.0 reads records in place, so only the shdr memo is a
+    # vec at all. A chunk that large is ~1 GiB, so the test lowers the cap instead.
+    test_group("record counts past VEC_CAP_MAX (2.2.2, 2.3.0)");
     var bc = build_walk_sf2(1, 4097, 1);
     var cap_saved = VEC_CAP_MAX;
     VEC_CAP_MAX = 4096;
     var rc_cap = sf2_parse(bb_buf(bc), bb_len(bc));
     VEC_CAP_MAX = cap_saved;
-    assert_eq(rc_cap, NIDHI_ERR_IMPORT, "4097 pbags with VEC_CAP_MAX 4096 -> error return");
+    assert(rc_cap > 0, "4097 pbags under VEC_CAP_MAX 4096 parse: records are not vec elements (2.3.0)");
+    var bcs = build_zones_sf2(1, 4097, 1, 1);
+    VEC_CAP_MAX = 4096;
+    var rc_shdr = sf2_parse(bb_buf(bcs), bb_len(bcs));
+    VEC_CAP_MAX = cap_saved;
+    assert_eq(rc_shdr, NIDHI_ERR_IMPORT, "4098 shdrs under VEC_CAP_MAX 4096: the memo is refused, not aborted");
 
     # --- 2.2.2: names are owned, not borrowed from the caller's buffer ---
     # str_new borrows. Overwriting (or reusing) the file buffer after the parse renamed every
@@ -354,6 +446,63 @@ fn main() {
     assert_eq(bad, 0, "every 16-bit value bit-identical to the oracle's x / 32768");
     # 65536 x 8 bytes plus the 24-byte header; vec_push from vec_new() spent ~2x that.
     assert(pheap <= 65536 * 8 + 64, "one exact-size buffer, no doubling chain");
+
+    # --- 2.3.0: records are read in place; nothing is allocated per record ---
+    # Each record used to become a heap struct plus a vec slot (and phdr/inst/shdr a borrowed
+    # name Str), and every preset an instrument, kept or not: 6x the file in never-freed heap,
+    # 251.7 MB for a 42 MB SF2. 4096 zone-less presets over 4096 generators are 155 KB of file.
+    test_group("record floods cost no per-record heap (2.3.0)");
+    var bfl = build_walk_sf2(4096, 2, 4096);
+    var fheap0 = alloc_used();
+    var rf2 = sf2_parse(bb_buf(bfl), bb_len(bfl));
+    var fheap = alloc_used() - fheap0;
+    assert(rf2 > 0, "flood parses");
+    assert_eq(vec_len(Sf2Result_presets(rf2)), 0, "no preset has a zone");
+    assert(fheap < 16384, "4096 presets + 4096 generators cost < 16 KB of heap (was ~2.4 MB)");
+
+    # --- 2.3.0: a refused allocation fails the parse; it never drops a zone or writes through 0 ---
+    # The constructors answer 0 (and n_instrument_add_zone a negative code) when alloc refuses.
+    # n_zone_new's 0 flowed through the builders into n_instrument_add_zone, whose error was
+    # discarded, so a preset silently lost zones, or vanished when it lost them all; a refused
+    # instrument was read through by n_instrument_zone_count. ALLOC_MAX picks which requests
+    # fail: just under sizeof(NZone) (272) refuses only zones; 511 refuses a vec's grow from 32
+    # slots to 64. (Refusing n_instrument_new, n_sample_from_mono or n_sample_bank_new alone is
+    # not reachable this way: their requests are no bigger than the 128-byte buffer every
+    # vec_new takes, and the parse makes those first.)
+    test_group("refused allocations fail the parse (2.3.0)");
+    var bz8 = build_zones_sf2(8, 2, 16, 0);
+    assert_eq(zone_total(sf2_parse(bb_buf(bz8), bb_len(bz8))), 8, "8 zones unconstrained");
+    assert_eq(parse_with_alloc_max(bz8, sizeof(NZone) - 1), NIDHI_ERR_IMPORT, "refused n_zone_new -> NIDHI_ERR_IMPORT, not a preset without zones");
+    var bz = build_zones_sf2(40, 3, 16, 0);
+    var rz = sf2_parse(bb_buf(bz), bb_len(bz));
+    assert(rz > 0, "unconstrained parse");
+    assert_eq(zone_total(rz), 40, "40 zones");
+    assert_eq(n_sample_bank_len(Sf2Result_bank(rz)), 3, "3 samples");
+    assert_eq(parse_with_alloc_max(bz, 511), NIDHI_ERR_IMPORT, "refused zone-vec grow (zone 33) -> NIDHI_ERR_IMPORT, not 32 zones");
+    var bzs = build_zones_sf2(40, 40, 16, 0);
+    assert_eq(parse_with_alloc_max(bzs, 511), NIDHI_ERR_IMPORT, "refused bank grow (sample 33) -> NIDHI_ERR_IMPORT");
+    var bzf = build_zones_sf2(40, 3, 16, 1);
+    var rzf = sf2_parse(bb_buf(bzf), bb_len(bzf));
+    assert_eq(zone_total(rzf), 40, "full zones (ranges, loops) unconstrained");
+    # Every ceiling from 0 to 1 KB: the parse either fails with NIDHI_ERR_IMPORT or returns
+    # exactly the unconstrained result. Partial results were the 2.2.2 behaviour.
+    var lim = 0;
+    var wrong = 0;
+    var refused = 0;
+    while (lim <= 1024) {
+        var rl = parse_with_alloc_max(bz, lim);
+        if (rl < 0) {
+            if (rl != NIDHI_ERR_IMPORT) { wrong = wrong + 1; }
+            refused = refused + 1;
+        } else {
+            if (vec_len(Sf2Result_presets(rl)) != 1) { wrong = wrong + 1; }
+            if (zone_total(rl) != 40) { wrong = wrong + 1; }
+            if (n_sample_bank_len(Sf2Result_bank(rl)) != 3) { wrong = wrong + 1; }
+        }
+        lim = lim + 8;
+    }
+    assert_eq(wrong, 0, "ALLOC_MAX 0..1024: NIDHI_ERR_IMPORT or the full result, never a partial one");
+    assert(refused > 0, "the sweep does refuse some parses");
 
     return assert_summary();
 }

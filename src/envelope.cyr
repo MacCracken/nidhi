@@ -24,6 +24,7 @@ struct NAdsrConfig {
 #must_use
 fn n_adsr_config_default() {
     var c = alloc(sizeof(NAdsrConfig));
+    if (c == 0) { return 0; }
     NAdsrConfig_set_attack_samples(c, 0);
     NAdsrConfig_set_decay_samples(c, 0);
     NAdsrConfig_set_sustain_level(c, F64_ONE);
@@ -34,6 +35,8 @@ fn n_adsr_config_default() {
 #must_use
 fn n_adsr_config_new(attack_samples, decay_samples, sustain_level, release_samples) {
     var c = alloc(sizeof(NAdsrConfig));
+    # 0 when the allocation is refused (2.3.0); n_adsr_config_from_seconds passes it on.
+    if (c == 0) { return 0; }
     NAdsrConfig_set_attack_samples(c, attack_samples);
     NAdsrConfig_set_decay_samples(c, decay_samples);
     NAdsrConfig_set_sustain_level(c, sustain_level);
@@ -85,6 +88,8 @@ fn n_adsr_config_is_default_sfz(config, sample_rate) {
 # sample_rate is an f64 bit pattern (Hz).
 #must_use
 fn n_amp_envelope_new(config, sample_rate) {
+    # No config (0, or a code from a refused n_adsr_config_new) is no envelope.
+    if (config <= 0) { return 0; }
     # to_seconds divides by the RAW sample_rate (matches Rust); ONLY the 5th arg is clamped max(.,1).
     var a = f64_max(f64_div(f64_from(NAdsrConfig_attack_samples(config)), sample_rate), 0);
     var d = f64_max(f64_div(f64_from(NAdsrConfig_decay_samples(config)), sample_rate), 0);

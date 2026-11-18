@@ -4,49 +4,17 @@
 > Shipped work lives in [`CHANGELOG.md`](../../CHANGELOG.md); current state is in
 > [`state.md`](state.md); decisions are in [`docs/adr/`](../adr/).
 
-Current: **2.2.2**. Each minor release below has one theme, and each item says why it is there.
+Current: **2.3.0**. Each minor release below has one theme, and each item says why it is there.
 
-- **The order is by readiness, then harm.** 2.3.0 needs no decision and changes nothing on valid
-  input. 2.4.0 fixes the largest audible SFZ gap, but needs a design ADR first. 2.5.0 adds
-  capability no consumer is blocked on yet. 2.6.0 holds the oracle behaviours the maintainer
-  deferred in 2.2.2.
+- **The order is by harm, then readiness.** 2.4.0 fixes the largest audible SFZ gap, but needs a
+  design ADR first. 2.5.0 adds capability no consumer is blocked on yet. 2.6.0 holds the oracle
+  behaviours the maintainer deferred in 2.2.2.
 - **Patch releases (2.x.y)** carry dependency and toolchain bumps and repairs on whichever line is
   current, as 2.2.1 and 2.2.2 did. A patch release does not move the consumer's cyrius floor.
 - **An oracle divergence needs an ADR.** Any item that changes what the Rust oracle did gets one,
   plus a CHANGELOG section that says what moved.
 
 ---
-
-## 2.3.0 — finish the 2.2.2 hardening
-
-Leftovers from the 2.2.2 P(-1) audit. No sound changes on valid input. It is a minor release
-because one item adds a public entry point and one adds a `#must_use`.
-
-- [ ] **Unchecked `alloc` in the remaining constructors**: `n_sample_from_mono`,
-      `n_sample_from_stereo`, `n_zone_new`, `n_instrument_new`, `n_sample_bank_new`. Each needs a
-      0 check and callers that handle it. A refused allocation today writes through 0 inside the
-      host ([architecture 001](../architecture/001-the-allocator-never-frees.md)).
-- [ ] **SF2 records are parsed eagerly**, at about 6× their file size on the heap (a 40 MB igen
-      chunk takes 240 MB). Reading fields lazily from the chunk would make it 0. Not urgent: real
-      files carry KBs of records, and since 2.2.2 the walk has a work budget and every allocation
-      is checked. Output must stay identical on the SF2 fixtures.
-- [ ] **An SFZ `(ptr, len)` parse entry point.** `n_sfz_parse` takes a C string, so anything after
-      an embedded NUL is silently dropped. Additive API.
-- [ ] **Guard-page fuzz harnesses** (`guard_sf2.fcyr` / `guard_sfz.fcyr`). Harness-only, no `src/`
-      change; the shipped parsers already pass. Needs a `cyr_mmap == -1` fallback for the agnos
-      target. The 2.2.2 SF2 and SFZ bombs show why: inputs of about 600 bytes, which is what the
-      current fuzzers feed, cannot build them.
-- [ ] Small items:
-      - `n_recorder_write` should be `#must_use`: an ignored error silently drops audio.
-      - The Hann window still grows by `vec_push`, about 8 KB per stretch. Size it once, as the
-        other stretch buffers are since 2.2.2.
-      - `n_sfz_to_instrument` re-hashes a 4 KB joined name per region (257 ms for 20k regions).
-        It is linear, but a pointer-identity fast path would remove it.
-- [ ] Housekeeping:
-      - `docs/port/12-vidya-port-template.md` is a template for porting *other* projects, and still
-        describes a live `rust-old/`. Harmless here, but it is the file a future port would copy.
-      - `docs/port/13-hisab-lib-template.md` shows bare `ERR_*` in its snippet. A warning was added
-        in 2.0.2, but the snippet itself is still the wrong pattern to copy.
 
 ## 2.4.0 — SFZ articulation: exclusive groups and layered regions
 
@@ -124,7 +92,7 @@ deferred the first two then. Each is small, and each changes sound, so each need
 
 | Item | Schedule it when | Why it waits |
 |---|---|---|
-| **The 80 remaining unprefixed names** | a release with nothing else in it | [ADR 0005](../adr/0005-namespace-prefix-scope.md). 0 collisions measured: all 294 of nidhi's top-level names against the 9,579 in `lib/` (2.2.2), so the benefit is purely preventive. The naming questions are not mechanical (`nvf_*` already starts with `n` but not `n_`; `Sf2Shdr` -> `NSf2Shdr` is consistent and ugly), and a partially applied rename in a flat-namespace language is a live hazard, not a cosmetic one. The ADR lists the per-family decisions needed first. |
+| **The remaining unprefixed names** (80 by ADR 0005's 2.2.2 count) | a release with nothing else in it | [ADR 0005](../adr/0005-namespace-prefix-scope.md). 0 collisions measured: all 306 of nidhi's top-level names against the 9,579 in `lib/` (2.3.0), so the benefit is purely preventive. 2.3.0's SF2 rewrite swapped the five `Sf2*` record structs and eight helpers for twelve `sf2_*` field readers, so the `Sf2*` family is now only `Sf2Preset`, `Sf2Ctx` and friends. The naming questions are not mechanical (`nvf_*` already starts with `n` but not `n_`; `Sf2Preset` -> `NSf2Preset` is consistent and ugly), and a partially applied rename in a flat-namespace language is a live hazard, not a cosmetic one. The ADR lists the per-family decisions needed first. |
 | **Voice-major block render** | a redesign with real invariant hoisting | The headline claim was **refuted by measurement**: alone, it makes 64-voice low-pass *worse* (17.734 -> 18.273 ms). The genuine 2.4x is only the many-idle-slots case (1 voice in 64: 441.7 -> 180.3 µs). 2.0.7 and 2.2.2 took most of the per-voice win by other means. Redo only with real invariant hoisting, a mandatory output-length guard, and mono coverage. |
 | **Serde** | a consumer needs to persist a config | [ADR 0003](../adr/0003-serde-is-not-ported.md). A feature, not a repair. `NZone` has 34 fields against a 16-field derive guidance, and with no traits there is no `Deserialize` to derive, so every type needs a hand-written `from_json` and a round-trip test. |
 

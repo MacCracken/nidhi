@@ -193,8 +193,13 @@ fn n_sample_from_decode(dr) {
         if (samples == 0) { return NIDHI_ERR_IMPORT; }
     }
     n_scrub_nonfinite(samples);
-    if (channels == 1) { return n_sample_from_mono(samples, sample_rate); }
-    return n_sample_from_stereo(samples, sample_rate);
+    var smp = 0;
+    if (channels == 1) { smp = n_sample_from_mono(samples, sample_rate); }
+    else { smp = n_sample_from_stereo(samples, sample_rate); }
+    # The constructors return 0 when an allocation is refused; this function's contract is a
+    # Sample or a negative code.
+    if (smp == 0) { return NIDHI_ERR_IMPORT; }
+    return smp;
 }
 
 # load_wav_from_memory(data, len) -> Sample pointer, or NIDHI_ERR_IMPORT.
@@ -371,8 +376,9 @@ fn n_stream_reader_read_all(reader) {
         data = n_stream_reader_read_chunk(reader, total);
         if (data == 0) { return NIDHI_ERR_IMPORT; }
     }
-    if (ch == 1) {
-        return n_sample_from_mono(data, NStreamReader_sample_rate(reader));
-    }
-    return n_sample_from_stereo(data, NStreamReader_sample_rate(reader));
+    var smp = 0;
+    if (ch == 1) { smp = n_sample_from_mono(data, NStreamReader_sample_rate(reader)); }
+    else { smp = n_sample_from_stereo(data, NStreamReader_sample_rate(reader)); }
+    if (smp == 0) { return NIDHI_ERR_IMPORT; }
+    return smp;
 }

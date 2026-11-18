@@ -1,0 +1,263 @@
+# alloc_refused.tcyr -- a refused allocation in a nidhi constructor is reported, not written
+# through (2.3.0).
+#
+# This suite replaces the stdlib `alloc`. cycc keeps the last definition of a function, so the
+# `alloc` below serves every allocation in the unit: vec_new and vec_push reach it through the
+# stdlib's own allocator. It hands out zeroed memory from one private mapping, as the stdlib does,
+# and while armed it counts requests and refuses one of them:
+#   FI_ONE   the Nth request only
+#   FI_FROM  the Nth request and every later one (a heap that stays exhausted)
+# The technique is naad's (tests/alloc_refused.tcyr there, ADR-0010).
+#
+# Every count is measured here, not written down, so a toolchain whose vec_new allocates
+# differently moves the loops, not the expectations. Each loop is held to a floor, so it cannot
+# pass by refusing nothing.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "src/error.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+include "src/envelope.cyr"
+include "src/zone.cyr"
+include "src/sample.cyr"
+include "src/instrument.cyr"
+include "src/capture.cyr"
+
+var FI_OFF = 0;
+var FI_ONE = 1;
+var FI_FROM = 2;
+
+var FI_MODE = 0;
+var FI_COUNT = 0;
+var FI_N = 0;
+var FI_BASE = 0;
+var FI_PTR = 0;
+var FI_END = 0;
+var FI_ARENA = 0x10000000;   # 256 MiB, reserved lazily
+
+# The stand-in allocator: the stdlib's refusals for a size it can never serve, then the armed
+# refusal, then a bump from the private mapping.
+fn alloc(size): i64 {
+    if (size <= 0) { return 0; }
+    if (size > ALLOC_MAX) { return 0; }
+    if (FI_MODE != FI_OFF) {
+        FI_COUNT = FI_COUNT + 1;
+        if (FI_MODE == FI_ONE) {
+            if (FI_COUNT == FI_N) { return 0; }
+        }
+        if (FI_MODE == FI_FROM) {
+            if (FI_COUNT >= FI_N) { return 0; }
+        }
+    }
+    if (FI_BASE == 0) {
+        # PROT_READ|WRITE, MAP_PRIVATE|ANONYMOUS|NORESERVE
+        FI_BASE = syscall(9, 0, FI_ARENA, 3, 0x4022, 0 - 1, 0);
+        if (FI_BASE < 0) { FI_BASE = 0; return 0; }
+        FI_PTR = FI_BASE;
+        FI_END = FI_BASE + FI_ARENA;
+    }
+    size = (size + 7) & (0 - 8);
+    if (FI_PTR + size > FI_END) { return 0; }
+    var p = FI_PTR;
+    FI_PTR = p + size;
+    return p;
+}
+
+fn fi_arm(mode, n) {
+    FI_MODE = mode;
+    FI_N = n;
+    FI_COUNT = 0;
+    return 0;
+}
+
+fn fi_disarm() {
+    FI_MODE = FI_OFF;
+    return FI_COUNT;
+}
+
+var MK_MONO = 1;
+var MK_STEREO = 2;
+var MK_ZONE = 3;
+var MK_INSTRUMENT = 4;
+var MK_BANK = 5;
+var MK_RECORDER = 6;
+var MK_ADSR = 7;
+var MK_ADSR_DEFAULT = 8;
+var MK_ADSR_SECONDS = 9;
+var MK_LAST = 9;
+
+var DATA = 0;
+var NAME = 0;
+
+fn make(which) {
+    if (which == MK_MONO) { return n_sample_from_mono(DATA, 44100); }
+    if (which == MK_STEREO) { return n_sample_from_stereo(DATA, 44100); }
+    if (which == MK_ZONE) { return n_zone_new(0); }
+    if (which == MK_INSTRUMENT) { return n_instrument_new(NAME); }
+    if (which == MK_BANK) { return n_sample_bank_new(); }
+    if (which == MK_RECORDER) { return n_recorder_new(44100, 2); }
+    if (which == MK_ADSR) { return n_adsr_config_new(10, 20, F64_HALF, 30); }
+    if (which == MK_ADSR_DEFAULT) { return n_adsr_config_default(); }
+    return n_adsr_config_from_seconds(F64_HALF, F64_HALF, F64_HALF, F64_HALF, f64_from(44100));
+}
+
+# The fewest allocations each constructor makes, below which its loop is vacuous: a struct, plus
+# one vec_new (a header) for samples, banks and recorders, three for an instrument.
+fn make_floor(which) {
+    if (which == MK_ZONE) { return 1; }
+    if (which >= MK_ADSR) { return 1; }
+    if (which == MK_INSTRUMENT) { return 4; }
+    return 2;
+}
+
+fn make_name(which) {
+    if (which == MK_MONO) { return "n_sample_from_mono"; }
+    if (which == MK_STEREO) { return "n_sample_from_stereo"; }
+    if (which == MK_ZONE) { return "n_zone_new"; }
+    if (which == MK_INSTRUMENT) { return "n_instrument_new"; }
+    if (which == MK_BANK) { return "n_sample_bank_new"; }
+    if (which == MK_RECORDER) { return "n_recorder_new"; }
+    if (which == MK_ADSR) { return "n_adsr_config_new"; }
+    if (which == MK_ADSR_DEFAULT) { return "n_adsr_config_default"; }
+    return "n_adsr_config_from_seconds";
+}
+
+fn main() {
+    alloc_init();
+    DATA = vec_new();
+    var di = 0;
+    while (di < 64) { vec_push(DATA, F64_HALF); di = di + 1; }
+    NAME = str_from("refused");
+
+    test_group("every refusal inside a constructor returns 0");
+    var which = 1;
+    while (which <= MK_LAST) {
+        var n = 1;
+        var refused = 0;
+        var bad = 0;
+        var going = 1;
+        while (going == 1) {
+            fi_arm(FI_ONE, n);
+            var obj = make(which);
+            var made = fi_disarm();
+            if (made < n) {
+                # Nothing was refused: every allocation succeeded, so the object is whole.
+                assert(obj > 0, "an unrefused constructor succeeds");
+                going = 0;
+            } else {
+                if (obj != 0) { bad = bad + 1; }
+                refused = refused + 1;
+                n = n + 1;
+            }
+        }
+        print(make_name(which), strlen(make_name(which)));
+        print(": ", 2); fmt_int(refused); println(" refusals");
+        assert_eq(bad, 0, "no refusal yields an object");
+        assert(refused >= make_floor(which), "the loop refused at least the floor");
+        which = which + 1;
+    }
+
+    test_group("a heap that stays exhausted: every constructor returns 0");
+    which = 1;
+    while (which <= MK_LAST) {
+        fi_arm(FI_FROM, 1);
+        var gone = make(which);
+        ignore_i(fi_disarm());
+        assert_eq(gone, 0, "constructor on an exhausted heap returns 0");
+        which = which + 1;
+    }
+
+    test_group("builders pass a 0 or an error code through");
+    assert_eq(n_zone_with_key_range(0, 60, 72), 0, "n_zone_with_key_range(0) is 0");
+    assert_eq(n_zone_with_loop(NIDHI_ERR_IMPORT, LOOP_FORWARD, 0, 10), NIDHI_ERR_IMPORT, "a code passes through n_zone_with_loop");
+    assert_eq(n_zone_with_seq(n_zone_with_root_note(0, 60), 3, 1), 0, "a chain on 0 stays 0");
+    assert_eq(n_sample_with_name(0, NAME), 0, "n_sample_with_name(0) is 0");
+    assert_eq(n_sample_from_mono(0, 44100), 0, "a 0 data vec is no sample");
+    assert_eq(n_sample_from_stereo(NIDHI_ERR_IMPORT, 44100), 0, "an error-code data vec is no sample");
+
+    test_group("add_zone and bank_add report a refused grow");
+    var inst = n_instrument_new(NAME);
+    var bank = n_sample_bank_new();
+    var smp = n_sample_from_mono(DATA, 44100);
+    var zz = n_zone_new(0);
+    fi_arm(FI_FROM, 1);
+    var zrc = 0;
+    var k = 0;
+    while (k < 64) {
+        zrc = n_instrument_add_zone(inst, zz);
+        if (zrc < 0) { k = 64; } else { k = k + 1; }
+    }
+    var brc = 0;
+    k = 0;
+    while (k < 64) {
+        brc = n_sample_bank_add(bank, smp);
+        if (brc < 0) { k = 64; } else { k = k + 1; }
+    }
+    ignore_i(fi_disarm());
+    assert_eq(zrc, NIDHI_ERR_PLAYBACK, "add_zone on an exhausted heap: NIDHI_ERR_PLAYBACK");
+    assert_eq(vec_len(NInstrument_zones(inst)), vec_len(NInstrument_seq_counters(inst)), "zones and their sequence counters stay paired");
+    assert_eq(brc, NIDHI_ERR_PLAYBACK, "bank_add on an exhausted heap: NIDHI_ERR_PLAYBACK");
+    assert_eq(n_instrument_add_zone(0, zz), NIDHI_ERR_INVALID_PARAMETER, "add_zone to no instrument");
+    assert_eq(n_instrument_add_zone(inst, 0), NIDHI_ERR_INVALID_PARAMETER, "add_zone of no zone");
+    assert_eq(n_sample_bank_add(0, smp), NIDHI_ERR_INVALID_PARAMETER, "bank_add to no bank");
+
+    test_group("an envelope builder whose copy is refused returns 0");
+    var cfg = n_adsr_config_new(10, 20, F64_HALF, 30);
+    var ez = n_zone_new(0);
+    fi_arm(FI_ONE, 1);
+    var ezr = n_zone_with_adsr(ez, cfg);
+    ignore_i(fi_disarm());
+    assert_eq(ezr, 0, "n_zone_with_adsr: refused copy -> 0, not a zone without its envelope");
+    fi_arm(FI_ONE, 1);
+    var efr = n_zone_with_filter_envelope(ez, cfg, f64_from(1200));
+    ignore_i(fi_disarm());
+    assert_eq(efr, 0, "n_zone_with_filter_envelope: refused copy -> 0");
+    assert(n_zone_with_adsr(ez, cfg) == ez, "unrefused, the builder returns the zone");
+    assert_eq(n_amp_envelope_new(0, f64_from(44100)), 0, "no config is no envelope");
+
+    test_group("a refused group-counter grow leaves the instrument unchanged");
+    var ginst = n_instrument_new(NAME);
+    var gz = n_zone_with_group(n_zone_new(0), 4000);
+    fi_arm(FI_FROM, 1);
+    var grc = n_instrument_add_zone(ginst, gz);
+    ignore_i(fi_disarm());
+    assert_eq(grc, NIDHI_ERR_PLAYBACK, "add_zone with an unsizable group: NIDHI_ERR_PLAYBACK");
+    assert_eq(n_instrument_zone_count(ginst), 0, "and no zone was added");
+    assert_eq(n_instrument_add_zone(ginst, gz), 0, "unrefused, it adds");
+    assert_eq(n_instrument_find_zone_rr(ginst, 60, 100), 0, "and round-robins");
+
+    test_group("a refused finish keeps the take");
+    var rec = n_recorder_new(44100, 1);
+    assert_eq(n_recorder_write(rec, DATA), 0, "write 64 samples");
+    var rn = 1;
+    var rbad = 0;
+    var rrefused = 0;
+    var rgoing = 1;
+    while (rgoing == 1) {
+        fi_arm(FI_ONE, rn);
+        var taken = n_recorder_finish(rec);
+        var rmade = fi_disarm();
+        if (rmade < rn) {
+            assert(taken > 0, "an unrefused finish returns the Sample");
+            assert_eq(NSample_frames(taken), 64, "with every frame");
+            rgoing = 0;
+        } else {
+            if (taken != 0) { rbad = rbad + 1; }
+            if (n_recorder_frames(rec) != 64) { rbad = rbad + 1; }
+            rrefused = rrefused + 1;
+            rn = rn + 1;
+        }
+    }
+    assert_eq(rbad, 0, "every refused finish returns 0 and leaves the 64 frames recorded");
+    assert(rrefused >= 2, "finish was refused at least twice (fresh buffer, Sample)");
+    assert_eq(n_recorder_frames(rec), 0, "the successful finish handed the take over");
+
+    return assert_summary();
+}
+
+fn ignore_i(v) { return 0; }
+
+var exit_code = main();
+syscall(60, exit_code);

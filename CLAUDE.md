@@ -103,8 +103,12 @@ Modules are **self-contained**: NO `include` between `src/*.cyr` files; stdlib a
   suite porting the Rust `#[cfg(test)]` cases as parity checks.
 - Benchmarks: `tests/nidhi.bcyr` reproduces the 7 Rust criterion benchmarks; results in
   `BENCHMARKS.md` + `docs/benchmarks-rust-v-cyrius.md`, series in `bench-history.csv`.
-- Fuzz: `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` — parsers must return an error code, never
-  crash, on any input.
+- Fuzz: `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` (small random/mutated inputs) and
+  `fuzz/guard_sf2.fcyr` + `fuzz/guard_sfz.fcyr` (each input against a `PROT_NONE` page, so a read
+  past the end faults). Parsers must return an error code, never crash, on any input.
+- A constructor returns 0 on a refused `alloc`, never writes through it, and a builder passes a 0
+  or an error code through. `tests/alloc_refused.tcyr` refuses each allocation in turn; add a
+  case there for every new constructor.
 - Never claim a perf win without before/after numbers in `bench-history.csv`.
 - A pin bump regenerates `lib/` from empty: `rm -rf lib cyrius.lock`, `mkdir lib`,
   `cyrius lib sync`, `cyrius deps`. Over an old tree `cyrius deps` keeps stale leaves and old lock

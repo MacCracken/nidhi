@@ -9,7 +9,7 @@ include "src/loop_mode.cyr"
 
 fn main() {
     alloc_init();
-    println("nidhi 2.2.2 (cyrius port)");
+    println("nidhi 2.3.0 (cyrius port)");
     return 0;
 }
 

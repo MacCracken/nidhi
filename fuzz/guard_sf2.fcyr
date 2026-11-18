@@ -1,0 +1,482 @@
+# guard_sf2.fcyr -- guard-page fuzz for sf2_parse: every input ends exactly at a PROT_NONE page.
+#
+# fuzz_sf2.fcyr proves sf2_parse never crashes, but its inputs sit in ordinary heap, so a read a
+# few bytes past the end of the input lands on the next allocation and goes unnoticed. Here each
+# input is copied so that its last byte is the last byte before an inaccessible page: any read
+# past the end faults at once (SIGSEGV, a failed `cyrius fuzz`) instead of reading neighbouring
+# heap. sf2_parse never reads before its start (every reader rejects off < 0), so one guard after
+# the input is enough.
+#
+# Families: the three of fuzz_sf2.fcyr (pure random, RIFF/sfbk-prefixed random, byte-mutated
+# valid SF2) plus structure-aware inputs up to ~64 KB -- a valid RIFF/LIST skeleton with random
+# record counts, hostile bag/generator/instrument/sample indices, odd chunk sizes, junk and
+# missing chunks, truncation -- and the shapes behind the 2.2.2 bombs (overlapping preset bag
+# ranges, alternating generator indices), scaled to stay inside the work budget's reach.
+#
+# Fallback: cyr_mmap answers -1 where there is no host mmap (agnos, cx), and cyr_mprotect fails on
+# Windows. The harness then runs the same inputs from a plain heap buffer and says so: it is still
+# a never-crash fuzz there, just not a guard-page one. `./build/guard_sf2 plain` forces that mode
+# (to compare a planted out-of-bounds read with and without the guard).
+#
+# Run: cyrius fuzz   (or: cyrius build fuzz/guard_sf2.fcyr build/guard_sf2 && ./build/guard_sf2)
+
+include "lib/mmap.cyr"
+include "src/error.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+include "src/envelope.cyr"
+include "src/zone.cyr"
+include "src/sample.cyr"
+include "src/instrument.cyr"
+include "src/sf2.cyr"
+
+var FUZZ_RNG = 0;
+fn rng_seed(s) { FUZZ_RNG = s; return 0; }
+fn rng_next() {
+    var x = FUZZ_RNG;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    FUZZ_RNG = x;
+    return x & 0x7FFFFFFFFFFFFFFF;
+}
+fn rng_range(n) { if (n <= 0) { return 0; } return rng_next() % n; }
+fn rng_byte() { return rng_next() & 0xFF; }
+
+# --- the guard region ---
+# Inputs are at most G_MAX_IN bytes. The region is G_SPAN bytes of read-write memory followed by
+# a G_GRAN-byte PROT_NONE guard. G_GRAN is 64 KiB, a multiple of every page size in use (4, 16
+# and 64 KiB), so the guard's start and length are page-aligned on any of them.
+var G_MAX_IN = 98304;
+var G_GRAN = 65536;
+var G_SPAN = 131072;
+var G_GUARD = 0;
+var G_PLAIN = 0;
+var G_GUARDED = 0;
+
+fn guard_init(force_plain) {
+    if (force_plain == 0) {
+        var base = cyr_mmap(0, G_SPAN + G_GRAN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0 - 1, 0);
+        if (base > 0) {
+            if (cyr_mprotect(base + G_SPAN, G_GRAN, PROT_NONE) == 0) {
+                G_GUARD = base + G_SPAN;
+                G_GUARDED = 1;
+                return 1;
+            }
+        }
+    }
+    G_PLAIN = alloc(G_MAX_IN);
+    G_GUARDED = 0;
+    return 0;
+}
+
+# Copy len bytes so the copy ends at the guard (or into the plain buffer). Returns the copy.
+fn guard_place(src, len) {
+    var dst = G_PLAIN;
+    if (G_GUARDED == 1) { dst = G_GUARD - len; }
+    var i = 0;
+    while (i + 8 <= len) { store64(dst + i, load64(src + i)); i = i + 8; }
+    while (i < len) { store8(dst + i, load8(src + i)); i = i + 1; }
+    return dst;
+}
+
+fn guard_parse(src, len) {
+    if (len > G_MAX_IN) { len = G_MAX_IN; }
+    if (len < 0) { len = 0; }
+    var r = sf2_parse(guard_place(src, len), len);
+    if (r < 0) {
+        if (r != NIDHI_ERR_IMPORT) {
+            println("guard_sf2: FAIL -- sf2_parse returned a code other than NIDHI_ERR_IMPORT");
+            syscall(60, 2);
+        }
+    }
+    return r;
+}
+
+# --- byte builder ---
+fn bb_new(cap) { var b = alloc(16); store64(b, alloc(cap)); store64(b + 8, 0); return b; }
+fn bb_buf(b) { return load64(b); }
+fn bb_len(b) { return load64(b + 8); }
+fn bb_u8(b, v) { store8(bb_buf(b) + bb_len(b), v & 0xFF); store64(b + 8, bb_len(b) + 1); return 0; }
+fn bb_u16(b, v) { bb_u8(b, v); bb_u8(b, v >> 8); return 0; }
+fn bb_u32(b, v) { bb_u8(b, v); bb_u8(b, v >> 8); bb_u8(b, v >> 16); bb_u8(b, v >> 24); return 0; }
+fn bb_str4(b, s) { var i = 0; while (i < 4) { bb_u8(b, load8(s + i)); i = i + 1; } return 0; }
+fn bb_fixed_str(b, s, flen) {
+    var slen = strlen(s);
+    var i = 0;
+    while (i < flen) { if (i < slen) { bb_u8(b, load8(s + i)); } else { bb_u8(b, 0); } i = i + 1; }
+    return 0;
+}
+fn bb_chunk_begin(b, id) { bb_str4(b, id); var pos = bb_len(b); bb_u32(b, 0); return pos; }
+fn bb_chunk_end(b, pos) {
+    var cl = bb_len(b) - (pos + 4);
+    var p = bb_buf(b) + pos;
+    store8(p, cl & 0xFF); store8(p + 1, (cl >> 8) & 0xFF); store8(p + 2, (cl >> 16) & 0xFF); store8(p + 3, (cl >> 24) & 0xFF);
+    if ((cl & 1) == 1) { bb_u8(b, 0); }
+    return 0;
+}
+
+# --- family 2: the valid minimal SF2 of fuzz_sf2.fcyr, to mutate ---
+fn build_valid_sf2(num_samples, loop_mode) {
+    var b = bb_new(16384);
+    var riff = bb_chunk_begin(b, "RIFF");
+    bb_str4(b, "sfbk");
+    var sdta = bb_chunk_begin(b, "LIST"); bb_str4(b, "sdta");
+    var smpl = bb_chunk_begin(b, "smpl");
+    var s = 0; while (s < num_samples) { bb_u16(b, 1000); s = s + 1; }
+    bb_chunk_end(b, smpl); bb_chunk_end(b, sdta);
+    var pdta = bb_chunk_begin(b, "LIST"); bb_str4(b, "pdta");
+    var phdr = bb_chunk_begin(b, "phdr");
+    bb_fixed_str(b, "Fuzz", 20); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_fixed_str(b, "EOP", 20); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 1); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_chunk_end(b, phdr);
+    var pbag = bb_chunk_begin(b, "pbag"); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 1); bb_u16(b, 0); bb_chunk_end(b, pbag);
+    var pgen = bb_chunk_begin(b, "pgen"); bb_u16(b, 41); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 0); bb_chunk_end(b, pgen);
+    var inst = bb_chunk_begin(b, "inst"); bb_fixed_str(b, "Inst", 20); bb_u16(b, 0); bb_fixed_str(b, "EOI", 20); bb_u16(b, 1); bb_chunk_end(b, inst);
+    var ibag = bb_chunk_begin(b, "ibag"); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 4); bb_u16(b, 0); bb_chunk_end(b, ibag);
+    var igen = bb_chunk_begin(b, "igen");
+    bb_u16(b, 43); bb_u16(b, 0 | (127 << 8));
+    bb_u16(b, 44); bb_u16(b, 0 | (127 << 8));
+    bb_u16(b, 54); bb_u16(b, loop_mode);
+    bb_u16(b, 53); bb_u16(b, 0);
+    bb_u16(b, 0); bb_u16(b, 0);
+    bb_chunk_end(b, igen);
+    var shdr = bb_chunk_begin(b, "shdr");
+    bb_fixed_str(b, "S", 20); bb_u32(b, 0); bb_u32(b, num_samples); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 44100); bb_u8(b, 60); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 1);
+    bb_fixed_str(b, "EOS", 20); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u8(b, 0); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 0);
+    bb_chunk_end(b, shdr);
+    bb_chunk_end(b, pdta);
+    bb_chunk_end(b, riff);
+    return b;
+}
+
+# --- family 3: structure-aware ---
+# A hostile index into a table of n records: mostly in range, often just past it, sometimes 0,
+# n - 1, or the u16 maximum.
+fn sa_index(n) {
+    var c = rng_range(16);
+    if (c == 0) { return 0; }
+    if (c == 1) { return 0xFFFF; }
+    if (c == 2) { return n; }
+    if (c == 3) { return n + 1 + rng_range(4); }
+    if (c == 4) { if (n > 0) { return n - 1; } return 0; }
+    return rng_range(n + 1);
+}
+
+# The next index of a table whose indices should increase (phdr/inst bag, pbag/ibag generator):
+# usually the running value plus a step averaging total / nrec, so the walk stays about linear;
+# 1 in 24 a hostile sa_index instead. Hostile EVERYWHERE made nearly every input a quadratic walk
+# that ran into the work budget (0.2 s each, 34 s for the run); those shapes are family 4's job.
+fn sa_mono(slot, total, nrec) {
+    if (rng_range(24) == 0) { return sa_index(total); }
+    var avg = 1;
+    if (nrec > 0) { avg = total / nrec; }
+    if (avg < 1) { avg = 1; }
+    var v = load64(slot) + rng_range(2 * avg + 1);
+    store64(slot, v);
+    return v;
+}
+
+# A 32-bit sample-point value: inside the sample data, at its edges, or anywhere.
+fn sa_point(frames) {
+    var c = rng_range(8);
+    if (c == 0) { return 0xFFFFFFFF; }
+    if (c == 1) { return frames; }
+    if (c == 2) { return frames + 1; }
+    if (c == 3) { return rng_next() & 0xFFFFFFFF; }
+    return rng_range(frames + 1);
+}
+
+fn sa_name(b) {
+    var c = rng_range(4);
+    var i = 0;
+    while (i < 20) {
+        if (c == 0) { bb_u8(b, 65 + rng_range(26)); } else {
+            if (c == 1) { bb_u8(b, rng_byte()); } else {
+                if (i < 1 + rng_range(19)) { bb_u8(b, 97 + rng_range(26)); } else { bb_u8(b, 0); }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Randomly make the chunk just closed one byte longer (a partial record) -- the parser floors
+# the record count, and an odd size takes the RIFF pad byte.
+fn sa_maybe_odd(b) {
+    if (rng_range(6) == 0) { bb_u8(b, rng_byte()); }
+    return 0;
+}
+
+fn sa_chunk_close(b, pos) {
+    sa_maybe_odd(b);
+    bb_chunk_end(b, pos);
+    return 0;
+}
+
+# Record counts and the running index of the input being built (one input at a time).
+var SA_NPH = 0;
+var SA_NPB = 0;
+var SA_NPG = 0;
+var SA_NIN = 0;
+var SA_NIB = 0;
+var SA_NIG = 0;
+var SA_NSH = 0;
+var SA_FRAMES = 0;
+var SA_RUN = 0;
+
+# Emit pdta sub-chunk `which` (0 phdr, 1 pbag, 2 pgen, 3 inst, 4 ibag, 5 igen, 6 shdr, 7 JUNK).
+fn sa_emit(b, which) {
+    var i = 0;
+    if (which == 0) {
+        var phdr = bb_chunk_begin(b, "phdr");
+        store64(SA_RUN, 0);
+        while (i <= SA_NPH) {
+            sa_name(b); bb_u16(b, rng_range(130)); bb_u16(b, rng_range(130));
+            bb_u16(b, sa_mono(SA_RUN, SA_NPB, SA_NPH));
+            bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+            i = i + 1;
+        }
+        sa_chunk_close(b, phdr);
+    }
+    if (which == 1) {
+        var pbag = bb_chunk_begin(b, "pbag");
+        store64(SA_RUN, 0);
+        while (i < SA_NPB) { bb_u16(b, sa_mono(SA_RUN, SA_NPG, SA_NPB)); bb_u16(b, 0); i = i + 1; }
+        sa_chunk_close(b, pbag);
+    }
+    if (which == 2) {
+        var pgen = bb_chunk_begin(b, "pgen");
+        while (i < SA_NPG) {
+            var po = rng_range(6);
+            if (po == 0) { bb_u16(b, 41); bb_u16(b, sa_index(SA_NIN)); }
+            if (po == 1) { bb_u16(b, 43); bb_u16(b, rng_next()); }
+            if (po == 2) { bb_u16(b, 44); bb_u16(b, rng_next()); }
+            if (po >= 3) { bb_u16(b, rng_range(64)); bb_u16(b, rng_next()); }
+            i = i + 1;
+        }
+        sa_chunk_close(b, pgen);
+    }
+    if (which == 3) {
+        var inst = bb_chunk_begin(b, "inst");
+        store64(SA_RUN, 0);
+        while (i <= SA_NIN) { sa_name(b); bb_u16(b, sa_mono(SA_RUN, SA_NIB, SA_NIN)); i = i + 1; }
+        sa_chunk_close(b, inst);
+    }
+    if (which == 4) {
+        var ibag = bb_chunk_begin(b, "ibag");
+        store64(SA_RUN, 0);
+        while (i < SA_NIB) { bb_u16(b, sa_mono(SA_RUN, SA_NIG, SA_NIB)); bb_u16(b, 0); i = i + 1; }
+        sa_chunk_close(b, ibag);
+    }
+    if (which == 5) {
+        var igen = bb_chunk_begin(b, "igen");
+        while (i < SA_NIG) {
+            var io = rng_range(8);
+            if (io <= 1) { bb_u16(b, 53); bb_u16(b, sa_index(SA_NSH)); }
+            if (io == 2) { bb_u16(b, 43); bb_u16(b, rng_next()); }
+            if (io == 3) { bb_u16(b, 44); bb_u16(b, rng_next()); }
+            if (io == 4) { bb_u16(b, 54); bb_u16(b, rng_next()); }
+            if (io == 5) { bb_u16(b, 58); bb_u16(b, rng_next()); }
+            if (io >= 6) { bb_u16(b, rng_range(64)); bb_u16(b, rng_next()); }
+            i = i + 1;
+        }
+        sa_chunk_close(b, igen);
+    }
+    if (which == 6) {
+        var shdr = bb_chunk_begin(b, "shdr");
+        while (i <= SA_NSH) {
+            sa_name(b);
+            bb_u32(b, sa_point(SA_FRAMES)); bb_u32(b, sa_point(SA_FRAMES));
+            bb_u32(b, sa_point(SA_FRAMES)); bb_u32(b, sa_point(SA_FRAMES));
+            bb_u32(b, rng_next()); bb_u8(b, rng_byte()); bb_u8(b, rng_byte()); bb_u16(b, rng_next());
+            var ty = rng_range(8);
+            if (ty == 0) { bb_u16(b, 0x8001); } else { if (ty == 1) { bb_u16(b, rng_next()); } else { bb_u16(b, 1 << rng_range(4)); } }
+            i = i + 1;
+        }
+        sa_chunk_close(b, shdr);
+    }
+    if (which == 7) { var jk = bb_chunk_begin(b, "JUNK"); bb_u8(b, rng_byte()); bb_chunk_end(b, jk); }
+    return 0;
+}
+
+fn sa_emit_sdta(b) {
+    var sdta = bb_chunk_begin(b, "LIST");
+    bb_str4(b, "sdta");
+    var smpl = bb_chunk_begin(b, "smpl");
+    var s = 0;
+    while (s < SA_FRAMES) { bb_u16(b, rng_next()); s = s + 1; }
+    sa_chunk_close(b, smpl);
+    if (rng_range(4) == 0) { var sm24 = bb_chunk_begin(b, "sm24"); bb_u32(b, rng_next()); bb_chunk_end(b, sm24); }
+    bb_chunk_end(b, sdta);
+    return 0;
+}
+
+# The pdta sub-chunks go out in a random order (the parser finds them by id) and sdta may follow
+# pdta, so EVERY table is sometimes the last bytes of the input: a read past any one table's end
+# then lands on the guard page. With a fixed order only the last table (shdr) could; a planted
+# one-record overrun of the igen loop went unseen in 6000 inputs until the order was shuffled.
+fn build_structured() {
+    SA_RUN = alloc(8);
+    SA_NPH = 1 + rng_range(64);
+    SA_NPB = 1 + rng_range(1000);
+    SA_NPG = 1 + rng_range(800);
+    SA_NIN = 1 + rng_range(64);
+    SA_NIB = 1 + rng_range(1000);
+    SA_NIG = 1 + rng_range(7000);
+    SA_NSH = 1 + rng_range(96);
+    SA_FRAMES = rng_range(10000);
+    var order = alloc(64);
+    var k = 0;
+    while (k < 8) { store64(order + k * 8, k); k = k + 1; }
+    k = 7;
+    while (k > 0) {
+        var r = rng_range(k + 1);
+        var t = load64(order + k * 8);
+        store64(order + k * 8, load64(order + r * 8));
+        store64(order + r * 8, t);
+        k = k - 1;
+    }
+    var b = bb_new(G_MAX_IN + 4096);
+    var riff = bb_chunk_begin(b, "RIFF");
+    bb_str4(b, "sfbk");
+    if (rng_range(4) == 0) { var junk = bb_chunk_begin(b, "LIST"); bb_str4(b, "INFO"); bb_str4(b, "ifil"); bb_u32(b, 4); bb_u32(b, 0x10002); bb_chunk_end(b, junk); }
+    var sdta_where = rng_range(3);
+    if (sdta_where == 0) { sa_emit_sdta(b); }
+    var pdta = bb_chunk_begin(b, "LIST");
+    bb_str4(b, "pdta");
+    k = 0;
+    while (k < 8) {
+        var w = load64(order + k * 8);
+        # 1 in 16 a table is missing (an error path); JUNK appears 1 in 4.
+        if (w == 7) { if (rng_range(4) == 0) { sa_emit(b, 7); } } else { if (rng_range(16) != 0) { sa_emit(b, w); } }
+        k = k + 1;
+    }
+    bb_chunk_end(b, pdta);
+    if (sdta_where == 1) { sa_emit_sdta(b); }
+    bb_chunk_end(b, riff);
+    return b;
+}
+
+# --- family 4: the 2.2.2 bomb shapes, scaled ---
+# npresets presets whose bag_index alternates 0 / nbags - 1 over nbags pbags whose gen_index
+# alternates 0 / ngens: overlapping preset ranges, every other bag rescanning every generator.
+fn build_bomb(npresets, nbags, ngens) {
+    var b = bb_new(64 + npresets * 38 + nbags * 4 + ngens * 4 + 512);
+    var riff = bb_chunk_begin(b, "RIFF");
+    bb_str4(b, "sfbk");
+    var sdta = bb_chunk_begin(b, "LIST"); bb_str4(b, "sdta");
+    var smpl = bb_chunk_begin(b, "smpl"); bb_u32(b, 0); bb_chunk_end(b, smpl); bb_chunk_end(b, sdta);
+    var pdta = bb_chunk_begin(b, "LIST"); bb_str4(b, "pdta");
+    var phdr = bb_chunk_begin(b, "phdr");
+    var i = 0;
+    while (i <= npresets) {
+        bb_fixed_str(b, "P", 20); bb_u16(b, 0); bb_u16(b, 0);
+        if ((i & 1) == 0) { bb_u16(b, 0); } else { bb_u16(b, nbags - 1); }
+        bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+        i = i + 1;
+    }
+    bb_chunk_end(b, phdr);
+    var pbag = bb_chunk_begin(b, "pbag");
+    i = 0;
+    while (i < nbags) { if ((i & 1) == 0) { bb_u16(b, 0); } else { bb_u16(b, ngens); } bb_u16(b, 0); i = i + 1; }
+    bb_chunk_end(b, pbag);
+    var pgen = bb_chunk_begin(b, "pgen");
+    i = 0;
+    while (i < ngens) { if (rng_range(64) == 0) { bb_u16(b, 41); bb_u16(b, 0); } else { bb_u16(b, 8); bb_u16(b, 1000); } i = i + 1; }
+    bb_chunk_end(b, pgen);
+    var inst = bb_chunk_begin(b, "inst"); bb_fixed_str(b, "I", 20); bb_u16(b, 0); bb_fixed_str(b, "EOI", 20); bb_u16(b, 1); bb_chunk_end(b, inst);
+    var ibag = bb_chunk_begin(b, "ibag"); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 1); bb_u16(b, 0); bb_chunk_end(b, ibag);
+    var igen = bb_chunk_begin(b, "igen"); bb_u16(b, 53); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, 0); bb_chunk_end(b, igen);
+    var shdr = bb_chunk_begin(b, "shdr");
+    bb_fixed_str(b, "S", 20); bb_u32(b, 0); bb_u32(b, 2); bb_u32(b, 0); bb_u32(b, 2); bb_u32(b, 44100); bb_u8(b, 60); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 1);
+    bb_fixed_str(b, "EOS", 20); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u8(b, 0); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 0);
+    bb_chunk_end(b, shdr);
+    bb_chunk_end(b, pdta);
+    bb_chunk_end(b, riff);
+    return b;
+}
+
+# Feed one built input: whole, then (sometimes) truncated at a random length and/or with a few
+# bytes flipped, so declared sizes and counts outrun the bytes actually present.
+fn feed_built(b) {
+    var data = bb_buf(b);
+    var len = bb_len(b);
+    guard_parse(data, len);
+    if (rng_range(2) == 0) { guard_parse(data, rng_range(len + 1)); }
+    if (rng_range(2) == 0) {
+        var k = 1 + rng_range(8);
+        while (k > 0) { store8(data + rng_range(len), rng_byte()); k = k - 1; }
+        guard_parse(data, len);
+    }
+    return 0;
+}
+
+fn fuzz_iter(it) {
+    var mode = rng_range(16);
+    if (mode < 3) {
+        var len = rng_range(257);
+        var buf = alloc(len + 8);
+        var j = 0; while (j < len) { store8(buf + j, rng_byte()); j = j + 1; }
+        guard_parse(buf, len);
+        return 0;
+    }
+    if (mode < 6) {
+        var plen = 12 + rng_range(245);
+        var pbuf = alloc(plen + 8);
+        var q = 0; while (q < plen) { store8(pbuf + q, rng_byte()); q = q + 1; }
+        store8(pbuf, 82); store8(pbuf + 1, 73); store8(pbuf + 2, 70); store8(pbuf + 3, 70);
+        store8(pbuf + 8, 115); store8(pbuf + 9, 102); store8(pbuf + 10, 98); store8(pbuf + 11, 107);
+        if (rng_range(2) == 0) { store8(pbuf + 4, (plen - 8) & 0xFF); store8(pbuf + 5, (plen - 8) >> 8); store8(pbuf + 6, 0); store8(pbuf + 7, 0); }
+        guard_parse(pbuf, plen);
+        return 0;
+    }
+    if (mode < 9) {
+        var vb = build_valid_sf2(rng_range(40) + 1, rng_range(4));
+        var data = bb_buf(vb);
+        var dlen = bb_len(vb);
+        var flips = rng_range(8);
+        var k = 0; while (k < flips) { store8(data + rng_range(dlen), rng_byte()); k = k + 1; }
+        guard_parse(data, dlen);
+        guard_parse(data, rng_range(dlen + 1));
+        return 0;
+    }
+    if (mode < 15) {
+        feed_built(build_structured());
+        return 0;
+    }
+    # 1 in 16: a bomb shape. Kept to <= ~0.7M walk visits so the harness stays fast; the budget
+    # itself is pinned by tests/sf2.tcyr.
+    feed_built(build_bomb(2 + rng_range(8), 64 + rng_range(512), 1 + rng_range(512)));
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    args_init();
+    var force_plain = 0;
+    if (argc() > 1) { if (load8(argv(1)) == 112) { force_plain = 1; } }
+    guard_init(force_plain);
+    if (G_GUARDED == 1) {
+        println("guard_sf2: inputs end at a PROT_NONE page (guarded)");
+    } else {
+        println("guard_sf2: no mmap/mprotect here -- UNGUARDED fallback, inputs in a plain heap buffer");
+    }
+    rng_seed(0x9E3779B97F4A7C15);
+    var iters = 6000;
+    var i = 0;
+    while (i < iters) {
+        # Everything an iteration allocates is dead once it returns, and the bump allocator never
+        # frees: rewind it, or 6000 inputs of up to ~64 KB accumulate. The guard region and the
+        # plain fallback buffer must outlive this, so the plain one is re-made after each rewind.
+        alloc_reset();
+        if (G_GUARDED == 0) { G_PLAIN = alloc(G_MAX_IN); }
+        fuzz_iter(i);
+        i = i + 1;
+    }
+    println("guard_sf2: ok (no crash, no read past any input end)");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

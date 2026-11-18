@@ -86,7 +86,10 @@ conventions, and [`docs/guides/getting-started.md`](docs/guides/getting-started.
 
 ```cyrius
 var f = n_sfz_parse("<region> sample=piano_c4.wav pitch_keycenter=60\n");
-var inst = n_sfz_to_instrument(f, str_from("piano"), f64_from(44100));
+# or n_sfz_parse_n(bytes, len) for a buffer that is not NUL-terminated (a NUL is an ordinary byte)
+var r = n_sfz_to_instrument(f, str_from("piano"), f64_from(44100));   # negative code on failure
+var inst = NSfzInstResult_instrument(r);
+var files = NSfzInstResult_sample_files(r);    # sample names, indexed by each zone's sample_id
 
 var res = sf2_parse(bytes, len);                # negative NIDHI_ERR_IMPORT on failure
 ```

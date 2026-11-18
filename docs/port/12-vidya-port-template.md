@@ -1,5 +1,16 @@
 # 12 — vidya as the end-to-end Rust→Cyrius port template
 
+> ⚠ **Historical brief (2026-07), kept as written. nidhi did not end up like this.** A future port
+> that copies this file should know where nidhi diverged:
+> - **Layout**: nidhi kept **one `.cyr` per Rust module** (`src/*.cyr`, 14 files bundled by
+>   `cyrius distlib` into `dist/nidhi.cyr`), not the single-file layout §1 recommends.
+> - **`lib/` and `cyrius.lock` are committed** in nidhi, not gitignored.
+> - **`rust-old/` was retired in 2.0.4**, not kept frozen in the tree (§6). Before removing it,
+>   nidhi captured what it needed: the oracle's build identity and lockfile
+>   ([`oracle-build-identity.md`](oracle-build-identity.md)), 43 golden assertions against a live
+>   oracle build (`tests/golden.tcyr`), and the full source in git history. Plan that retirement
+>   from the start; a live `rust-old/` cost 377 MB.
+
 Read-only reconnaissance brief for the nidhi port. Everything below is drawn
 from `/home/macro/Repos/vidya`, a **completed** Rust→Cyrius port (Rust v1.5.0 →
 Cyrius v2.0.0, now at v2.7.3). Use it as the concrete template: what the repo
@@ -374,6 +385,9 @@ git = "..."; tag = "2.2.3"; modules = ["dist/vyakarana.cyr"]
 ---
 
 ## 6. `rust-old/` and `LINES_OF_RUST.txt`
+
+> nidhi retired its `rust-old/` in 2.0.4 (see the note at the top of this file). What follows is
+> vidya's convention as of 2026-07.
 
 When the port lands, the **entire Rust crate is moved wholesale into
 `rust-old/`** (per AGNOS first-party-standards convention for ported crates) and

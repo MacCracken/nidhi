@@ -23,34 +23,44 @@ struct NSample {
 
 #must_use
 fn n_sample_from_mono(data, sample_rate) {
+    if (data <= 0) { return 0; }
     var s = alloc(sizeof(NSample));
+    if (s == 0) { return 0; }
+    var slices = vec_new();
+    if (slices == 0) { return 0; }
     NSample_set_data(s, data);
     NSample_set_channels(s, 1);
     NSample_set_sample_rate(s, sample_rate);
     NSample_set_frames(s, vec_len(data));
     NSample_set_name(s, 0);
-    NSample_set_slices(s, vec_new());
+    NSample_set_slices(s, slices);
     return s;
 }
 
 #must_use
 fn n_sample_from_stereo(data, sample_rate) {
+    if (data <= 0) { return 0; }
     var s = alloc(sizeof(NSample));
+    if (s == 0) { return 0; }
+    var slices = vec_new();
+    if (slices == 0) { return 0; }
     NSample_set_data(s, data);
     NSample_set_channels(s, 2);
     NSample_set_sample_rate(s, sample_rate);
     NSample_set_frames(s, vec_len(data) / 2);
     NSample_set_name(s, 0);
-    NSample_set_slices(s, vec_new());
+    NSample_set_slices(s, slices);
     return s;
 }
 
 fn n_sample_with_name(s, name) {
+    if (s <= 0) { return s; }
     NSample_set_name(s, name);
     return s;
 }
 
 fn n_sample_with_slices(s, slices) {
+    if (s <= 0) { return s; }
     NSample_set_slices(s, slices);
     return s;
 }
@@ -390,7 +400,10 @@ struct NSampleBank {
 #must_use
 fn n_sample_bank_new() {
     var b = alloc(sizeof(NSampleBank));
-    NSampleBank_set_samples(b, vec_new());
+    if (b == 0) { return 0; }
+    var samples = vec_new();
+    if (samples == 0) { return 0; }
+    NSampleBank_set_samples(b, samples);
     return b;
 }
 
@@ -404,10 +417,12 @@ fn n_sample_bank_new() {
 # and 0 here rather than trusting every call site to check first.
 #must_use
 fn n_sample_bank_add(bank, sample) {
+    if (bank <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
     if (sample <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
     var samples = NSampleBank_samples(bank);
     var id = vec_len(samples);
-    vec_push(samples, sample);
+    # vec_push_a reports a refused grow; vec_push would exit the host.
+    if (vec_push_a(default_alloc(), samples, sample) < 0) { return NIDHI_ERR_PLAYBACK; }
     return id;
 }
 

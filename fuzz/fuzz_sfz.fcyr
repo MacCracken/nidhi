@@ -8,6 +8,11 @@
 # This is a backstop against super-linear allocation only: inputs this short cannot expose the
 # 124 B-per-byte line overhead 2.2.2 removed (the 8 KB slack absorbs it), so that one is pinned by
 # tests/sfz.tcyr on a 256 KB input instead.
+# 2.3.0: every input goes through n_sfz_parse_n with its exact length, so the NULs the random and
+# splice modes produce are part of the input (a NUL is an ordinary byte, as in the oracle's &str),
+# and through n_sfz_parse(cstr) as well. For an input with no NUL the two must agree. Results may
+# now be negative codes (a refused allocation); the conversions must accept those too.
+# fuzz/guard_sfz.fcyr runs the same families with the input's last byte against a PROT_NONE page.
 # Run: cyrius fuzz   (or: cyrius build fuzz/fuzz_sfz.fcyr build/fuzz_sfz && ./build/fuzz_sfz)
 
 include "lib/hisab.cyr"
@@ -23,6 +28,9 @@ include "src/instrument.cyr"
 include "src/sfz.cyr"
 
 var FUZZ_RNG = 0;
+
+# The fuzzers check only that these calls return; the results are intentionally unused.
+fn f_sink(v) { return 0; }
 fn rng_seed(s) { FUZZ_RNG = s; return 0; }
 fn rng_next() {
     var x = FUZZ_RNG;
@@ -42,19 +50,34 @@ var SFZ_TEMPLATE = 0;
 var FUZZ_FRAGS = 0;
 var FUZZ_NFRAGS = 0;
 
-fn fuzz_one(cstr) {
-    var len = strlen(cstr);
+fn fuzz_fail(msg, a, b) {
+    println(msg);
+    println_int(a);
+    println_int(b);
+    syscall(60, 1);
+    return 0;
+}
+
+# buf holds len bytes (NULs allowed) and one more, a NUL, at buf[len].
+fn fuzz_one(buf, len) {
     var a0 = alloc_used();
-    var f = n_sfz_parse(cstr);
+    var f = n_sfz_parse_n(buf, len);
     var used = alloc_used() - a0;
-    if (used > 96 * len + 8192) {
-        println("fuzz_sfz: parse heap not linear in input");
-        println_int(len);
-        println_int(used);
-        syscall(60, 1);
+    if (used > 96 * len + 8192) { fuzz_fail("fuzz_sfz: parse heap not linear in input", len, used); }
+    f_sink(n_sfz_to_zones(f, f64_from(44100)));
+    f_sink(n_sfz_to_instrument(f, str_from("fuzz"), f64_from(44100)));
+    var g = n_sfz_parse(buf);
+    f_sink(n_sfz_to_instrument(g, str_from("fuzz"), f64_from(44100)));
+    if (strlen(buf) == len) {
+        if (f > 0) {
+            if (vec_len(NSfzFile_regions(f)) != vec_len(NSfzFile_regions(g))) {
+                fuzz_fail("fuzz_sfz: parse and parse_n disagree on a NUL-free input", vec_len(NSfzFile_regions(f)), vec_len(NSfzFile_regions(g)));
+            }
+            if (vec_len(NSfzFile_groups(f)) != vec_len(NSfzFile_groups(g))) {
+                fuzz_fail("fuzz_sfz: parse and parse_n disagree on groups", vec_len(NSfzFile_groups(f)), vec_len(NSfzFile_groups(g)));
+            }
+        }
     }
-    n_sfz_to_zones(f, f64_from(44100));
-    n_sfz_to_instrument(f, str_from("fuzz"), f64_from(44100));
     return 0;
 }
 
@@ -88,14 +111,21 @@ fn fuzz_splice() {
     var len = 0;
     var k = 0;
     while (k < n) {
-        var fr = fuzz_frag(rng_range(FUZZ_NFRAGS));
-        var fl = strlen(fr);
-        memcpy(buf + len, fr, fl);
-        len = len + fl;
+        var pick = rng_range(FUZZ_NFRAGS + 1);
+        if (pick == FUZZ_NFRAGS) {
+            # a NUL, which no cstr fragment can hold
+            store8(buf + len, 0);
+            len = len + 1;
+        } else {
+            var fr = fuzz_frag(pick);
+            var fl = strlen(fr);
+            memcpy(buf + len, fr, fl);
+            len = len + fl;
+        }
         k = k + 1;
     }
     store8(buf + len, 0);
-    fuzz_one(buf);
+    fuzz_one(buf, len);
     return 0;
 }
 
@@ -107,7 +137,7 @@ fn fuzz_iter(tmpl_len) {
         var buf = alloc(len + 1);
         var j = 0; while (j < len) { store8(buf + j, rng_byte()); j = j + 1; }
         store8(buf + len, 0);
-        fuzz_one(buf);
+        fuzz_one(buf, len);
     } else {
         var buf = alloc(tmpl_len + 1);
         var j = 0; while (j < tmpl_len) { store8(buf + j, load8(SFZ_TEMPLATE + j)); j = j + 1; }
@@ -115,7 +145,7 @@ fn fuzz_iter(tmpl_len) {
         var flips = rng_range(12);
         var k = 0; while (k < flips) { store8(buf + rng_range(tmpl_len), rng_byte()); k = k + 1; }
         store8(buf + tmpl_len, 0);
-        fuzz_one(buf);
+        fuzz_one(buf, tmpl_len);
     }
     return 0;
 }

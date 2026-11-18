@@ -1,5 +1,172 @@
 # Changelog
 
+## 2.3.0 — 2026-11-18
+
+The rest of 2.2.2's hardening, from the roadmap's 2.3.0 section.
+- **A refused allocation is now reported, not written through**, in every constructor nidhi owns,
+  and through the SFZ and SF2 importers.
+- **SF2 records are read lazily**, so a file's record tables cost nothing on the heap.
+- **SFZ gains a `(ptr, len)` entry point.**
+- **Two guard-page fuzz harnesses** fault on any read past an input's end.
+
+**No output changes on valid input.** The release differential, all 43 WAV/AIFF fixtures, a
+69,915-line SF2 dump and a 65-file SFZ field dump are byte-identical to 2.2.2.
+
+It is a minor release for three API changes:
+- the new `n_sfz_parse_n`;
+- `n_recorder_write` is now `#must_use`;
+- `n_sfz_to_zones` and `n_sfz_to_instrument` can return a negative code.
+
+**16 suites, 1,059 assertions** (939 in 2.2.2). **A consumer still needs cyrius 6.7.5.**
+
+### Changed — API
+
+- **`n_sfz_parse_n(data, len)`** parses exactly `len` bytes. `n_sfz_parse(cstr)` is now
+  `n_sfz_parse_n(cstr, strlen(cstr))`.
+  - A NUL is an ordinary byte, as in the oracle, whose `char::is_whitespace` does not count it as
+    whitespace. It stays inside tokens, does not split them, and is not trimmed.
+  - In 2.2.2 everything after an embedded NUL was silently dropped.
+- **`n_sfz_to_zones` and `n_sfz_to_instrument` are all-or-nothing.**
+  - They return `NIDHI_ERR_INVALID_PARAMETER` for a 0 or error-code file, and `NIDHI_ERR_IMPORT`
+    when any allocation is refused. They never return a partial instrument, because one missing
+    regions plays wrong notes.
+  - A consumer must check for a negative result. On valid input the result is unchanged.
+  - `n_sfz_parse` likewise returns `NIDHI_ERR_IMPORT` when a region cannot be allocated, where it
+    used to write through 0.
+- **`n_recorder_write` is `#must_use`**: an ignored refusal silently drops that block from the take.
+  It also refuses a 0 or error-code recorder or data vec.
+- **`n_sample_bank_add` and `n_instrument_add_zone` return a negative code.**
+  - `NIDHI_ERR_INVALID_PARAMETER` for a 0 or error-code argument.
+  - `NIDHI_ERR_PLAYBACK` when the vec cannot grow; `vec_push` used to end the host here.
+  - On a refusal `add_zone` leaves the instrument unchanged: the group's counter slot is sized
+    first, and a zone never sits in the list without its sequence counter.
+
+### Fixed — a refused allocation is reported, not written through
+
+On the bump allocator, `alloc` returns 0 when it refuses, and a constructor that kept that 0
+segfaulted at its first field write. That happened inside the host, and before 2.3.0 only after
+the 2.2.2 importers had already reported success
+([architecture 001](docs/architecture/001-the-allocator-never-frees.md)).
+
+| What | 2.3.0 |
+|---|---|
+| `n_sample_from_mono` / `_stereo` | `alloc` and the slices vec checked, so they return 0. A 0 or error-code data vec is no sample. |
+| `n_zone_new`, `n_instrument_new`, `n_sample_bank_new`, `n_recorder_new` | Every allocation checked; they return 0. |
+| `n_adsr_config_new`, `n_adsr_config_default`, `n_adsr_config_from_seconds` | They return 0. `n_amp_envelope_new` of no config is no envelope. |
+| The 24 `n_zone_with_*` and 2 `n_sample_with_*` builders | A 0 or an error code passes straight through, so a chain on a failed constructor stays 0. |
+| `n_zone_with_adsr`, `n_zone_with_filter_envelope` | They return 0 when the config copy is refused. Storing 0 would silently drop the envelope. |
+| `n_recorder_finish` | Builds the fresh buffer and the Sample before the hand-off, so a refusal returns 0 and the recorder keeps the take. |
+| `n_trim_silence`, `n_normalize_peak`/`_rms`, `n_detect_loop_points` | Accept 0. |
+| `n_voice_new`, `n_engine_new` | nidhi's own allocations checked (configs, the filter struct, the bank, the default ADSR). Refusals inside naad's constructors still stop at the null page, by naad's design (its ADR-0006). |
+| Round-robin counters | `n_instrument_ensure_counters` uses a checked grow. `find_zone_rr` plays a re-grouped zone as its first match rather than read past the end. |
+| `n_load_wav*`, `n_stream_reader_read_all` | A refused Sample is `NIDHI_ERR_IMPORT`. |
+
+**`tests/alloc_refused.tcyr` is new** (62 assertions), and uses naad's technique: it replaces the
+stdlib `alloc` with one that refuses a chosen request.
+- **Each constructor** is refused at every one of its allocations in turn: 1 to 7, measured, never
+  assumed. Each must return 0, and each loop has a floor, so it cannot pass by refusing nothing.
+- **An exhausted heap**, the builder pass-through, the grow refusals and the kept take are covered
+  too.
+- **On 2.2.2's code it segfaults at the first refusal.**
+
+**SF2 and SFZ.**
+- **SF2:** the six constructor sites in `sf2.cyr` return `NIDHI_ERR_IMPORT`. Under a lowered
+  `ALLOC_MAX`, 2.2.2 returned "success" with a preset missing, or 32 of 40 zones. A sweep of 129
+  ceilings (0 to 1024 in steps of 8) gave 23 partial results on 2.2.2 and none now: every run is the full result or
+  `NIDHI_ERR_IMPORT`.
+- **SFZ:** refusals in parse, to_zones and to_instrument, including the `default_path` join, the
+  cc entries and the envelope configs, all end in the code above. Before, a refused copy silently
+  dropped `sample=`, and a refused cc entry was written through 0. Three lowered ceilings target
+  `n_zone_new`, `n_instrument_new` and parse alone, and on 2.2.2 the first of them segfaults.
+
+### Performance — SF2 records, SFZ imports
+
+- **SF2 records are read straight from the chunk** by index, for all seven tables. The five
+  record structs and their parsers are gone, and names are built only for the presets and samples
+  returned.
+
+  | SF2 file | Heap, 2.2.2 → 2.3.0 | Time, 2.2.2 → 2.3.0 |
+  |---|---|---|
+  | 42 MB, 10.5M igen records | 251.7 MB → 2,664 B | ~370 → 0.09 ms |
+  | 60,000-zone generator-heavy | 20.4 → 18.9 MB | 38.9 → 33.8 ms |
+  | 4,096 presets + 4,096 generators | ~2.4 MB → < 16 KB | |
+
+  The two generator loops read with unchecked 16-bit loads: their index is below the record count
+  derived from the validated chunk length, and bounds-checked reads made them 2× slower.
+  - **Behaviour change:** a pbag chunk with more records than `VEC_CAP_MAX` now parses, since
+    records are no longer vec elements. The work budget still bounds the walk.
+- **SFZ `to_instrument` skips re-hashing a shared long name.** A pointer-keyed map sits in front of
+  the content map for names of 64 bytes or more:
+
+  | Case | 2.2.2 | 2.3.0 |
+  |---|---|---|
+  | 4 KB `default_path`, 20k regions | 257.2 ms, 13.6 MB | 13.4 ms, 7.3 MB |
+  | Plain imports | unchanged | unchanged |
+
+  Ids and order are identical.
+- **SFZ `to_zones`** merges each region in one stack scratch record instead of a 312-byte heap
+  clone: 20k regions take 12.5 → 6.3 MB.
+- **The Hann window is sized once**, about 8 KB less dead heap per stretch, with identical values.
+- **Benchmarks are flat** (six rotating rounds against 2.2.2): render −0.0 to −1.6 %,
+  `wsola_1sec_2x` +0.1 %. The two filtered rows show −3.0 % and −5.7 % with no render-path change
+  behind them, which is layout, not a gain.
+
+### Added — guard-page fuzzing
+
+- **`fuzz/guard_sf2.fcyr`** and **`fuzz/guard_sfz.fcyr`** put each input against a `PROT_NONE`
+  page, so a read even one byte past the end faults instead of reading the neighbouring heap.
+  - Where `cyr_mmap` returns -1 (the agnos target) each falls back to a plain buffer and says so.
+  - `guard_sfz` feeds `n_sfz_parse_n` the exact length with no NUL terminator. It also makes the
+    input inaccessible before to_zones and to_instrument, so a view left pointing into the input
+    faults.
+  - Each adds structure-aware inputs that the ~600-byte fuzzers could not build: SF2 skeletons up to
+    62 KB with shuffled chunk order and hostile counts, and SFZ tokens up to 200 KB, multi-byte
+    whitespace cut at the buffer end, and a 4 KB `default_path` over 12k regions.
+  - `guard_sf2` runs 6,000 inputs in 4.2 s and `guard_sfz` 7,258 in 3.7 s.
+- **They can fail.** Four out-of-bounds reads were planted in scratch copies of `src/`: two in the
+  SF2 parser (one record past the igen table, a PCM check 8 bytes loose) and two in the SFZ
+  scanner. The guard harnesses fault on all four, and `fuzz_sf2` and `fuzz_sfz` miss all four.
+- `fuzz_sfz` also feeds every input through both entry points and checks they agree on NUL-free
+  input.
+
+### Also
+
+- The README's SFZ example called `n_sfz_to_instrument`'s result an instrument. It is an
+  `NSfzInstResult`, the mistake one test made from 2.0.2 to 2.2.1. It now shows the accessors, the
+  error return and `n_sfz_parse_n`.
+- `docs/port/12-vidya-port-template.md` opens with where nidhi diverged from it: one file per
+  module, `lib/` committed, `rust-old/` retired in 2.0.4. `docs/port/13-hisab-lib-template.md`'s
+  error snippet shows the prefixed form to copy, and its `#inline` advice says what the compiler
+  actually honours.
+- `n_sfz_adsr_new` is now a one-line wrapper over `n_adsr_config_from_seconds`, which checks its
+  own allocation, instead of a second copy of the same arithmetic.
+- The SF2 rewrite removed the five `Sf2*` record structs and eight helpers, and added twelve
+  `sf2_*` field readers. 0 collisions with `lib/`.
+- `programs/smoke.cyr` prints 2.3.0.
+
+### Verified
+
+- **16 suites, 1,059 assertions, 0 failures:**
+
+  | Suite | 2.2.2 | 2.3.0 |
+  |---|---|---|
+  | alloc_refused | — | 62 (new) |
+  | capture | 48 | 55 |
+  | sf2 | 42 | 56 |
+  | sfz | 190 | 227 |
+
+  Every new group fails on 2.2.2's code.
+- **Fuzz 4 of 4.** `distlib --check` passes, there is no `src/` warning, and `cyrius fmt --check`
+  is clean.
+- **Identity:**
+  - the 419-case render, effect, stretch and capture differential: byte-identical to 2.2.2;
+  - all 43 WAV/AIFF fixtures through three loaders: identical;
+  - SF2 (14 files, 69,915 dump lines): 0 differences;
+  - SFZ (65 inputs, with 215 round-robin picks per file): identical.
+- **Consumer floor:** every pin from 6.7.5 to 6.7.18 builds and runs a program on
+  `dist/nidhi.cyr`. It covers a high-pass render with 0 bytes allocated, SFZ through both entry
+  points, a 6-channel WAV and the stream reader. 6.7.4 still fails on sankoch's `loop { }`.
+
 ## 2.2.2 — 2026-11-18
 
 Dependency release plus a P(-1) sweep of every module. naad 2.3.3 → **2.3.5**, hisab 3.4.1 →

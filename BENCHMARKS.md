@@ -20,7 +20,41 @@ Cyrius batches N iterations between one `clock_gettime` pair and reports the per
 average (`bench_batch_start` → tight loop → `bench_batch_stop(N)` → `bench_report`). Criterion
 reports a statistical estimate per call. Compare the **per-operation** figures.
 
-## Cyrius current (toolchain 6.7.18, x86_64 Linux, 2026-11-18, nidhi 2.2.2)
+## Cyrius current (toolchain 6.7.18, x86_64 Linux, 2026-11-18, nidhi 2.3.0)
+
+Same dependencies as 2.2.2. Two trees, six rounds each in a rotating order, minimum per tree.
+2.3.0 changes no render code. Its changes are allocation checks in constructors, lazy SF2 record
+reads, the SFZ entry point, and a once-sized Hann window. So this run is a regression check, not
+a speed claim.
+
+| Benchmark | 2.2.2 | 2.3.0 | change | 2.3.0 faster in |
+|---|---|---|---|---|
+| `voice_count_scaling/1` | 519 ns | 514 ns | -1.0 % | 2 of 6 |
+| `voice_count_scaling/4` | 897 ns | 884 ns | -1.4 % | 3 of 6 |
+| `voice_count_scaling/8` | 1.40 µs | 1.40 µs | -0.1 % | 3 of 6 |
+| `voice_count_scaling/16` | 2.41 µs | 2.37 µs | -1.4 % | 6 of 6 |
+| `voice_count_scaling/32` | 4.44 µs | 4.37 µs | -1.5 % | 6 of 6 |
+| `voice_count_scaling/64` | 8.40 µs | 8.30 µs | -1.2 % | 5 of 6 |
+| `fill_buffer_stereo/1` | 270.85 µs | 270.79 µs | -0.0 % | 4 of 6 |
+| `fill_buffer_stereo/8` | 720.23 µs | 714.38 µs | -0.8 % | 5 of 6 |
+| `fill_buffer_stereo/16` | 1.238 ms | 1.228 ms | -0.8 % | 5 of 6 |
+| `fill_buffer_per_sample/1` | 270.12 µs | 269.91 µs | -0.1 % | 3 of 6 |
+| `fill_buffer_per_sample/8` | 729.65 µs | 717.99 µs | -1.6 % | 5 of 6 |
+| `fill_buffer_per_sample/16` | 1.236 ms | 1.223 ms | -1.1 % | 5 of 6 |
+| `interpolation_cubic` | 35 ns | 34 ns | -2.9 % | 3 of 6 |
+| `interpolation_stereo` | 57 ns | 56 ns | -1.8 % | 3 of 6 |
+| `fill_buffer_stereo_filtered_8v` | 954.19 µs | 900.07 µs | -5.7 % | 6 of 6 |
+| `fill_buffer_stereo_filtered_hp_8v` | 1.061 ms | 1.029 ms | -3.0 % | 6 of 6 |
+| `wsola_1sec_2x` | 232.410 ms | 232.532 ms | +0.1 % | 3 of 6 |
+
+**Flat.** Render rows run 0 to −1.6 %, interpolation is within the timer's resolution, and WSOLA
+is +0.1 %. The two filtered rows are faster in every round, but no code on their path changed, so
+that is layout, and not a result to bank. The same 2.2.2 binary measured up to 7.5 % differently
+here than in the 2.2.2 section below (the filtered row: 954.19 against 887.62 µs), so compare rows
+within one table, never across sessions. The SF2 and SFZ import speed-ups are not on these
+benchmarks; the CHANGELOG has them.
+
+## Cyrius 2.2.2 (toolchain 6.7.18, x86_64 Linux, 2026-11-18)
 
 naad 2.3.5 · shravan 2.12.4 · hisab 3.5.0. Three trees, ten rounds each, run in a rotating order in
 one session. The machine was not quiet: another session's `fuzz_decode` held one core at 100 %

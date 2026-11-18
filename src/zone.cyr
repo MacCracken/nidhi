@@ -85,6 +85,7 @@ struct NZone {
 #must_use
 fn n_zone_new(sample_id) {
     var z = alloc(sizeof(NZone));
+    if (z == 0) { return 0; }
     NZone_set_sample_id(z, sample_id);
     NZone_set_key_lo(z, 0);
     NZone_set_key_hi(z, 127);
@@ -125,30 +126,35 @@ fn n_zone_new(sample_id) {
 # --- Builder setters (mutate in place, return z; clamps replicate Rust exactly) ---
 
 fn n_zone_with_key_range(z, lo, hi) {
+    if (z <= 0) { return z; }
     NZone_set_key_lo(z, lo);
     NZone_set_key_hi(z, hi);
     return z;
 }
 
 fn n_zone_with_vel_range(z, lo, hi) {
+    if (z <= 0) { return z; }
     NZone_set_vel_lo(z, lo);
     NZone_set_vel_hi(z, hi);
     return z;
 }
 
 fn n_zone_with_root_note(z, note) {
+    if (z <= 0) { return z; }
     NZone_set_root_note(z, note);
     return z;
 }
 
 # tune_cents = clamp(cents, -12800, 12800)
 fn n_zone_with_tune(z, cents) {
+    if (z <= 0) { return z; }
     NZone_set_tune_cents(z, f64_min(f64_max(cents, f64_from(0 - 12800)), f64_from(12800)));
     return z;
 }
 
 # volume_db: no clamp here, as in the oracle. The engine clamps where it applies the value.
 fn n_zone_with_volume(z, db) {
+    if (z <= 0) { return z; }
     NZone_set_volume_db(z, db);
     return z;
 }
@@ -165,11 +171,13 @@ fn n_volume_db_clamp(db) {
 
 # pan = clamp(pan, -1.0, 1.0)
 fn n_zone_with_pan(z, pan) {
+    if (z <= 0) { return z; }
     NZone_set_pan(z, f64_min(f64_max(pan, f64_neg(F64_ONE)), F64_ONE));
     return z;
 }
 
 fn n_zone_with_loop(z, mode, start, end) {
+    if (z <= 0) { return z; }
     NZone_set_loop_mode(z, mode);
     NZone_set_loop_start(z, start);
     NZone_set_loop_end(z, end);
@@ -177,22 +185,26 @@ fn n_zone_with_loop(z, mode, start, end) {
 }
 
 fn n_zone_with_crossfade(z, length) {
+    if (z <= 0) { return z; }
     NZone_set_crossfade_length(z, length);
     return z;
 }
 
 fn n_zone_with_sample_offset(z, offset) {
+    if (z <= 0) { return z; }
     NZone_set_sample_offset(z, offset);
     return z;
 }
 
 fn n_zone_with_sample_end(z, end) {
+    if (z <= 0) { return z; }
     NZone_set_sample_end(z, end);
     return z;
 }
 
 # filter_cutoff = max(cutoff, 0); filter_vel_track = clamp(vel_track, 0, 1)
 fn n_zone_with_filter(z, cutoff, vel_track) {
+    if (z <= 0) { return z; }
     NZone_set_filter_cutoff(z, f64_max(cutoff, 0));
     NZone_set_filter_vel_track(z, f64_min(f64_max(vel_track, 0), F64_ONE));
     return z;
@@ -200,26 +212,31 @@ fn n_zone_with_filter(z, cutoff, vel_track) {
 
 # filter_resonance = max(q, 0.1)
 fn n_zone_with_filter_resonance(z, q) {
+    if (z <= 0) { return z; }
     NZone_set_filter_resonance(z, f64_max(q, f64_div(F64_ONE, f64_from(10))));
     return z;
 }
 
 fn n_zone_with_filter_type(z, mode) {
+    if (z <= 0) { return z; }
     NZone_set_filter_type(z, mode);
     return z;
 }
 
 fn n_zone_with_group(z, group) {
+    if (z <= 0) { return z; }
     NZone_set_group(z, group);
     return z;
 }
 
 fn n_zone_with_choke_group(z, group) {
+    if (z <= 0) { return z; }
     NZone_set_choke_group(z, group);
     return z;
 }
 
 fn n_zone_with_velocity_curve(z, curve) {
+    if (z <= 0) { return z; }
     NZone_set_vel_curve(z, curve);
     return z;
 }
@@ -233,21 +250,31 @@ fn n_zone_with_velocity_curve(z, curve) {
 # A negative config is an error code, not a config. Stored as-is it reached note_on's `== 0`
 # default test, failed it, and n_amp_envelope_rearm read the code as a pointer: a segfault on the
 # first note. Every `config <= 0` is stored as 0 (none), so the engine default applies.
+#
+# Returns 0 when the copy cannot be allocated (2.3.0): storing 0 would silently drop the zone's
+# envelope, and a builder chain passes the 0 on, so the caller sees the failure.
 fn n_zone_with_adsr(z, config) {
+    if (z <= 0) { return z; }
     if (config <= 0) { NZone_set_adsr(z, 0); return z; }
-    NZone_set_adsr(z, n_adsr_config_new(
-        NAdsrConfig_attack_samples(config), NAdsrConfig_decay_samples(config),
-        NAdsrConfig_sustain_level(config), NAdsrConfig_release_samples(config)));
+    var copy = n_adsr_config_new(
+      NAdsrConfig_attack_samples(config), NAdsrConfig_decay_samples(config),
+      NAdsrConfig_sustain_level(config), NAdsrConfig_release_samples(config));
+    if (copy == 0) { return 0; }
+    NZone_set_adsr(z, copy);
     return z;
 }
 
 # fileg = Some(config); fileg_depth = clamp(depth_cents, -4800, 4800)
 # COPIES the config, for the same reason as n_zone_with_adsr above.
 fn n_zone_with_filter_envelope(z, config, depth_cents) {
+    if (z <= 0) { return z; }
     if (config > 0) {
-        NZone_set_fileg(z, n_adsr_config_new(
-            NAdsrConfig_attack_samples(config), NAdsrConfig_decay_samples(config),
-            NAdsrConfig_sustain_level(config), NAdsrConfig_release_samples(config)));
+        # 0 when the copy cannot be allocated, as n_zone_with_adsr.
+        var copy = n_adsr_config_new(
+          NAdsrConfig_attack_samples(config), NAdsrConfig_decay_samples(config),
+          NAdsrConfig_sustain_level(config), NAdsrConfig_release_samples(config));
+        if (copy == 0) { return 0; }
+        NZone_set_fileg(z, copy);
     } else {
         # 0, never a negative code: see n_zone_with_adsr.
         NZone_set_fileg(z, 0);
@@ -258,6 +285,7 @@ fn n_zone_with_filter_envelope(z, config, depth_cents) {
 
 # pitchlfo_rate = max(rate, 0); pitchlfo_depth: no clamp
 fn n_zone_with_pitch_lfo(z, rate_hz, depth_cents) {
+    if (z <= 0) { return z; }
     NZone_set_pitchlfo_rate(z, f64_max(rate_hz, 0));
     NZone_set_pitchlfo_depth(z, depth_cents);
     return z;
@@ -265,6 +293,7 @@ fn n_zone_with_pitch_lfo(z, rate_hz, depth_cents) {
 
 # fillfo_rate = max(rate, 0); fillfo_depth: no clamp
 fn n_zone_with_filter_lfo(z, rate_hz, depth_cents) {
+    if (z <= 0) { return z; }
     NZone_set_fillfo_rate(z, f64_max(rate_hz, 0));
     NZone_set_fillfo_depth(z, depth_cents);
     return z;
@@ -272,17 +301,20 @@ fn n_zone_with_filter_lfo(z, rate_hz, depth_cents) {
 
 # fil_keytrack = clamp(amount, 0, 1)
 fn n_zone_with_key_tracking(z, amount) {
+    if (z <= 0) { return z; }
     NZone_set_fil_keytrack(z, f64_min(f64_max(amount, 0), F64_ONE));
     return z;
 }
 
 # time_stretch = clamp(ratio, 0, 4)
 fn n_zone_with_time_stretch(z, ratio) {
+    if (z <= 0) { return z; }
     NZone_set_time_stretch(z, f64_min(f64_max(ratio, 0), f64_from(4)));
     return z;
 }
 
 fn n_zone_with_output_bus(z, bus) {
+    if (z <= 0) { return z; }
     NZone_set_output_bus(z, bus);
     return z;
 }
@@ -292,6 +324,7 @@ fn n_zone_with_output_bus(z, bus) {
 # every note-on the zone matches, whether or not it sounds (n_instrument_find_zone_rr). A
 # seq_position past seq_length never sounds, as in SFZ.
 fn n_zone_with_seq(z, length, position) {
+    if (z <= 0) { return z; }
     var l = length;
     if (l < 1) { l = 1; }
     if (l > 4294967295) { l = 4294967295; }

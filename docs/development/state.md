@@ -5,15 +5,16 @@
 
 ## Version
 
-**2.2.2** — 2026-11-18. Every dependency at its newest tag (naad 2.3.5, hisab 3.5.0, shravan
-2.12.4), still on cyrius 6.7.18, plus a P(-1) sweep of every module:
-- hostile-file crashes and bombs closed in SFZ, SF2 and WAV loading;
-- the port's own 2.1.1 regressions repaired;
-- nine oracle defects fixed by the maintainer's decision (ADRs 0006 to 0012, amendments to 0002
-  and 0004).
+**2.3.0** — 2026-11-18. The rest of 2.2.2's hardening:
+- every constructor nidhi owns, and the SFZ and SF2 importers, report a refused allocation instead
+  of writing through it;
+- SF2 records are read lazily (a 42 MB record table costs 2,664 B, not 251.7 MB);
+- SFZ has a `(ptr, len)` entry point (`n_sfz_parse_n`);
+- two guard-page fuzz harnesses.
 
-Render paths are 8 to 38 % faster.
-Follows 2.2.1 (cyrius 6.7.18; high-pass, band-pass and notch voices no longer allocate), 2.2.0 (cyrius 6.7.9; a consumer needs 6.7.5 or later), 2.1.3 (cyrius 6.6.20: WAV
+No output changes on valid input.
+Follows 2.2.2 (newest dependencies and a P(-1) sweep: hostile-file crashes closed, nine oracle
+defects fixed by decision in ADRs 0006 to 0012, render paths 8 to 38 % faster), 2.2.1 (cyrius 6.7.18; high-pass, band-pass and notch voices no longer allocate), 2.2.0 (cyrius 6.7.9; a consumer needs 6.7.5 or later), 2.1.3 (cyrius 6.6.20: WAV
 loading, time-stretch and the delay effect repaired, render output moved by at most −243 dB, and
 a sample rate naad refuses no longer crashes the engine),
 2.1.2 (cyrius 6.6.3), 2.1.1 (`note_on` allocates nothing, and a reused voice no longer
@@ -41,14 +42,22 @@ inherits the previous note's cutoff), 2.1.0 (zone volume applied, streaming read
 
 ## Tests
 
-- **15 suites / 939 assertions / 0 failures** (`cyrius test`). The build prints no `src/`
+- **16 suites / 1,059 assertions / 0 failures** (`cyrius test`). The build prints no `src/`
   warning, and `cyrius fmt --check` is clean on every source file.
+- **Refused allocations**: `tests/alloc_refused.tcyr` replaces the stdlib `alloc` and refuses each
+  allocation of every nidhi constructor in turn. `tests/sf2.tcyr` and `tests/sfz.tcyr` lower
+  `ALLOC_MAX` to refuse inside the importers.
 - Render path **and `note_on`** asserted allocation-free: `alloc_used()` delta of 0 across 20
   blocks at 8 and 64 voices in every filter mode, and 0 bytes per note_on/note_off pair
   (`tests/engine.tcyr`)
-- **Fuzz**: `fuzz/fuzz_sf2.fcyr` + `fuzz/fuzz_sfz.fcyr` — 2 passed, 0 crashes. `fuzz_sfz` also
-  bounds parse heap per input byte. Neither fuzzer's inputs (≤ ~600 B) can build the 2.2.2 SF2
-  and SFZ bombs, so those are pinned as regression tests in `tests/sf2.tcyr` and `tests/sfz.tcyr`.
+- **Fuzz**: 4 harnesses, 4 passed, 0 crashes.
+  - `fuzz_sf2` and `fuzz_sfz` take small random and mutated inputs. `fuzz_sfz` also bounds parse
+    heap per input byte, and checks that both SFZ entry points agree.
+  - `guard_sf2` and `guard_sfz` (2.3.0) put each input against a `PROT_NONE` page, so a read past
+    its end faults. They also feed structure-aware inputs up to 62 KB (SF2) and 200 KB tokens (SFZ).
+    Each falls back to a plain buffer, and says so, where `cyr_mmap` is unavailable (agnos).
+  - The 2.2.2 SF2 and SFZ bombs are also pinned as regression tests in `tests/sf2.tcyr` and
+    `tests/sfz.tcyr`.
 - **Benchmarks**: `tests/nidhi.bcyr`, 16 measurements reproducing the 7 Rust criterion
   benchmarks. See [`BENCHMARKS.md`](../../BENCHMARKS.md) and
   [`bench-history.csv`](../../bench-history.csv).
@@ -85,8 +94,14 @@ Everything is pinned in [`roadmap.md`](roadmap.md); this is the short list of wh
 could actually hit.
 
 - **A consumer needs cyrius 6.7.5 or later.** sankoch uses `loop { }`, so anything older fails at
-  compile time. Re-measured for 2.2.2 on every pin from 6.7.5 to 6.7.18: the SFZ parser avoids
-  6.7.9's `f64_parse_n` on purpose, or 6.7.5 to 6.7.8 would fail. dhvani pins 6.6.10, so it
+  compile time. Re-measured for 2.3.0 on every pin from 6.7.5 to 6.7.18: the SFZ parser avoids
+  6.7.9's `f64_parse_n` on purpose, or 6.7.5 to 6.7.8 would fail.
+- **`n_sfz_to_zones` and `n_sfz_to_instrument` can return a negative code** since 2.3.0:
+  `NIDHI_ERR_INVALID_PARAMETER` for a 0 or error-code file, `NIDHI_ERR_IMPORT` on a refused
+  allocation. A consumer that took `vec_len` of the result unchecked must check it first.
+- **A refused allocation inside a naad constructor still stops at the null page**, by naad's
+  design (its ADR-0006). nidhi checks only what it allocates itself, so `n_engine_new` can still
+  fault on a heap that runs out while it builds naad's envelopes, LFOs and smoothers. dhvani pins 6.6.10, so it
   moves its toolchain to take 2.2.0 or later.
 - **A consumer on shravan older than 2.9.2 must keep sankoch above shravan** in its own manifest
   once it is on cyrius 6.6.20 or later, or `n_load_wav` refuses every file. dhvani already does.
@@ -110,9 +125,10 @@ could actually hit.
 - **WSOLA amplifies output up to ~588x** where `window_sum` falls under the `1e-6` normalise
   threshold. **Inherited from the oracle**, identical threshold and guard — a port-faithful
   defect, not a port defect. Fixing it is a deliberate divergence needing its own ADR.
-- **80 top-level names skip the `n_`/`N` prefix** (86 until 2.2.2 removed six dead SFZ helpers).
-  0 collisions measured against all 6,478
-  top-level names in `lib/`, so this is forward risk only —
+- **About 80 top-level names skip the `n_`/`N` prefix** (86 until 2.2.2 removed six dead SFZ
+  helpers; 2.3.0 swapped five `Sf2*` structs and eight helpers for twelve `sf2_*` field readers).
+  0 collisions measured (all 306 of nidhi's top-level names against the 9,579 in `lib/`, 2.3.0),
+  so this is forward risk only —
   [ADR 0005](../adr/0005-namespace-prefix-scope.md), and
   [architecture 002](../architecture/002-one-flat-namespace.md) for why it matters at all.
 

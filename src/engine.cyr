@@ -19,6 +19,7 @@ struct NVoiceFilter { active; last_cutoff; filter_l; filter_r; mode; }
 #must_use
 fn nvf_bypass() {
     var vf = alloc(sizeof(NVoiceFilter));
+    if (vf == 0) { return 0; }
     NVoiceFilter_set_active(vf, 0);
     NVoiceFilter_set_last_cutoff(vf, 0);
     NVoiceFilter_set_filter_l(vf, 0);
@@ -223,13 +224,22 @@ fn n_voice_new(sample_rate) {
     NSamplerVoice_set_note(v, 0);
     NSamplerVoice_set_age(v, 0);
     NSamplerVoice_set_forward(v, 1);
-    NSamplerVoice_set_amp_env(v, n_amp_envelope_new(n_adsr_config_default(), sample_rate));
+    # nidhi's own allocations here are checked (2.3.0): the two configs and the filter struct. The
+    # envelopes, LFOs and smoother are naad objects, and a refusal inside a naad constructor stops
+    # at the null page by naad's own design (its ADR-0006), so there is nothing here to check.
+    var aenv = n_amp_envelope_new(n_adsr_config_default(), sample_rate);
+    if (aenv <= 0) { return 0; }
+    NSamplerVoice_set_amp_env(v, aenv);
     # Persistent per-voice filter envelope and LFOs, re-armed in note_on rather than rebuilt.
     # `filter_env_depth` 0 is what disables the filter envelope, not a null pointer.
-    NSamplerVoice_set_filter_env(v, n_amp_envelope_new(n_adsr_config_default(), sample_rate));
+    var fenv = n_amp_envelope_new(n_adsr_config_default(), sample_rate);
+    if (fenv <= 0) { return 0; }
+    NSamplerVoice_set_filter_env(v, fenv);
     NSamplerVoice_set_filter_env_depth(v, 0);
     NSamplerVoice_set_base_cutoff(v, 0);
-    NSamplerVoice_set_filter(v, nvf_bypass());
+    var vfilt = nvf_bypass();
+    if (vfilt == 0) { return 0; }
+    NSamplerVoice_set_filter(v, vfilt);
     NSamplerVoice_set_pitch_bend(v, 0);
     NSamplerVoice_set_pressure(v, 0);
     NSamplerVoice_set_brightness(v, F64_HALF);
@@ -291,13 +301,17 @@ fn n_engine_new(max_voices, sample_rate) {
     }
     NSamplerEngine_set_voices(e, voices);
     NSamplerEngine_set_instrument(e, 0);
-    NSamplerEngine_set_bank(e, n_sample_bank_new());
+    var ebank = n_sample_bank_new();
+    if (ebank == 0) { return 0; }
+    NSamplerEngine_set_bank(e, ebank);
     NSamplerEngine_set_sample_rate(e, sample_rate);
     # Saturate to u32 range before f64_to, as n_adsr_config_from_seconds does: a release is a
     # sample count naad holds, not an i64, and a huge one must stay huge rather than click.
     var rcap = f64_from(4294967295);
     var rel = f64_to(f64_min(f64_max(f64_mul(sample_rate, f64_div(F64_ONE, f64_from(100))), F64_ONE), rcap));
-    NSamplerEngine_set_default_adsr(e, n_adsr_config_new(0, 0, F64_ONE, rel));
+    var dadsr = n_adsr_config_new(0, 0, F64_ONE, rel);
+    if (dadsr == 0) { return 0; }
+    NSamplerEngine_set_default_adsr(e, dadsr);
     NSamplerEngine_set_pitch_bend_range(e, f64_from(2));
 
     # Per-engine render scratch, allocated ONCE. These four slots used to be alloc(16)

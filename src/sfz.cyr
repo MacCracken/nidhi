@@ -452,8 +452,13 @@ struct NSfzRegion {
 struct NSfzCC { param; cc; depth; }
 
 #must_use
+#
+# -> the region, or 0 when an allocation is refused (it used to write the defaults through 0).
 fn n_sfz_region_new() {
     var r = alloc(sizeof(NSfzRegion));
+    if (r == 0) { return 0; }
+    var cc = vec_new();
+    if (cc == 0) { return 0; }
     var f100 = f64_from(100);
     NSfzRegion_set_sample(r, 0);
     NSfzRegion_set_lokey(r, 0);
@@ -494,8 +499,19 @@ fn n_sfz_region_new() {
     NSfzRegion_set_fillfo_depth(r, 0);
     NSfzRegion_set_fil_keytrack(r, 0);
     NSfzRegion_set_output(r, 0);
-    NSfzRegion_set_cc_modulations(r, vec_new());
+    NSfzRegion_set_cc_modulations(r, cc);
     return r;
+}
+
+# Store an owned copy of `value` as the region's sample (which 0), loop_mode (1) or fil_type (2).
+# -> 0, or NIDHI_ERR_IMPORT with the field unchanged when the copy is refused.
+fn n_sfz_set_str(r, which, value) {
+    var c = n_sfz_own(str_data(value), str_len(value));
+    if (c == 0) { return NIDHI_ERR_IMPORT; }
+    if (which == 0) { NSfzRegion_set_sample(r, c); }
+    if (which == 1) { NSfzRegion_set_loop_mode(r, c); }
+    if (which == 2) { NSfzRegion_set_fil_type(r, c); }
+    return 0;
 }
 
 # apply one opcode (key, value are Str). Numeric parse failure leaves the field unchanged.
@@ -504,10 +520,14 @@ fn n_sfz_region_new() {
 # The numeric scratch is a stack slot; it was an alloc(8) per opcode, never reclaimed.
 # loop_start / loop_end / offset / end parse as usize, as the oracle does (sfz.rs:265-272,
 # 345-354), not u32: a value in (u32::MAX, u64::MAX] is accepted there and was refused here.
+#
+# -> 0, or NIDHI_ERR_IMPORT when the copy of a string value, or a cc entry, cannot be allocated.
+# A refused copy used to store 0 -- an opcode silently dropped, so `sample=` vanished and the
+# region was skipped -- and a refused cc entry was written through 0.
 fn n_sfz_apply_opcode(r, key, value) {
     var ob[8];
     var o = &ob;
-    if (str_eq_cstr(key, "sample") == 1) { NSfzRegion_set_sample(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
+    if (str_eq_cstr(key, "sample") == 1) { return n_sfz_set_str(r, 0, value); }
     if (str_eq_cstr(key, "lokey") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_lokey(r, n); } return 0; }
     if (str_eq_cstr(key, "hikey") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_hikey(r, n); } return 0; }
     if (str_eq_cstr(key, "key") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_key(r, n); } return 0; }
@@ -517,8 +537,8 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "tune") == 1) { if (sfz_i32(value, o) == 1) { NSfzRegion_set_tune(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "volume") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_volume(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "pan") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pan(r, f64_min(f64_max(load64(o), f64_neg(f64_from(100))), f64_from(100))); } return 0; }
-    if (str_eq_cstr(key, "loop_mode") == 1) { NSfzRegion_set_loop_mode(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
-    if (str_eq_cstr(key, "loopmode") == 1) { NSfzRegion_set_loop_mode(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
+    if (str_eq_cstr(key, "loop_mode") == 1) { return n_sfz_set_str(r, 1, value); }
+    if (str_eq_cstr(key, "loopmode") == 1) { return n_sfz_set_str(r, 1, value); }
     if (str_eq_cstr(key, "loop_start") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "loopstart") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "loop_end") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
@@ -545,8 +565,8 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "end") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_end(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fil_resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
-    if (str_eq_cstr(key, "fil_type") == 1) { NSfzRegion_set_fil_type(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
-    if (str_eq_cstr(key, "filtype") == 1) { NSfzRegion_set_fil_type(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
+    if (str_eq_cstr(key, "fil_type") == 1) { return n_sfz_set_str(r, 2, value); }
+    if (str_eq_cstr(key, "filtype") == 1) { return n_sfz_set_str(r, 2, value); }
     if (str_eq_cstr(key, "pitchlfo_freq") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pitchlfo_freq(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "pitchlfo_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pitchlfo_depth(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "fillfo_freq") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fillfo_freq(r, f64_max(load64(o), 0)); } return 0; }
@@ -564,10 +584,13 @@ fn n_sfz_apply_opcode(r, key, value) {
         if (sfz_u8(&cs, &cc_out) == 1) {
             if (sfz_f64(value, o) == 1) {
                 var m = alloc(sizeof(NSfzCC));
-                NSfzCC_set_param(m, n_sfz_own(str_data(key), pos));
+                if (m == 0) { return NIDHI_ERR_IMPORT; }
+                var param = n_sfz_own(str_data(key), pos);
+                if (param == 0) { return NIDHI_ERR_IMPORT; }
+                NSfzCC_set_param(m, param);
                 NSfzCC_set_cc(m, load64(&cc_out));
                 NSfzCC_set_depth(m, load64(o));
-                vec_push(NSfzRegion_cc_modulations(r), m);
+                if (vec_push_a(default_alloc(), NSfzRegion_cc_modulations(r), m) < 0) { return NIDHI_ERR_IMPORT; }
             }
         }
         return 0;
@@ -652,7 +675,15 @@ fn n_sfz_parse_header(token) {
     return SFZ_HDR_NONE;
 }
 
-# parse(input_cstr) -> NSfzFile pointer (never fails).
+# parse_n(data, len) -> NSfzFile pointer, or a negative code: NIDHI_ERR_INVALID_PARAMETER for a
+# negative len (or a 0 pointer with len > 0), NIDHI_ERR_IMPORT when an allocation is refused. It
+# used to be "infallible", and wrote the parse through 0 when alloc refused a region. Malformed
+# text is still never an error: unknown opcodes and bad values are dropped, as in the oracle.
+#
+# Reads exactly data[0..len) and never past it (fuzz/guard_sfz.fcyr runs every input against a
+# PROT_NONE page). A NUL is an ordinary byte, as in the oracle's &str: it is not White_Space, so it
+# neither splits a token nor trims from a line. n_sfz_parse(cstr) used to be the only entry, and
+# it stopped at the first NUL, silently dropping every region after one.
 #
 # Lines, tokens, keys and values are SPANS over the input, carried in stack Str headers; only
 # what the file keeps is allocated (n_sfz_apply_opcode copies it). This loop used to build a vec
@@ -662,21 +693,26 @@ fn n_sfz_parse_header(token) {
 # and segfaulted once alloc returned 0. Now 1,104 bytes for that input (the empty file), and a
 # realistic 1 MB instrument went from 13,875,928 to 6,331,968: heap tracks what is kept.
 #
-# Line handling follows the oracle (except that input ends at the first NUL -- this is a cstr
-# API, and the oracle's &str could carry one): split on '\n' (`str::lines` also drops a trailing
+# Line handling follows the oracle: split on '\n' (`str::lines` also drops a trailing
 # '\r', which trim removes anyway), `str::trim` with Unicode White_Space, `//` comments,
 # `trim_start_matches("#include")` -- which strips EVERY repeat of the prefix -- then `trim`,
 # then `trim_matches('"')`, which strips every leading and trailing quote, not one of each.
 #must_use
-fn n_sfz_parse(input_cstr) {
-    var data = input_cstr;
-    var len = strlen(input_cstr);
+fn n_sfz_parse_n(data, len) {
+    if (len < 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    if (data == 0) { if (len > 0) { return NIDHI_ERR_INVALID_PARAMETER; } }
+    var al = default_alloc();
     var global = n_sfz_region_new();
     var groups = vec_new();
     var regions = vec_new();
     var group_indices = vec_new();
     var default_path = 0;
     var includes = vec_new();
+    if (global == 0) { return NIDHI_ERR_IMPORT; }
+    if (groups == 0) { return NIDHI_ERR_IMPORT; }
+    if (regions == 0) { return NIDHI_ERR_IMPORT; }
+    if (group_indices == 0) { return NIDHI_ERR_IMPORT; }
+    if (includes == 0) { return NIDHI_ERR_IMPORT; }
     var current_header = SFZ_HDR_NONE;
     var current_group_idx = 0 - 1;
     var tk[16];
@@ -737,7 +773,11 @@ fn n_sfz_parse(input_cstr) {
                         if (load8(data + ib - 1) != 34) { break; }
                         ib = ib - 1;
                     }
-                    if (ib > ia) { vec_push(includes, n_sfz_own(data + ia, ib - ia)); }
+                    if (ib > ia) {
+                        var inc = n_sfz_own(data + ia, ib - ia);
+                        if (inc == 0) { return NIDHI_ERR_IMPORT; }
+                        if (vec_push_a(al, includes, inc) < 0) { return NIDHI_ERR_IMPORT; }
+                    }
                 }
             }
         }
@@ -761,12 +801,16 @@ fn n_sfz_parse(input_cstr) {
                     if (hk != SFZ_HDR_NONE) {
                         current_header = hk;
                         if (hk == SFZ_HDR_GROUP) {
-                            vec_push(groups, n_sfz_region_new());
+                            var ng = n_sfz_region_new();
+                            if (ng == 0) { return NIDHI_ERR_IMPORT; }
+                            if (vec_push_a(al, groups, ng) < 0) { return NIDHI_ERR_IMPORT; }
                             current_group_idx = vec_len(groups) - 1;
                         }
                         if (hk == SFZ_HDR_REGION) {
-                            vec_push(regions, n_sfz_region_new());
-                            vec_push(group_indices, current_group_idx);
+                            var nr = n_sfz_region_new();
+                            if (nr == 0) { return NIDHI_ERR_IMPORT; }
+                            if (vec_push_a(al, group_indices, current_group_idx) < 0) { return NIDHI_ERR_IMPORT; }
+                            if (vec_push_a(al, regions, nr) < 0) { return NIDHI_ERR_IMPORT; }
                         }
                     } else {
                         var eq = str_index_of(&tk, 61);
@@ -777,21 +821,24 @@ fn n_sfz_parse(input_cstr) {
                                 store64(&kk + 8, eq);
                                 store64(&vv, tp + eq + 1);
                                 store64(&vv + 8, tl - eq - 1);
+                                var arc = 0;
                                 if (current_header == SFZ_HDR_CONTROL) {
                                     if (str_eq_cstr(&kk, "default_path") == 1) {
                                         if (tl - eq - 1 <= N_SFZ_PATH_MAX) {
                                             default_path = n_sfz_own(tp + eq + 1, tl - eq - 1);
+                                            if (default_path == 0) { return NIDHI_ERR_IMPORT; }
                                         }
                                     }
                                 } elif (current_header == SFZ_HDR_GLOBAL) {
-                                    n_sfz_apply_opcode(global, &kk, &vv);
+                                    arc = n_sfz_apply_opcode(global, &kk, &vv);
                                 } elif (current_header == SFZ_HDR_GROUP) {
-                                    n_sfz_apply_opcode(vec_get(groups, vec_len(groups) - 1), &kk, &vv);
+                                    arc = n_sfz_apply_opcode(vec_get(groups, vec_len(groups) - 1), &kk, &vv);
                                 } elif (current_header == SFZ_HDR_REGION) {
-                                    n_sfz_apply_opcode(vec_get(regions, vec_len(regions) - 1), &kk, &vv);
+                                    arc = n_sfz_apply_opcode(vec_get(regions, vec_len(regions) - 1), &kk, &vv);
                                 } elif (current_header == SFZ_HDR_NONE) {
-                                    n_sfz_apply_opcode(global, &kk, &vv);
+                                    arc = n_sfz_apply_opcode(global, &kk, &vv);
                                 }
+                                if (arc < 0) { return arc; }
                             }
                         }
                     }
@@ -802,6 +849,7 @@ fn n_sfz_parse(input_cstr) {
     }
 
     var f = alloc(sizeof(NSfzFile));
+    if (f == 0) { return NIDHI_ERR_IMPORT; }
     NSfzFile_set_global(f, global);
     NSfzFile_set_groups(f, groups);
     NSfzFile_set_regions(f, regions);
@@ -809,6 +857,15 @@ fn n_sfz_parse(input_cstr) {
     NSfzFile_set_default_path(f, default_path);
     NSfzFile_set_includes(f, includes);
     return f;
+}
+
+# parse(input_cstr) -> n_sfz_parse_n over the bytes up to the first NUL. Kept for callers with a
+# C string; anything holding a buffer and a length should call n_sfz_parse_n, which reads an
+# embedded NUL as the byte it is.
+#must_use
+fn n_sfz_parse(input_cstr) {
+    if (input_cstr == 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    return n_sfz_parse_n(input_cstr, strlen(input_cstr));
 }
 
 # --- mapping helpers ---
@@ -840,7 +897,21 @@ fn n_sfz_map_fil_veltrack(cents) {
 #derive(accessors)
 struct NSfzZoneFile { zone; filename; }
 
-# to_zones(sfzfile, sample_rate f64 bits) -> vec of NSfzZoneFile.
+# n_sfz_adsr_new(attack, decay, sustain_pct, release, sample_rate) -> a fresh NAdsrConfig, or 0
+# when the allocation is refused. SFZ's sustain arrives as 0..100 and is divided here, as to_zones
+# always did. Since 2.3.0 n_adsr_config_new checks its own allocation, so this is from_seconds
+# itself; tests/sfz.tcyr pins the two bit for bit, NaN, infinities and the u32 ceiling included.
+#must_use
+fn n_sfz_adsr_new(attack, decay, sustain_pct, release, sample_rate) {
+    return n_adsr_config_from_seconds(attack, decay, f64_div(sustain_pct, f64_from(100)), release, sample_rate);
+}
+
+# to_zones(sfzfile, sample_rate f64 bits) -> vec of NSfzZoneFile, or a negative code:
+# NIDHI_ERR_INVALID_PARAMETER for a 0 or error-code file, NIDHI_ERR_IMPORT when ANY allocation is
+# refused. All or nothing: a refusal never returns a partial instrument, because one that silently
+# lacks some regions plays wrong notes, where an error lets the host say so. That includes the
+# joined default_path name, which 2.2.2 answered by dropping the region. n_zone_new and every
+# builder pass 0 through, so one test after the chain covers them all.
 #
 # The default_path join is memoized per distinct sample name (content-keyed). It used to be one
 # fresh |default_path| + |sample| allocation PER REGION, so heap was |default_path| x regions --
@@ -848,21 +919,41 @@ struct NSfzZoneFile { zone; filename; }
 # the join shared, a region whose sample repeats costs nothing extra, and a distinct sample costs
 # at most PATH_MAX more than the `sample=` token that introduced it. Regions that share a name now
 # share one filename Str, which nothing in nidhi mutates.
+#
+# The merged (region <- group <- global) record is a stack scratch reused for every region. It was
+# a heap clone per region, 312 never-reclaimed bytes each, and nothing keeps it: the zone copies
+# its numbers, and the strings it points at belong to the parsed file.
 #must_use
 fn n_sfz_to_zones(f, sample_rate) {
+    if (f <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    var al = default_alloc();
     var out = vec_new();
+    if (out == 0) { return NIDHI_ERR_IMPORT; }
     var regions = NSfzFile_regions(f);
     var groups = NSfzFile_groups(f);
     var group_indices = NSfzFile_group_indices(f);
     var global = NSfzFile_global(f);
     var default_path = NSfzFile_default_path(f);
     var joined = 0;
-    if (default_path != 0) { joined = map_new_str(); }
+    if (default_path != 0) {
+        joined = map_new_str();
+        if (joined == 0) { return NIDHI_ERR_IMPORT; }
+    }
+    var mbuf[512];
+    var merged = &mbuf;
+    var nw = sizeof(NSfzRegion) / 8;
+    if (nw * 8 > 512) { return NIDHI_ERR_IMPORT; }
     var nreg = vec_len(regions);
     var i = 0;
     while (i < nreg) {
-        # merged = clone of region (shallow copy of the struct fields is enough here)
-        var merged = n_sfz_clone_region(vec_get(regions, i));
+        # Word copy: the stdlib memcpy moves a byte per iteration, and copying the 312-byte
+        # record that way made to_zones 1.6x slower than the heap clone it replaced.
+        var src = vec_get(regions, i);
+        var w = 0;
+        while (w < nw) {
+            store64(merged + w * 8, load64(src + w * 8));
+            w = w + 1;
+        }
         var gi = vec_get(group_indices, i);
         if (gi >= 0) {
             if (gi < vec_len(groups)) { n_sfz_inherit_from(merged, vec_get(groups, gi)); }
@@ -884,14 +975,14 @@ fn n_sfz_to_zones(f, sample_rate) {
                     filename = map_get_or(joined, samp, 0);
                     if (filename == 0) {
                         filename = n_sfz_join(default_path, samp);
-                        if (filename != 0) { map_set(joined, samp, filename); }
+                        if (filename == 0) { return NIDHI_ERR_IMPORT; }
+                        if (map_set_a(al, joined, samp, filename) < 0) { return NIDHI_ERR_IMPORT; }
                     }
                 }
             }
         }
         if (filename == 0) {
-            # no sample -> skip region. Also reached when the joined name could not be
-            # allocated: dropping the region beats handing back a null filename.
+            # no sample -> skip region
         } else {
             # tune_cents = tune + transpose * 100
             var tune_cents = f64_add(f64_from(NSfzRegion_tune(merged)), f64_mul(f64_from(NSfzRegion_transpose(merged)), f64_from(100)));
@@ -913,8 +1004,10 @@ fn n_sfz_to_zones(f, sample_rate) {
             if (f64_gt(NSfzRegion_resonance(merged), 0) == 1) { zone = n_zone_with_filter_resonance(zone, NSfzRegion_resonance(merged)); }
             if (NSfzRegion_offset(merged) > 0) { zone = n_zone_with_sample_offset(zone, NSfzRegion_offset(merged)); }
             if (NSfzRegion_end(merged) > 0) { zone = n_zone_with_sample_end(zone, NSfzRegion_end(merged)); }
+            if (zone <= 0) { return NIDHI_ERR_IMPORT; }
 
-            # ampeg
+            # ampeg. The zone takes the fresh config as its own -- what n_zone_with_adsr's copy
+            # gives it -- without that builder's unchecked second allocation.
             var f100 = f64_from(100);
             var has_ampeg = 0;
             if (NSfzRegion_ampeg_attack(merged) != 0) { has_ampeg = 1; }
@@ -922,10 +1015,12 @@ fn n_sfz_to_zones(f, sample_rate) {
             if (NSfzRegion_ampeg_sustain(merged) != f100) { has_ampeg = 1; }
             if (NSfzRegion_ampeg_release(merged) != 0) { has_ampeg = 1; }
             if (has_ampeg == 1) {
-                var adsr = n_adsr_config_from_seconds(NSfzRegion_ampeg_attack(merged), NSfzRegion_ampeg_decay(merged), f64_div(NSfzRegion_ampeg_sustain(merged), f100), NSfzRegion_ampeg_release(merged), sample_rate);
-                zone = n_zone_with_adsr(zone, adsr);
+                var adsr = n_sfz_adsr_new(NSfzRegion_ampeg_attack(merged), NSfzRegion_ampeg_decay(merged), NSfzRegion_ampeg_sustain(merged), NSfzRegion_ampeg_release(merged), sample_rate);
+                if (adsr == 0) { return NIDHI_ERR_IMPORT; }
+                NZone_set_adsr(zone, adsr);
             }
-            # fileg
+            # fileg: the builder with a 0 config clamps the depth and allocates nothing; the
+            # checked config then goes in, as for ampeg.
             var has_fileg = 0;
             if (NSfzRegion_fileg_depth(merged) != 0) { has_fileg = 1; }
             if (NSfzRegion_fileg_attack(merged) != 0) { has_fileg = 1; }
@@ -933,8 +1028,10 @@ fn n_sfz_to_zones(f, sample_rate) {
             if (NSfzRegion_fileg_sustain(merged) != f100) { has_fileg = 1; }
             if (NSfzRegion_fileg_release(merged) != 0) { has_fileg = 1; }
             if (has_fileg == 1) {
-                var fileg = n_adsr_config_from_seconds(NSfzRegion_fileg_attack(merged), NSfzRegion_fileg_decay(merged), f64_div(NSfzRegion_fileg_sustain(merged), f100), NSfzRegion_fileg_release(merged), sample_rate);
-                zone = n_zone_with_filter_envelope(zone, fileg, NSfzRegion_fileg_depth(merged));
+                var fileg = n_sfz_adsr_new(NSfzRegion_fileg_attack(merged), NSfzRegion_fileg_decay(merged), NSfzRegion_fileg_sustain(merged), NSfzRegion_fileg_release(merged), sample_rate);
+                if (fileg == 0) { return NIDHI_ERR_IMPORT; }
+                zone = n_zone_with_filter_envelope(zone, 0, NSfzRegion_fileg_depth(merged));
+                NZone_set_fileg(zone, fileg);
             }
             # LFOs
             if (f64_gt(NSfzRegion_pitchlfo_freq(merged), 0) == 1) { if (NSfzRegion_pitchlfo_depth(merged) != 0) { zone = n_zone_with_pitch_lfo(zone, NSfzRegion_pitchlfo_freq(merged), NSfzRegion_pitchlfo_depth(merged)); } }
@@ -943,9 +1040,10 @@ fn n_sfz_to_zones(f, sample_rate) {
             if (NSfzRegion_output(merged) > 0) { zone = n_zone_with_output_bus(zone, NSfzRegion_output(merged)); }
 
             var pair = alloc(sizeof(NSfzZoneFile));
+            if (pair == 0) { return NIDHI_ERR_IMPORT; }
             NSfzZoneFile_set_zone(pair, zone);
             NSfzZoneFile_set_filename(pair, filename);
-            vec_push(out, pair);
+            if (vec_push_a(al, out, pair) < 0) { return NIDHI_ERR_IMPORT; }
         }
         i = i + 1;
     }
@@ -966,40 +1064,75 @@ fn n_sfz_clone_region(src) {
     return r;
 }
 
+# Filenames at least this long go through to_instrument's pointer map before the content hash.
+var N_SFZ_PTR_MEMO_MIN = 64;
+
 # a (instrument, sample_files) result
 #derive(accessors)
 struct NSfzInstResult { instrument; sample_files; }
 
 # to_instrument(name, sample_rate) -> NSfzInstResult. Dedups filenames -> sequential SampleIds.
 #
+# -> the result, or a negative code: NIDHI_ERR_INVALID_PARAMETER for a 0 or error-code file, or
+# NIDHI_ERR_IMPORT when any allocation is refused -- n_instrument_new returning 0, a refused
+# add_zone (it now answers NIDHI_ERR_PLAYBACK rather than exiting), or to_zones' own refusal,
+# which is passed on. All or nothing, as for to_zones: never a partly built instrument.
+#
 # Dedup is a content-keyed hashmap lookup, in first-seen order exactly as the oracle's
 # `sample_files.iter().position(..)` scan assigns ids. That scan was ported literally, and it is
 # O(regions x files): 40,000 regions with distinct names (a 1.16 MB file) took 14,346 ms here,
 # 37 ms through the map. The stdlib map's hash is seeded per process, so a file cannot be
 # crafted to collide its way back to quadratic.
+#
+# In front of it sits a pointer-keyed map. to_zones hands every region that shares a joined
+# default_path name, or inherits one sample from <group>/<global>, the SAME Str, and hashing that
+# Str's content per region was the cost left: 20,000 regions under a 4,096-byte default_path spent
+# 260 ms re-hashing one 4 KB name; now 13 ms. A pointer seen before has its id already; only a new
+# pointer pays the content hash. Same content under two pointers still meets in the content map,
+# so ids and their order are unchanged. Names under N_SFZ_PTR_MEMO_MIN bytes skip the pointer map:
+# hashing them costs about what the u64 probe does, and every region's own `sample=` copy is a
+# distinct pointer, so there an ungated map only missed (20,000 plain regions: 13.5 -> 16.9 ms).
 #must_use
 fn n_sfz_to_instrument(f, name, sample_rate) {
-    var pairs = n_sfz_to_zones(f, sample_rate);
+    if (f <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    var al = default_alloc();
     var inst = n_instrument_new(name);
+    if (inst <= 0) { return NIDHI_ERR_IMPORT; }
+    var pairs = n_sfz_to_zones(f, sample_rate);
+    if (pairs <= 0) { return pairs; }
     var sample_files = vec_new();
     var seen = map_new_str();
+    var by_ptr = map_u64_new();
+    if (sample_files == 0) { return NIDHI_ERR_IMPORT; }
+    if (seen == 0) { return NIDHI_ERR_IMPORT; }
+    if (by_ptr == 0) { return NIDHI_ERR_IMPORT; }
     var np = vec_len(pairs);
     var i = 0;
     while (i < np) {
         var pair = vec_get(pairs, i);
         var zone = NSfzZoneFile_zone(pair);
         var filename = NSfzZoneFile_filename(pair);
-        var idx = map_get_or(seen, filename, 0 - 1);
+        var long_name = 0;
+        if (str_len(filename) >= N_SFZ_PTR_MEMO_MIN) { long_name = 1; }
+        var idx = 0 - 1;
+        if (long_name == 1) { idx = map_u64_get_or(by_ptr, filename, 0 - 1); }
         if (idx < 0) {
-            vec_push(sample_files, filename);
-            idx = vec_len(sample_files) - 1;
-            map_set(seen, filename, idx);
+            idx = map_get_or(seen, filename, 0 - 1);
+            if (idx < 0) {
+                if (vec_push_a(al, sample_files, filename) < 0) { return NIDHI_ERR_IMPORT; }
+                idx = vec_len(sample_files) - 1;
+                if (map_set_a(al, seen, filename, idx) < 0) { return NIDHI_ERR_IMPORT; }
+            }
+            if (long_name == 1) {
+                if (map_u64_set_a(al, by_ptr, filename, idx) < 0) { return NIDHI_ERR_IMPORT; }
+            }
         }
         NZone_set_sample_id(zone, idx);
-        n_instrument_add_zone(inst, zone);
+        if (n_instrument_add_zone(inst, zone) < 0) { return NIDHI_ERR_IMPORT; }
         i = i + 1;
     }
     var res = alloc(sizeof(NSfzInstResult));
+    if (res == 0) { return NIDHI_ERR_IMPORT; }
     NSfzInstResult_set_instrument(res, inst);
     NSfzInstResult_set_sample_files(res, sample_files);
     return res;

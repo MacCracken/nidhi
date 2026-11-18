@@ -1,0 +1,358 @@
+# guard_sfz.fcyr -- guard-page fuzz for the SFZ parser.
+# Invariant: n_sfz_parse_n(p, len) reads exactly p[0..len), and nothing the parsed file keeps
+# points into p. Each input is copied so that its LAST byte sits immediately before a PROT_NONE
+# page and handed over with its exact length, NOT NUL-terminated, so a scan that runs one byte
+# past the end faults instead of finding a convenient terminator. Each input then runs a second
+# time STARTING immediately after a PROT_NONE page, which catches a read before the first byte. Once
+# parse returns, the whole input area is made PROT_NONE and to_zones / to_instrument run on the
+# result: a view into the input left anywhere in the file faults there.
+#
+# fuzz_sfz.fcyr never saw either class: its inputs are NUL-terminated heap buffers, and the bytes
+# around a heap buffer are always mapped. Measured with two planted one-byte over-reads in a
+# scratch copy of src/ -- n_sfz_ws_at loading p[1] before its `n < 2` test, and a peek at the
+# byte after every token -- fuzz_sfz passed both (exit 0) and this harness faulted on both
+# (SIGSEGV, exit 139), while the real src/ runs clean.
+#
+# Families: fuzz_sfz's three (random bytes with NULs, byte-flipped template, fragment splices),
+# every prefix of four seed files (so each byte position of each is, once, the last byte before
+# the guard), and larger structure-aware inputs: header soup with every separator class, long
+# tokens that end at the guard, a 4 KB default_path over thousands of regions, and multi-byte
+# White_Space cut off at each of its bytes.
+#
+# No mmap (the agnos target answers cyr_mmap with -1) or no usable mprotect: the harness falls
+# back to a plain heap buffer, says so, and still runs every input -- as an ordinary fuzz, with
+# no over-read detection.
+# Run: cyrius fuzz   (or: cyrius build fuzz/guard_sfz.fcyr build/guard_sfz && ./build/guard_sfz)
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/mmap.cyr"
+include "src/error.cyr"
+include "src/f64_util.cyr"
+include "src/loop_mode.cyr"
+include "src/envelope.cyr"
+include "src/zone.cyr"
+include "src/sample.cyr"
+include "src/instrument.cyr"
+include "src/sfz.cyr"
+
+var G_RNG = 0;
+
+# The fuzzers check only that these calls return; the results are intentionally unused.
+fn g_sink(v) { return 0; }
+fn g_seed(s) { G_RNG = s; return 0; }
+fn g_next() {
+    var x = G_RNG;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    G_RNG = x;
+    return x & 0x7FFFFFFFFFFFFFFF;
+}
+fn g_range(n) { if (n <= 0) { return 0; } return g_next() % n; }
+
+# Largest input; the guarded area is this, rounded up to a page.
+var G_MAX = 262144;
+var G_PAGE = 0;
+var G_BASE = 0;
+var G_AREA = 0;
+var G_SPAN = 0;
+var G_GUARDED = 0;
+var G_SCRATCH = 0;
+var G_INPUTS = 0;
+
+fn g_round(n, page) { return ((n + page - 1) / page) * page; }
+
+# Map [guard page][area][guard page] and protect both guards. Tries 4 KB, 16 KB and 64 KB pages:
+# mprotect refuses an address that is not aligned to the real page size.
+fn g_map_try(page) {
+    var span = g_round(G_MAX, page);
+    var total = span + page + page;
+    var base = cyr_mmap(0, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0 - 1, 0);
+    if (base == (0 - 1)) { return 0 - 1; }
+    if (base <= 0) { return 0 - 1; }
+    if (cyr_mprotect(base, page, PROT_NONE) != 0) { cyr_munmap(base, total); return 0; }
+    if (cyr_mprotect(base + page + span, page, PROT_NONE) != 0) { cyr_munmap(base, total); return 0; }
+    G_PAGE = page;
+    G_BASE = base;
+    G_AREA = base + page;
+    G_SPAN = span;
+    G_GUARDED = 1;
+    return 1;
+}
+
+fn g_init() {
+    G_SCRATCH = alloc(G_MAX + 1);
+    var r = g_map_try(4096);
+    if (r == 0) { r = g_map_try(16384); }
+    if (r == 0) { r = g_map_try(65536); }
+    if (r == 1) { return 1; }
+    if (r < 0) {
+        println("guard_sfz: cyr_mmap unavailable on this target -- plain-buffer fallback, reads past the end are NOT detected");
+    } else {
+        println("guard_sfz: mprotect refused every page size tried -- plain-buffer fallback, reads past the end are NOT detected");
+    }
+    G_AREA = alloc(G_MAX + 1);
+    G_SPAN = G_MAX;
+    G_GUARDED = 0;
+    return 0;
+}
+
+# Re-open the area for the next input, or close it once parse has returned.
+fn g_area_rw() {
+    if (G_GUARDED == 1) { cyr_mprotect(G_AREA, G_SPAN, PROT_READ | PROT_WRITE); }
+    return 0;
+}
+fn g_area_none() {
+    if (G_GUARDED == 1) { cyr_mprotect(G_AREA, G_SPAN, PROT_NONE); }
+    return 0;
+}
+
+# Parse the len bytes at p, then close the area and convert the result.
+fn g_parse_at(p, len) {
+    memcpy(p, G_SCRATCH, len);
+    var f = n_sfz_parse_n(p, len);
+    g_area_none();
+    if (f > 0) {
+        g_sink(n_sfz_to_zones(f, f64_from(44100)));
+        g_sink(n_sfz_to_instrument(f, str_from("guard"), f64_from(44100)));
+    }
+    g_area_rw();
+    return 0;
+}
+
+# Run one input of len bytes held in G_SCRATCH: once ending at the back guard, once starting at
+# the front one.
+fn g_run(len) {
+    if (len > G_MAX) { len = G_MAX; }
+    if (len < 0) { return 0; }
+    g_parse_at(G_AREA + G_SPAN - len, len);
+    g_parse_at(G_AREA, len);
+    G_INPUTS = G_INPUTS + 1;
+    return 0;
+}
+
+# Append the cstr s at G_SCRATCH + at; -> the new length (clipped to G_MAX).
+fn g_put(at, s) {
+    var n = strlen(s);
+    if (at + n > G_MAX) { n = G_MAX - at; }
+    if (n <= 0) { return at; }
+    memcpy(G_SCRATCH + at, s, n);
+    return at + n;
+}
+
+fn g_putb(at, b) {
+    if (at >= G_MAX) { return at; }
+    store8(G_SCRATCH + at, b);
+    return at + 1;
+}
+
+var G_FRAGS = 0;
+var G_NFRAGS = 0;
+var G_SEPS = 0;
+var G_NSEPS = 0;
+
+fn g_tables() {
+    var f = vec_new();
+    vec_push(f, "\xC2"); vec_push(f, "\xC2\xA0"); vec_push(f, "\xC2\x85");
+    vec_push(f, "\xE2\x80"); vec_push(f, "\xE2\x80\xA8"); vec_push(f, "\xE2\x80\x8A");
+    vec_push(f, "\xE2\x81\x9F"); vec_push(f, "\xE3\x80\x80"); vec_push(f, "\xE1\x9A\x80");
+    vec_push(f, "\x0B"); vec_push(f, "\x0C"); vec_push(f, "\r"); vec_push(f, "\n");
+    vec_push(f, " "); vec_push(f, "\""); vec_push(f, "#include"); vec_push(f, "//");
+    vec_push(f, "<region>"); vec_push(f, "<group>"); vec_push(f, "<control>"); vec_push(f, "<global>");
+    vec_push(f, "<curve>"); vec_push(f, "<"); vec_push(f, ">"); vec_push(f, "<region");
+    vec_push(f, "sample="); vec_push(f, "a.wav"); vec_push(f, "default_path="); vec_push(f, "=");
+    vec_push(f, "key=c4"); vec_push(f, "key=c#"); vec_push(f, "key=eb"); vec_push(f, "lokey=-0");
+    vec_push(f, "hikey=c4611686018427387903"); vec_push(f, "pitch_keycenter=g9");
+    vec_push(f, "offset=18446744073709551615"); vec_push(f, "loop_end=18446744073709551616");
+    vec_push(f, "group=-1"); vec_push(f, "seq_length=3"); vec_push(f, "seq_position=4097");
+    vec_push(f, "volume_oncc7=nan"); vec_push(f, "cutoff_oncc"); vec_push(f, "_oncc1=1");
+    vec_push(f, "volume=-6"); vec_push(f, "volume=1e"); vec_push(f, "volume=-inf"); vec_push(f, "pan=.5");
+    vec_push(f, "ampeg_attack=0.01"); vec_push(f, "ampeg_sustain=50"); vec_push(f, "fileg_depth=1200");
+    vec_push(f, "loop_mode=loop_continuous"); vec_push(f, "fil_type=bpf_2p"); vec_push(f, "tune=+5");
+    vec_push(f, "transpose=-2147483648"); vec_push(f, "x"); vec_push(f, "9");
+    G_FRAGS = load64(f);
+    G_NFRAGS = vec_len(f);
+    var s = vec_new();
+    vec_push(s, " "); vec_push(s, "\t"); vec_push(s, "\n"); vec_push(s, "\r\n"); vec_push(s, "\x0C");
+    vec_push(s, "\x0B"); vec_push(s, "\xC2\xA0"); vec_push(s, "\xE3\x80\x80"); vec_push(s, "\xE2\x80\xA8");
+    vec_push(s, "\xC2\x85"); vec_push(s, "  \n// comment\n");
+    G_SEPS = load64(s);
+    G_NSEPS = vec_len(s);
+    return 0;
+}
+fn g_frag(k) { return load64(G_FRAGS + k * 8); }
+fn g_sep(k) { return load64(G_SEPS + k * 8); }
+
+# fuzz_sfz family 1: random bytes, NULs included.
+fn g_random(maxlen) {
+    var len = g_range(maxlen);
+    var j = 0;
+    while (j < len) { store8(G_SCRATCH + j, g_next() & 0xFF); j = j + 1; }
+    return g_run(len);
+}
+
+# fuzz_sfz family 2: the template with up to 12 bytes flipped.
+fn g_flip(tmpl) {
+    var n = strlen(tmpl);
+    memcpy(G_SCRATCH, tmpl, n);
+    var flips = g_range(12);
+    var k = 0;
+    while (k < flips) { store8(G_SCRATCH + g_range(n), g_next() & 0xFF); k = k + 1; }
+    return g_run(n);
+}
+
+# fuzz_sfz family 3: 1..nmax fragments end to end, a NUL among them now and then. The buffer
+# ends where the last fragment does, so a multi-byte sequence is often cut at the guard.
+fn g_splice(nmax) {
+    var n = 1 + g_range(nmax);
+    var len = 0;
+    var k = 0;
+    while (k < n) {
+        var pick = g_range(G_NFRAGS + 1);
+        if (pick == G_NFRAGS) { len = g_putb(len, 0); }
+        else { len = g_put(len, g_frag(pick)); }
+        k = k + 1;
+    }
+    return g_run(len);
+}
+
+# Every prefix of a seed: each byte position becomes, once, the last one before the guard.
+fn g_prefixes(seed) {
+    var n = strlen(seed);
+    memcpy(G_SCRATCH, seed, n);
+    var k = 0;
+    while (k <= n) { g_run(k); k = k + 1; }
+    return 0;
+}
+
+# Header soup: random fragments joined by every separator class, up to ~bytes long.
+fn g_soup(bytes) {
+    var len = 0;
+    while (len < bytes) {
+        len = g_put(len, g_frag(g_range(G_NFRAGS)));
+        len = g_put(len, g_sep(g_range(G_NSEPS)));
+    }
+    return g_run(len);
+}
+
+# A long token of `n` copies of byte b after `head`, ending exactly at the guard.
+fn g_long(head, b, n) {
+    var len = g_put(0, head);
+    var k = 0;
+    while (k < n) { len = g_putb(len, b); k = k + 1; }
+    return g_run(len);
+}
+
+# A 4 KB default_path over nreg regions, half of them inheriting <global>'s sample.
+fn g_dp_regions(nreg) {
+    var len = g_put(0, "<control> default_path=");
+    var k = 0;
+    while (k < 4096) { len = g_putb(len, 112); k = k + 1; }
+    len = g_put(len, "\n<global> sample=g.wav\n");
+    k = 0;
+    while (k < nreg) {
+        if ((k % 2) == 0) { len = g_put(len, "<region> key=60\n"); }
+        else { len = g_put(len, "<region> sample=r.wav seq_length=2 seq_position=2 group=3\n"); }
+        k = k + 1;
+    }
+    return g_run(len);
+}
+
+# Multi-byte White_Space cut at each of its bytes, after a token and after a whole line.
+fn g_ws_cuts() {
+    var heads = vec_new();
+    vec_push(heads, "<region> sample=a.wav");
+    vec_push(heads, "<region>");
+    vec_push(heads, "#include \"a.sfz\"");
+    vec_push(heads, "key=c4");
+    vec_push(heads, "");
+    var ws = vec_new();
+    vec_push(ws, "\xC2\xA0"); vec_push(ws, "\xC2\x85"); vec_push(ws, "\xE2\x80\xA8"); vec_push(ws, "\xE2\x80\x80");
+    vec_push(ws, "\xE2\x80\x8A"); vec_push(ws, "\xE2\x80\xAF"); vec_push(ws, "\xE2\x81\x9F");
+    vec_push(ws, "\xE3\x80\x80"); vec_push(ws, "\xE1\x9A\x80");
+    var hi = 0;
+    while (hi < vec_len(heads)) {
+        var wi = 0;
+        while (wi < vec_len(ws)) {
+            var w = vec_get(ws, wi);
+            var wl = strlen(w);
+            var cutk = 0;
+            while (cutk <= wl) {
+                var len = g_put(0, vec_get(heads, hi));
+                var b = 0;
+                while (b < cutk) { len = g_putb(len, load8(w + b)); b = b + 1; }
+                g_run(len);
+                # and the same with the white space BEFORE the head
+                len = 0;
+                b = 0;
+                while (b < cutk) { len = g_putb(len, load8(w + b)); b = b + 1; }
+                len = g_put(len, vec_get(heads, hi));
+                g_run(len);
+                cutk = cutk + 1;
+            }
+            wi = wi + 1;
+        }
+        hi = hi + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    g_tables();
+    g_init();
+    g_area_rw();
+    g_seed(0xD1B54A32D192ED03);
+    var tmpl = "<control> default_path=samples/\n#include \"x.sfz\"\n<global> volume=-3 ampeg_release=0.1\n<group> lokey=c3 hikey=g5 loop_mode=loop_continuous seq_length=2\n<region> sample=a.wav key=60 pan=25 tune=5 transpose=2 cutoff=2000 resonance=1.5 fil_type=hpf_2p ampeg_attack=0.01 fileg_depth=1200 pitchlfo_freq=5 pitchlfo_depth=50 fil_keytrack=600 output=1 volume_oncc1=6 offset=100 end=5000 seq_position=2\n<region> sample=b.wav lokey=48 hikey=59\n";
+
+    # the deterministic families first
+    g_prefixes(tmpl);
+    g_prefixes("<region>\x0Csample=ff.wav\x0Bkey=60\n<region>\xC2\xA0sample=nb.wav key=61\n\xE3\x80\x80<region> sample=id.wav key=62\xE2\x80\xA8\n#include \"\"q.sfz\"\"\n#include#include \"r.sfz\"\n");
+    g_prefixes("// c\n<region> sample=a.wav lokey=c-1 hikey=g9 pitch_keycenter=eb4 key=f#3 lovel=1 hivel=127 volume=-6.5e0 pan=-100 loop_start=0 loop_end=18446744073709551615");
+    g_prefixes("<control>default_path=d/ <global> volume_oncc7=6 cutoff_oncc74=2400 <group> group=2 <region> sample=x seq_position=1 tune=-2147483648");
+    g_ws_cuts();
+    var k = 0;
+    while (k < 6) {
+        g_long("<region> sample=", 97, 1000 + k * 40000);
+        g_long("<region> sample=a.wav volume=", 57, 64 + k * 30000);
+        g_long("<region> sample=a.wav volume=0.", 48, 64 + k * 30000);
+        g_long("<region> sample=a.wav offset=", 57, 21 + k * 20000);
+        g_long("<region> sample=a.wav key=c", 57, 11 + k * 20000);
+        g_long("#include ", 34, 1 + k * 20000);
+        g_long("<region> sample=a.wav x", 32, 1 + k * 20000);
+        g_long("<region> sample=a.wav x", 0xC2, 1 + k * 20000);
+        k = k + 1;
+    }
+    g_dp_regions(4000);
+    g_dp_regions(12000);
+
+    # then the random families
+    var i = 0;
+    while (i < 6000) {
+        var mode = g_range(5);
+        if (mode == 0) { g_random(512); }
+        if (mode == 1) { g_flip(tmpl); }
+        if (mode == 2) { g_splice(64); }
+        if (mode == 3) { g_splice(2000); }
+        if (mode == 4) { g_soup(4096 + g_range(60000)); }
+        i = i + 1;
+    }
+
+    if (G_GUARDED == 1) {
+        print("guard_sfz: ok, ", 15);
+        print_num(G_INPUTS);
+        print(" inputs, each run ending at a PROT_NONE page and starting after one (page ", 74);
+        print_num(G_PAGE);
+        println(" B)");
+    } else {
+        print("guard_sfz: ok (UNGUARDED fallback), ", 36);
+        print_num(G_INPUTS);
+        println(" inputs");
+    }
+    return 0;
+}
+
+var r = main();
+syscall(60, r);
