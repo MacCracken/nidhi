@@ -92,18 +92,19 @@ could actually hit.
   once it is on cyrius 6.6.20 or later, or `n_load_wav` refuses every file. dhvani already does.
   From shravan 2.9.2 the order decides only which `detect_format` a direct caller gets.
 - **Per-zone bus routing does not work.** `output=` is parsed from SFZ, inherited and stored,
-  and **read by nothing** — the same shape `volume_db` had before 2.1.0. Pinned to 2.1.1. The
+  and **read by nothing** — the same shape `volume_db` had before 2.1.0. Planned for 2.5.0. The
   README says so too rather than listing it as a feature.
 - **A reverse-loop zone is silent unless it has a start offset.** `LOOP_REVERSE` starts at
   `sample_offset` (0 by default), steps backwards and ends after one frame. **Inherited from the
-  oracle**; SFZ never sets this mode, only the API does. Deferred by the maintainer in 2.2.2.
+  oracle**; SFZ never sets this mode, only the API does. Deferred by the maintainer in 2.2.2;
+  planned for 2.6.0.
 - **One zone per note, and SFZ `group=` means round-robin.** `note_on` round-robins since 2.2.2
   (ADR 0012), but it still starts one voice per note, where SFZ sounds every matching region. It
   also maps `group=` to round-robin, as the oracle did, where SFZ means an `off_by` exclusive class.
-  So co-matching zones that share a `group=` alternate. On the roadmap.
+  So co-matching zones that share a `group=` alternate. Planned for 2.4.0.
 - **SF2 spec gaps, inherited from the oracle:** sampleModes 2 loops (the spec says it should not),
   `original_pitch` 128-255 is used as the root (the spec says 60), and `loop_end` past the sample
-  is kept.
+  is kept. Planned for 2.6.0.
 - **A file with more than two channels keeps only its front pair** (ADR 0010). A 4-channel
   L-C-R-S AIFF therefore loads as left and centre.
 - **WSOLA amplifies output up to ~588x** where `window_sum` falls under the `1e-6` normalise

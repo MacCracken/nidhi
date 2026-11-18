@@ -59,7 +59,7 @@ Two facts make revisiting this non-trivial rather than a small chore:
 Implementing it is a feature, not a repair, and belongs in a minor release. It would need: a
 decision on `NZone`'s field count against the derive guidance, hand-written `from_json` for
 every type, and a round-trip test per type. Tracked in `docs/development/roadmap.md` under
-2.1.0, not as a defect.
+2.x.x (unscheduled until a consumer needs it), not as a defect.
 
 ## Alternatives rejected
 

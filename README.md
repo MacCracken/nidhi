@@ -32,7 +32,7 @@ in git history — see [`docs/port/oracle-build-identity.md`](docs/port/oracle-b
   `alloc_used()` delta across a rendered block at 8 and 64 voices
 
 Not yet implemented, despite the field existing: **per-zone bus routing**. `output=` is parsed
-and stored but nothing reads it — tracked for 2.1.1 in the [roadmap](docs/development/roadmap.md).
+and stored but nothing reads it — planned for 2.5.0 in the [roadmap](docs/development/roadmap.md).
 
 ## Quick Start
 
