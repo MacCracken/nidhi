@@ -1,5 +1,293 @@
 # Changelog
 
+## 2.2.2 — 2026-11-18
+
+Dependency release plus a P(-1) sweep of every module. naad 2.3.3 → **2.3.5**, hisab 3.4.1 →
+**3.5.0**, shravan 2.9.3 → **2.12.4**, goonj 2.3.1 → **2.3.2**, all still on cyrius **6.7.18**.
+The bump alone moves no output. The sweep fixes crashes, allocation bombs and CPU bombs a hostile
+file could reach, and repairs nine defects inherited from the Rust oracle, seven of them with an
+ADR, after the maintainer chose which to fix.
+
+**15 suites, 939 assertions** (672 in 2.2.1), every new group failing on 2.2.1's code first.
+Render paths run **8 % to 38 % faster** in every round. **A consumer still needs cyrius 6.7.5.**
+
+Output changes, all deliberate:
+- filtered voices, from their first frame;
+- released sustain loops that have a crossfade;
+- samples whose rate differs from the engine's;
+- instruments with round-robin groups or SFZ sequences, which now cycle;
+- files with more than two channels;
+- the reverb and chorus slots.
+
+Everything else is byte-identical to 2.2.1 on the release differential: unfiltered voices, delay,
+compressor, limiter, time-stretch, normalize, loop points, interpolation, and every mono and stereo
+WAV/AIFF fixture.
+
+### Changed — dependencies
+
+| Dependency | Was | Now | Note |
+|---|---|---|---|
+| naad | 2.3.3 | **2.3.5** | pins 6.7.18 |
+| hisab | 3.4.1 | **3.5.0** | pins 6.7.18 |
+| shravan | 2.9.3 | **2.12.4** | pins 6.7.18 |
+| goonj (transitive) | 2.3.1 | **2.3.2** | pins 6.7.18 |
+| sankoch | 2.8.9 | 2.8.9 | unchanged; still the 6.7.18 snapshot's copy |
+| bayan (transitive) | 1.11.1 | 1.11.1 | unchanged |
+| sakshi | 2.5.10 | 2.5.10 | now a stdlib leaf from the snapshot, not a commit-pinned package |
+
+- **The bump alone moves nothing.** Built against the new bundles, 2.2.1's `src/` gives
+  byte-identical output on a 419-case differential (400 engine renders across 4 sample rates, mono
+  and stereo, every loop mode, every filter mode, LFOs, filter envelopes, velocity curves, pitch
+  bend and 1 or 7 voices; 10 effect runs; 5 stretches; normalize, loop points and interpolation).
+  It is also byte-identical through all three loaders on 43 WAV/AIFF fixtures, hostile headers
+  included. Both probes were checked to fail on a planted one-ulp change.
+- **A consumer still needs cyrius 6.7.5 or later.** Re-measured with a program built on
+  `dist/nidhi.cyr`: every pin from 6.7.5 to 6.7.18 builds and runs it, including a high-pass render
+  that allocates nothing. 6.7.4 still fails at compile time on sankoch's `loop { }`.
+- **`lib/` was regenerated from empty.** 48 files are byte-identical to the 6.7.18 snapshot, and
+  the six git bundles (naad, hisab, shravan, goonj, sankoch, bayan-json) to their tags' `dist/`.
+  `cyrius deps --locked` confirms the lock.
+- **The smoke binary grows from 4,610,552 to 5,589,112 bytes**, almost all of it shravan's new
+  FLAC, AAC, SILK and Opus encoders, which nidhi does not call. `CYRIUS_DCE=1` removes them.
+- **Through `n_load_wav`, more files load, and MP3/MP4 lengths change.** shravan 2.10.3 decodes
+  multichannel Opus and AAC, and 2.10.2 trims encoder priming and padding from MP3 and MP4 by
+  default (gapless), as players do, so those samples are shorter by the encoder's delay.
+- naad 2.3.4 lets `filter_svf_new` and `modulation_lfo_new` return `NAAD_ERR_ALLOCATION` (-6).
+  nidhi already turns any negative result into "no filter" / "no LFO". hisab 3.5.0 retires 16
+  names, and nidhi calls none. naad renamed `power_spectrum` to `naad_power_spectrum`, and nidhi
+  calls neither.
+
+### Changed — nine oracle defects, fixed by decision
+
+The Rust oracle had each of these. The port reproduced them, which is why no parity check could
+see them. The maintainer chose which to fix. Reverse-loop start and four SF2-spec items stay on the
+roadmap.
+
+- **Polyphony collapsed after a repeated note** ([ADR 0006](docs/adr/0006-nidhi-voice-state-decides-allocation.md)).
+  - naad's voice pool and nidhi's voices disagreed. naad freed a slot at `note_off` while the
+    voice was still releasing, and freed only the first slot of a retriggered note.
+  - So a new note cut a release tail although idle voices existed. After three retriggered notes,
+    a 4-voice engine played a 3-note chord on 2 voices, until `all_notes_off`.
+  - `note_on` now copies nidhi's `active` flags into naad before naad allocates.
+- **Filter velocity tracking lasted zero frames** ([ADR 0007](docs/adr/0007-filter-velocity-tracking-lasts-the-note.md)).
+  - At note_on velocity 16 sat at 1007 Hz and velocity 127 at 8000 Hz. After 2000 frames both were
+    at 6000 Hz, so `fil_veltrack` had no audible effect.
+  - The factor is now folded into the voice's base cutoff. With `vel_track` 0, the default,
+    output is bit-identical.
+- **A released LoopSustain voice crossfaded into a seam** ([ADR 0008](docs/adr/0008-released-sustain-loop-skips-the-crossfade.md)).
+  - On the pass after release the voice plays straight through `loop_end`. Fading loop-start
+    material in there made a jump 100 times the ramp's step (0.000999 against 0.100996).
+- **Samples played at the wrong pitch unless their rate matched the engine's** ([ADR 0009](docs/adr/0009-playback-speed-includes-sample-rate.md)).
+  - Nothing read `NSample`'s sample rate. A 48 kHz sample in a 44.1 kHz engine played 1.47
+    semitones flat; a 22,050 Hz SF2 sample, an octave high.
+  - `note_on` now scales speed by `sample_rate / engine_rate`. When the rates match, speed is
+    bit-identical.
+- **Files with more than two channels loaded as scrambled stereo** ([ADR 0010](docs/adr/0010-multichannel-loads-front-pair.md)).
+  - A 6-channel 256-frame WAV became a 768-frame "stereo" sample. The stream reader reported 256
+    frames and served 768.
+  - All three loaders now take the front pair at the right length, and agree. Since shravan 2.10.3
+    this also reaches 5.1 Opus and AAC through `n_load_wav`.
+- **The chorus was a passthrough, and the reverb a 1-sample resonator** ([ADR 0011](docs/adr/0011-effect-slots-get-the-parameters-meant.md)).
+  - The chorus received 0.02 and 0.002, meant as seconds, in millisecond slots. It now gets 20 ms
+    and 2 ms.
+  - The reverb received the sample rate as its decay and 0.6 as its sample rate, so an impulse
+    left nothing after 10 ms. Each oracle number now goes in the slot whose range it fits: decay
+    0.6, damping 0.3, pre-delay 1.5 ms, mix 0.5, the real rate.
+  - Both are now tested to do something: an impulse rings past 100 ms, and the chorus changes all
+    4000 test samples.
+- **Round-robin never played** ([ADR 0012](docs/adr/0012-round-robin-plays.md)).
+  - The oracle's `note_on` played the first matching zone, so `find_zone_rr` and every zone
+    group did nothing in the engine.
+  - SFZ `seq_position` wrote the round-robin group. Each region of a set got its own group, so
+    the set could never cycle, and `seq_length` was not parsed.
+  - `note_on` now selects through `find_zone_rr`. Zones carry SFZ's `seq_length` and
+    `seq_position`, with a per-zone counter that advances on every note-on the zone matches, so a
+    `seq_length=3` set plays a1, a2, a3, a1.
+  - Unsequenced, ungrouped zones select exactly as before. One consequence: co-matching zones that
+    share an SFZ `group=` number now alternate. SFZ means `group=` as a choke class, and nidhi
+    implements neither that nor layering.
+- **normalize wrote NaN, or erased the take** ([ADR 0002 amendment](docs/adr/0002-nan-clamps-to-the-bound.md)).
+  - `n_normalize_rms` with a non-finite target wrote it into every sample.
+  - `n_normalize_peak` on a take holding one +Inf computed a gain of 0, zeroed the take and turned
+    the Inf into NaN.
+  - Both now leave the data alone.
+- **Cross-correlation seeds its search with −∞**, as the oracle did. The port seeded from the first
+  lag, which differed when that lag's sum was NaN or −∞. Bit-identical on finite input.
+
+### Fixed — crashes and bombs a hostile file or call could reach
+
+nidhi runs inside dhvani and shruti, and an out-of-range `vec_get` or a failed `alloc` there ends
+the host ([architecture 001](docs/architecture/001-the-allocator-never-frees.md)).
+
+| What | Input | 2.2.1 | 2.2.2 |
+|---|---|---|---|
+| SFZ `default_path` joined per region | 1.19 MB file | segfault (8 GB asked) | 4.67 MB heap |
+| SFZ parse, ~124 heap bytes per input byte | 40 MB of `x\n` | segfault | parses; 1 MB takes 1,104 B, not 130 MB |
+| SFZ filename dedup, quadratic | 40,000 regions (1.13 MB) | 14.6 s | 37 ms |
+| SF2 preset-bag range allocated per visit | 376 KB file | segfault (4.7 GB) | `-5` in 0.69 s |
+| SF2 walk with no work budget | 525 KB file | > 30 s, 14 s per extra preset | `-5` in 0.19 s |
+| SF2 record parsers, unchecked `alloc` | 300 MB file | exit 1 or segfault | `-5` |
+| `n_load_wav` through shravan's unchecked read | `/dev/zero` under a 700 MB limit | segfault | `-5` |
+| Recorder growth | 23 min of stereo, 4 GB limit | exit 1, take lost | `-4`, take kept |
+| `detect_loop_points` sort, quadratic | 2 s of noise | 4,098 ms (60 s extrapolates to an hour) | 23 ms |
+| `min_loop_frames` near 2^62 | any sample | 3.1 s for nothing | returns at once |
+| Stretch overlap via the derived setter | 1.5 | exit 1 | copy path |
+| Stretch at frame size 2-3, ratio 1e-19 | any input | exit 1 | empty result |
+| Stretch request `n_stretch_fits` accepts | 163,840,000 samples, 4 GB limit | exit 1 (grown by push) | succeeds (sized once) |
+| `n_engine_set_bank(e, code)` | negative or 0 | segfault on first render | `NIDHI_ERR_INVALID_PARAMETER` |
+| Negative ADSR / filter-envelope config | `n_zone_with_adsr(z, -3)` | segfault at note_on | treated as none |
+| `n_engine_new(20000000, sr)` | absurd voice count | segfault | 128 voices, naad's own cap |
+| `n_instrument_find_zone_rr` | negative or re-assigned group | exit 1 | plays ungrouped |
+| A sample whose frames/data were desynced through setters | read past the vec | heap contents as audio | silence |
+
+- The SF2 work budget is 2^24 bag and generator visits. A conforming file within the existing
+  65,536-zone budget needs at most about 12.2M.
+- The SFZ `default_path` cap is 4096 bytes (PATH_MAX, which open(2) enforces anyway). A longer one
+  is ignored, and the joined name is memoized per distinct sample name.
+- `fuzz/fuzz_sfz.fcyr` gained a splice mode (multi-byte whitespace, cut-off sequences, quote runs,
+  usize edges) and a heap-per-input-byte bound.
+
+### Fixed — the port's own regressions
+
+- **A reused voice released at the previous note's level.** 2.1.1 re-arms each voice's envelope
+  instead of rebuilding it, and left `current_value` behind. note_on + note_off in one MIDI block
+  then released a full-level tail where the oracle's fresh envelope released silence. `rearm` now
+  resets exactly what naad's constructor sets.
+- **Every filtered note opened with a 25 ms sweep.** 2.1.1 snapped the cutoff smoother to the base
+  cutoff, but render multiplies by the brightness factor first, so the first frame's target was
+  0.75 of it: 7990 Hz at frame 0, 6000 Hz by frame 1999 on an 8 kHz zone. 2.1.1's note that "a
+  fresh voice is unaffected" was also wrong: fresh voices used to glide up from 0.
+- **NaN or Inf `volume` put non-finite samples in the mix** (1000 of 1000). ADR 0004 applies the
+  value, and its Context called it "clamped"; it was not. note_on now clamps to [-144, +24] dB,
+  NaN to the floor. The stored field keeps the raw value, as the oracle stored it
+  ([ADR 0004 amendment](docs/adr/0004-apply-zone-volume-db.md)).
+- **A NaN pitch bend, or `pitchlfo_depth=nan`, silenced a held note for good**, even after the bend
+  returned to 0. A non-finite effective speed now falls back to the unbent speed.
+- **SFZ parity, checked against the oracle source:**
+  - `loop_start`, `loop_end`, `offset` and `end` parse as usize, as the oracle did. 2.0.2 made them
+    u32.
+  - Octave arithmetic no longer wraps an i64 (`c4611686018427387903` was note 0).
+  - `hikey=-0` is rejected, as Rust's `parse::<u8>` rejects it.
+  - `#include` strips every surrounding quote.
+  - Whitespace covers all 25 Unicode White_Space code points that `split_whitespace` uses, form
+    feed included.
+- **Parsed strings aliased the caller's buffer.** SFZ sample and include names, SF2 preset,
+  instrument and sample names, and `n_load_wav`'s sample name all pointed into memory the caller
+  owns. A host that reuses its read buffer renamed earlier samples, and the SFZ ones were not
+  NUL-terminated, so `n_load_wav(str_data(name))` opened a garbage path. All are owned copies now.
+- **The stream reader skipped the non-finite scrub** the other loaders apply. NaN or Inf in a
+  64-bit float WAV reached the voice through it, and a NaN latches the SVF.
+- **`n_read_file` treated a read error as end of file**, so a truncated or unreadable file could
+  load as a shorter one. It is an error now.
+- **Six allocation sites were growing the heap on routine calls:**
+  - `n_engine_set_release_ms` and `n_engine_set_adsr`: 32 B per call. Release automation at 1 kHz
+    meant 115 MB an hour. They now write the engine's own config in place.
+  - `n_instrument_find_zone_rr`: 152 to 304 B per call. Now 0.
+  - Each SFZ float token made a substring, three lowercased copies and a NUL-terminated copy on
+    the heap. Now none, for any token under 64 bytes.
+  - `n_load_wav`: at least 1 MB per call, even for a 244-byte file. Now 1,520 B.
+  - Stretch: 2.8 MB less per 1-second ×2 call.
+
+### Performance
+
+Ten rotating rounds per tree against 2.2.1 (see `BENCHMARKS.md`):
+
+| Benchmarks | Change | Faster in |
+|---|---|---|
+| `voice_count_scaling` | −7.6 % to −23.6 % | every round |
+| `fill_buffer_stereo` / `fill_buffer_per_sample` | −10.2 % to −28.4 % | every round |
+| filtered renders | −33.8 % and −37.9 % | every round |
+| `interpolation_stereo` | −6.9 % | every round |
+| `wsola_1sec_2x` | −0.8 % (flat) | 8 of 10 |
+
+- **LFOs are gated on depth, not on the pointer.** Since 2.1.1 every voice owns persistent LFOs,
+  so render took a sine per LFO per voice per frame at depth 0, plus a power on filtered voices.
+  The oracle built an LFO only when its rate and depth were non-zero. Output is bit-identical, and
+  this is most of the speed-up.
+- The cubic Hermite is inlined by hand into the interpolation fast paths, bit-exact.
+- The I/O work is bit-identical:
+  - `sf2_pcm16_to_f32` sizes once and multiplies by 1/32768: 22.7 → 3.9 ms per million samples.
+  - The non-finite scrub uses a raw pointer: 7.5 → 1.5 ms per 882k samples.
+  - The stream reader copies by word, and `read_all` on a fresh reader hands over the decoded
+    buffer.
+- `n_stretch` and `n_stretch_ola` share their prologue, buffer setup and epilogue. That retires
+  the roadmap's 49-line duplication; the two frame loops stay separate.
+- A 4-accumulator dot product would make WSOLA 1.44× faster, but it is not bit-exact, so it was
+  declined: playback accuracy over speed.
+
+### Also
+
+- **25 `#inline` attributes the compiler ignored are gone.** It printed a warning for each on every
+  build, and binaries are byte-identical without them. The 9 it honours stay.
+- **`cyrius fmt --check` passes on every source file.** The six roadmap failures were
+  continuation-indent whitespace. Binaries are byte-identical.
+- **`dist/nidhi.deps` is back, naming `hashmap`.** The SFZ fixes use the stdlib hashmap, whose seed
+  resists hash flooding. `cyrius deps` reads the sidecar. A consumer that vendors
+  `dist/nidhi.cyr` by hand needs `hashmap` in its own `[deps].stdlib`.
+- **The SFZ float parser keeps the 6.7.5 floor.** It parses through a stack copy with `f64_parse`,
+  not 6.7.9's `f64_parse_n`, with identical bits on 200,000 random tokens. Using `f64_parse_n`
+  would have broken every pin from 6.7.5 to 6.7.8.
+- **Six dead unprefixed SFZ helpers are removed**, so the unprefixed-name count in ADR 0005 drops
+  from 86 to 80.
+- README: the zones line says round-robin and SFZ sequences play, and the effects line says what
+  changed.
+- `tests/sfz.tcyr` passed an `NSfzInstResult` where an instrument was expected, since 2.0.2. The
+  check passed by accident (it read the file list as the zone list). It now tests the instrument.
+- `docs/port/22-mod-dsp.md` no longer says the chorus arguments "line up sensibly".
+- `programs/smoke.cyr` prints 2.2.2.
+
+### Verified
+
+- **15 suites, 939 assertions, 0 failures.** By suite:
+  - capture 19 → 48
+  - effect_chain 32 → 35
+  - engine 92 → 133
+  - instrument 13 → 36
+  - io 58 → 116
+  - sample 65 → 76
+  - sf2 29 → 42
+  - sfz 126 → 190
+  - stretch 62 → 87
+  - golden 43/43 unchanged.
+
+  Every new group was run alone against 2.2.1's code and fails there. Several crash, which is the
+  defect.
+- **Both differential probes can fail**, checked by planting a one-ulp change in the engine and
+  in the WAV loader.
+- **Fuzz 2 of 2.** `deps --locked`, `deps --verify`, `build --check-lib-sync` and `distlib --check`
+  all pass. No `src/` warning remains, and `cyrius fmt --check` is clean.
+- **The differential moves only where intended:**
+  - 320 filtered engine cases (the snap and velocity tracking);
+  - 8 released-sustain cases with a crossfade;
+  - the chorus and reverb.
+
+  The other 72 engine cases, the delay, compressor and limiter runs, 5 stretches, normalize, loop
+  points and 4,100 interpolation positions are byte-identical to 2.2.1. So are 40 of the 43 WAV/AIFF
+  fixtures through all three loaders; the other 3 are the multichannel files.
+- **Consumer floor:** every pin from 6.7.5 to 6.7.18 builds and runs a program on
+  `dist/nidhi.cyr` that:
+  - renders high-pass with 0 bytes allocated;
+  - parses SFZ with `default_path`;
+  - loads a 6-channel WAV as 256 stereo frames;
+  - opens the stream reader.
+
+### Not fixed — on the roadmap
+
+- A reverse-loop zone is silent without a start offset (oracle-faithful; the maintainer deferred
+  it).
+- SF2-spec items, all oracle-faithful: sampleModes 2 maps to Forward (the spec says no loop),
+  `original_pitch` 128-255 is used as the root (the spec says 60), and `loop_end` past the sample
+  is kept.
+- SFZ `group=` / `off_by` exclusive classes (choke) and layered regions: nidhi plays one zone per
+  note and maps `group=` to round-robin, as the oracle did.
+- WSOLA amplifies output at the edges (oracle-faithful).
+- Per-zone bus routing is still unimplemented.
+- shravan 2.12.4's WAV stream decoder is genuinely incremental now, which unblocks a streaming
+  `NStreamReader`.
+- SF2 records still cost about 6× their file size on the heap (they are eagerly parsed).
+- A few constructors in other modules leave `alloc` unchecked (`n_sample_from_mono`, `n_zone_new`,
+  `n_instrument_new`, `n_sample_bank_new`).
+
 ## 2.2.1 — 2026-11-07
 
 Toolchain and dependency release: `cyrius` 6.7.9 → **6.7.18**, and every dependency moved to its

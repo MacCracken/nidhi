@@ -1,13 +1,14 @@
 # io.cyr -- WAV loading + streaming (behind the Rust `io` feature; uses shravan)
-# Requires: alloc, vec, string (strlen), str (str_new), syscalls/fs (file_open/read/write/close,
-#           memcpy, load8/store8), sample (n_sample_from_mono/stereo/with_name), error (NIDHI_ERR_IMPORT),
-#           shravan (wav_decode, decode_file, decode_result_info/samples, fmtinfo_channels/
-#           sample_rate/total_samples, shravan_init_constants)
+# Requires: alloc, vec, string (strlen), str (str_from_buf), load8/load64/store64,
+#           io (file_read_whole_into, xstat, STAT_MODE/STAT_SIZE), f64_util (n_vec_with_cap),
+#           sample (n_sample_from_mono/stereo/with_name), error (NIDHI_ERR_IMPORT),
+#           shravan (wav_decode, codec_open, decode_result_info/samples, fmtinfo_channels/
+#           sample_rate, shravan_max_samples, shravan_init_constants)
 #
 # 2.1.0 dropped the shravan streaming shim (wav_stream_new/feed/flush, stream_evt_*,
-# STREAM_EVT_*): NStreamReader now decodes once and serves chunks from a cursor. Restore
-# them only if shravan ever ships a genuinely incremental decoder -- the current one is
-# buffer-then-decode-once, which is what made the shim decode every file twice.
+# STREAM_EVT_*): NStreamReader now decodes once and serves chunks from a cursor. shravan's
+# stream decoders have been genuinely incremental since 2.9.3, so going back to them is the
+# roadmap item "NStreamReader can stream for real" -- not done here.
 #
 # Ports rust-old/src/io.rs. Samples are f64 bit patterns end-to-end (shravan decodes to f64), so
 # the Rust Vec<f32> boundary conversions are no-ops here. All failures collapse to NIDHI_ERR_IMPORT.
@@ -42,47 +43,68 @@ fn n_init() {
     return 0;
 }
 
-# n_read_file(path, out_len) -> heap byte buffer (or 0 on error); writes byte count to out_len.
-# Mirrors shravan's decode_file read loop (grow-and-read).
+# n_read_max() -> the largest regular file n_read_file accepts: the most audio bytes a one-shot
+# decode can return. shravan refuses more than shravan_max_samples() samples (2^26 by default)
+# and the widest sample is 8 bytes (64-bit float), so a bigger file cannot decode -- reading it
+# would only mint never-freed heap first. Follows a consumer that raises the ceiling, clamped so
+# that file_read_whole_into's max + 1 buffer stays inside ALLOC_MAX.
+fn n_read_max() {
+    var m = shravan_max_samples() * 8;
+    if (m > ALLOC_MAX - 1) { m = ALLOC_MAX - 1; }
+    return m;
+}
+
+# A file whose size stat cannot give (a pipe, a device, procfs, anything on Windows, whose xstat
+# is not wired) is read under decode_file's old 256 MiB cap instead: every byte past what it turns
+# out to need is never-freed heap, so /dev/zero costs what it did through decode_file (511 MB)
+# rather than n_read_max()'s 1,023 MB.
+var N_READ_UNSIZED_MAX = 268435456;
+
+# n_read_file(path, out_len) -> heap byte buffer (or 0 on error); writes the byte count to
+# out_len (0 on error).
+#
+# The stdlib's file_read_whole_into does the reading, which is what this loop was missing
+# three ways:
+#   * a failed read ended the loop as if it were end-of-file, so a read error mid-file returned
+#     the bytes so far as the whole file -- and wav_decode clamps the data size to what is
+#     present, so it decoded as a successful, shorter Sample. A directory (open succeeds, read
+#     is -EISDIR) came back as a non-0 buffer of length 0;
+#   * the first alloc was unchecked, and growth went all the way to 2 GiB -- 2,047 MB of heap
+#     spent on /dev/zero before refusing it (511 MB now, see N_READ_UNSIZED_MAX);
+#   * every call started at a 1 MB buffer, so loading a 244-byte WAV cost 1,049,832 B of
+#     never-reclaimed heap.
+# A regular file's stat size sizes the buffer at size + 1 (one spare byte, so reaching EOF does
+# not trigger a doubling), and one larger than n_read_max() is refused before any of it is
+# read. The size is only a starting capacity: a file that grows between the stat and the read
+# still reads whole, up to max. Measured: the 244-byte WAV now costs 1,520 B per n_load_wav in
+# all, and a 1.76 MB file's read buffers 1.76 MB instead of 3 MB.
 #must_use
 fn n_read_file(path, out_len) {
-    var fd = file_open(path, 0, 0);
-    if (fd < 0) { return 0; }
-    var buf_cap = 1048576;
-    var buf = alloc(buf_cap);
-    var total = 0;
-    var reading = 1;
-    while (reading == 1) {
-        var avail = buf_cap - total;
-        if (avail <= 0) {
-            var new_cap = buf_cap * 2;
-            # lib/alloc.cyr's ALLOC_MAX is 0x80000000 and it rejects with `>`, not `>=`, so
-            # the doubling chain succeeds all the way to 2^31 and the 2^32 request returns 0
-            # -- then memcpy(0, buf, 2147483648) segfaults. No large file is needed to get
-            # here: n_read_file("/dev/zero", slot) reaches it, and n_stream_reader_open is a
-            # public entry point an SFZ `default_path` + `sample=` pair can steer.
-            if (new_cap > 2147483648) {
-                file_close(fd);
-                store64(out_len, 0);
-                return 0;
-            }
-            var new_buf = alloc(new_cap);
-            if (new_buf == 0) {
-                file_close(fd);
-                store64(out_len, 0);
-                return 0;
-            }
-            memcpy(new_buf, buf, total);
-            buf = new_buf;
-            buf_cap = new_cap;
-            avail = buf_cap - total;
-        }
-        var n = file_read(fd, buf + total, avail);
-        if (n <= 0) { reading = 0; } else { total = total + n; }
+    store64(out_len, 0);
+    var max = n_read_max();
+    var hint = 0;
+    var st[144];
+    if (xstat(path, &st) == 0) {
+        if ((load32(&st + STAT_MODE) & 0xF000) == 0x8000) { hint = load64(&st + STAT_SIZE); }
     }
-    file_close(fd);
-    store64(out_len, total);
-    return buf;
+    if (hint > max) { return 0; }
+    if (hint <= 0) {
+        if (max > N_READ_UNSIZED_MAX) { max = N_READ_UNSIZED_MAX; }
+    }
+    var rb[16];
+    store64(&rb, 0);
+    store64(&rb + 8, 0);
+    if (hint > 0) {
+        var b0 = alloc(hint + 2);
+        if (b0 != 0) {
+            store64(&rb, b0);
+            store64(&rb + 8, hint + 1);
+        }
+    }
+    var n = file_read_whole_into(&rb, path, max);
+    if (n < 0) { return 0; }
+    store64(out_len, n);
+    return load64(&rb);
 }
 
 # n_file_stem(path cstr) -> a new Str of the basename without extension (Rust Path::file_stem).
@@ -105,25 +127,72 @@ fn n_file_stem(path) {
     }
     var end = len;
     if (dot > start) { end = dot; }
-    return str_new(path + start, end - start);
+    # A COPY, not str_new: str_new borrows, and this Str becomes the Sample's name. A caller
+    # that builds each path in one reused buffer renamed every Sample it had already loaded
+    # to the latest file. Rust's file_stem(..).to_string() owned its String. 0 on OOM.
+    return str_from_buf(path + start, end - start);
 }
 
-# Build a Sample from a decode_result (mono if channels==1 else stereo).
+# n_scrub_nonfinite(v) -- replace every non-finite sample in v with +0.0, in place.
+#
+# Trust boundary for foreign audio data, shared by every loader. A single non-finite frame is
+# not a local glitch: it propagates through the SVF state and latches the voice to NaN for its
+# whole life, and the mix buffer with it. O(n) once at load, zero cost per render. The stream
+# reader skipped it, so a 64-bit float WAV holding NaN/Inf reached a consumer through
+# n_stream_reader_* while n_load_wav of the same file was clean (shravan zeroes non-finite f32
+# itself, but copies f64 samples raw).
+#
+# The test is n_is_finite's mask written inline over the raw buffer: the call plus vec_get/
+# vec_set per sample made this 7.5 ms for 882K samples, against 1.5 ms now.
+fn n_scrub_nonfinite(v) {
+    var n = vec_len(v);
+    var d = load64(v);
+    var i = 0;
+    while (i < n) {
+        var p = d + i * 8;
+        if ((load64(p) & 0x7FF0000000000000) == 0x7FF0000000000000) { store64(p, 0); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# n_front_pair(samples, channels) -> a new interleaved stereo vec holding channels 1 and 2 of
+# every whole frame of `samples` (channels > 2), or 0 when it cannot be allocated.
+#
+# Files with more than two channels load their front pair; see
+# docs/adr/0010-multichannel-loads-front-pair.md. Channels 1 and 2 are front left and front
+# right in WAV, Opus and AAC order (shravan emits ffmpeg's order) and in most AIFF layouts (AIFF's
+# 4-channel L-C-R-S puts the centre second), and the remaining channels are dropped. They used to be handed to n_sample_from_stereo as they were, which read
+# the N-channel interleave as stereo pairs: a 4-frame 3-channel file loaded as 6 "frames" of
+# mixed-up channels, and the stream reader reported 4 frames while serving 6.
+#must_use
+fn n_front_pair(samples, channels) {
+    var frames = vec_len(samples) / channels;
+    var out = n_vec_with_cap(frames * 2);
+    if (out == 0) { return 0; }
+    var f = 0;
+    while (f < frames) {
+        vec_push(out, vec_get(samples, f * channels));
+        vec_push(out, vec_get(samples, f * channels + 1));
+        f = f + 1;
+    }
+    return out;
+}
+
+# Build a Sample from a decode_result: mono if channels==1, else stereo -- the front pair when
+# there are more than two (docs/adr/0010-multichannel-loads-front-pair.md). NIDHI_ERR_IMPORT
+# when the front-pair vec cannot be allocated.
 #must_use
 fn n_sample_from_decode(dr) {
     var info = decode_result_info(dr);
     var samples = decode_result_samples(dr);
     var channels = fmtinfo_channels(info);
     var sample_rate = fmtinfo_sample_rate(info);
-    # Trust boundary for foreign audio data. A single non-finite frame is not a local
-    # glitch: it propagates through the SVF state and latches the voice to NaN for its
-    # whole life, and the mix buffer with it. O(n) once at load, zero cost per render.
-    var nsm = vec_len(samples);
-    var si = 0;
-    while (si < nsm) {
-        if (n_is_finite(vec_get(samples, si)) == 0) { vec_set(samples, si, 0); }
-        si = si + 1;
+    if (channels > 2) {
+        samples = n_front_pair(samples, channels);
+        if (samples == 0) { return NIDHI_ERR_IMPORT; }
     }
+    n_scrub_nonfinite(samples);
     if (channels == 1) { return n_sample_from_mono(samples, sample_rate); }
     return n_sample_from_stereo(samples, sample_rate);
 }
@@ -138,13 +207,31 @@ fn n_load_wav_from_memory(data, len) {
 }
 
 # load_wav(path) -> Sample pointer (named from the file stem), or NIDHI_ERR_IMPORT.
+#
+# Reads with n_read_file, then decodes from memory through codec_open -- the dispatch
+# decode_file itself ends in, so every format it decoded still decodes (WAV, AIFF, FLAC, Ogg
+# Vorbis/Opus, MP3, AAC, ALAC, MP4). decode_file's own read loop was the hazard: its growth
+# alloc was unchecked, so n_load_wav("/dev/zero") -- or an SFZ `sample=` naming a device --
+# SIGSEGV'd the host in memcpy(0, ..) under a 700 MB address-space limit, and without one spent
+# 511 MB of never-freed heap before refusing it; every call also started at a 1 MB buffer.
+# n_read_file checks every allocation, reports read errors, and caps a regular file at
+# n_read_max() (512 MiB by default; decode_file's cap was 256 MiB for every input) and anything
+# stat cannot size at decode_file's 256 MiB. Measured on /dev/zero: -5 under a 700 MB limit
+# instead of exit 139, and 511 MB of heap without one, as before.
 #must_use
 fn n_load_wav(path) {
     n_init();
-    var dr = decode_file(path);
+    var lenslot = alloc(8);
+    if (lenslot == 0) { return NIDHI_ERR_IMPORT; }
+    var data = n_read_file(path, lenslot);
+    if (data == 0) { return NIDHI_ERR_IMPORT; }
+    var dr = codec_open(data, load64(lenslot));
     if (dr < 0) { return NIDHI_ERR_IMPORT; }
     var sample = n_sample_from_decode(dr);
-    return n_sample_with_name(sample, n_file_stem(path));
+    if (sample <= 0) { return NIDHI_ERR_IMPORT; }
+    var stem = n_file_stem(path);
+    if (stem == 0) { return NIDHI_ERR_IMPORT; }
+    return n_sample_with_name(sample, stem);
 }
 
 # --- StreamingWavReader ---
@@ -159,11 +246,17 @@ fn n_load_wav(path) {
 # The decoded buffer now lives on the reader and chunks are a cursor into it. That drops the
 # shravan stream decoder, the pending buffer, and the file-data/offset bookkeeping entirely.
 #
-# NOTE: this is still not incremental -- open() holds the whole decoded file in memory. Making
-# it genuinely streaming needs an incremental decoder from shravan; its current one is
-# buffer-then-decode-once (the defect behind the 2.0.2 4 KB truncation bug). What this change
-# buys is one decode instead of two and one copy instead of three, at strictly lower peak
-# memory than before.
+# NOTE: this is still not incremental -- open() holds the whole decoded file in memory. When
+# it was written shravan's stream decoder was buffer-then-decode-once (the defect behind the
+# 2.0.2 4 KB truncation bug); it has been incremental since shravan 2.9.3, which is the
+# roadmap's "NStreamReader can stream for real". What this change bought is one decode
+# instead of two and one copy instead of three, at strictly lower peak memory than before.
+#
+# `channels` is what the reader SERVES (1 or 2) and `src_channels` what the file has. A file
+# with more than two channels is served as its front pair (docs/adr/0010-multichannel-loads-
+# front-pair.md): channels, total_frames and every read_chunk agree on 2-channel frames, and
+# read_all matches n_load_wav of the same file. The pair is picked per chunk rather than copied
+# out at open, so open() costs no second buffer.
 #derive(accessors)
 struct NStreamReader {
     info;
@@ -172,6 +265,7 @@ struct NStreamReader {
     sample_rate;
     total_frames;
     frames_read;
+    src_channels;
 }
 
 # open(path) -> NStreamReader pointer, or NIDHI_ERR_IMPORT.
@@ -186,9 +280,12 @@ fn n_stream_reader_open(path) {
     if (dr < 0) { return NIDHI_ERR_IMPORT; }
     var info = decode_result_info(dr);
     var samples = decode_result_samples(dr);
+    n_scrub_nonfinite(samples);
 
-    var ch = fmtinfo_channels(info);
-    if (ch < 1) { ch = 1; }
+    var src_ch = fmtinfo_channels(info);
+    if (src_ch < 1) { src_ch = 1; }
+    var ch = src_ch;
+    if (ch > 2) { ch = 2; }
 
     # Frame count comes from the DECODED data, not from the header's declared total. The two
     # disagreeing is exactly the 2.0.2 bug where total_frames stayed correct while the reader
@@ -198,39 +295,83 @@ fn n_stream_reader_open(path) {
     NStreamReader_set_info(r, info);
     NStreamReader_set_samples(r, samples);
     NStreamReader_set_channels(r, ch);
+    NStreamReader_set_src_channels(r, src_ch);
     NStreamReader_set_sample_rate(r, fmtinfo_sample_rate(info));
-    NStreamReader_set_total_frames(r, vec_len(samples) / ch);
+    NStreamReader_set_total_frames(r, vec_len(samples) / src_ch);
     NStreamReader_set_frames_read(r, 0);
     return r;
 }
 
-# read_chunk(chunk_frames) -> vec of interleaved f64 samples (empty when exhausted).
+# read_chunk(chunk_frames) -> vec of interleaved f64 samples (empty when exhausted), or 0 when
+# the chunk cannot be allocated.
+#
+# The chunk is sized up front and copied a sample (8 bytes) at a time -- the stdlib memcpy is a
+# byte loop, 11.6 ms for this file. It was vec_push per sample from vec_new(), so a whole-file
+# chunk paid the doubling chain: 16.78 MB of heap and 15.9 ms for a 10 s stereo file whose
+# samples are 7.06 MB, now 7.06 MB and 1.7 ms (512-frame chunks: 15.6 ms -> 1.7 ms per file).
 fn n_stream_reader_read_chunk(reader, chunk_frames) {
-    var out = vec_new();
-    if (chunk_frames <= 0) { return out; }
+    if (chunk_frames <= 0) { return vec_new(); }
     var ch = NStreamReader_channels(reader);
+    var src_ch = NStreamReader_src_channels(reader);
     var read = NStreamReader_frames_read(reader);
     var remaining = NStreamReader_total_frames(reader) - read;
-    if (remaining <= 0) { return out; }
+    if (remaining <= 0) { return vec_new(); }
     var n = chunk_frames;
     if (n > remaining) { n = remaining; }
 
     var samples = NStreamReader_samples(reader);
-    var base = read * ch;
     var count = n * ch;
-    var i = 0;
-    while (i < count) {
-        vec_push(out, vec_get(samples, base + i));
-        i = i + 1;
+    var out = n_vec_with_cap(count);
+    if (out == 0) { return 0; }
+    if (src_ch == ch) {
+        var dst = load64(out);
+        var src = load64(samples) + read * ch * 8;
+        var i = 0;
+        while (i < count) {
+            store64(dst + i * 8, load64(src + i * 8));
+            i = i + 1;
+        }
+        store64(out + 8, count);
+    } else {
+        var f = 0;
+        while (f < n) {
+            var at = (read + f) * src_ch;
+            vec_push(out, vec_get(samples, at));
+            vec_push(out, vec_get(samples, at + 1));
+            f = f + 1;
+        }
     }
     NStreamReader_set_frames_read(reader, read + n);
     return out;
 }
 
-# read_all() -> a Sample holding every remaining frame.
+# read_all() -> a Sample holding every remaining frame, or NIDHI_ERR_IMPORT when it cannot be
+# allocated.
+#
+# A reader nothing has been read from, whose decoded buffer is exactly its frames (no trailing
+# partial frame, no extra channels), hands that buffer over instead of copying it: read_all
+# exhausts the reader, so nothing reads the buffer through it again -- the oracle's read_all
+# consumed the reader outright (`fn read_all(mut self)`). Same samples, same length, 0 bytes
+# instead of a whole-file copy.
 fn n_stream_reader_read_all(reader) {
-    var data = n_stream_reader_read_chunk(reader, NStreamReader_total_frames(reader));
-    if (NStreamReader_channels(reader) == 1) {
+    var total = NStreamReader_total_frames(reader);
+    var ch = NStreamReader_channels(reader);
+    var samples = NStreamReader_samples(reader);
+    var data = 0;
+    var whole = 0;
+    if (NStreamReader_frames_read(reader) == 0) {
+        if (NStreamReader_src_channels(reader) == ch) {
+            if (vec_len(samples) == total * ch) { whole = 1; }
+        }
+    }
+    if (whole == 1) {
+        data = samples;
+        NStreamReader_set_frames_read(reader, total);
+    } else {
+        data = n_stream_reader_read_chunk(reader, total);
+        if (data == 0) { return NIDHI_ERR_IMPORT; }
+    }
+    if (ch == 1) {
         return n_sample_from_mono(data, NStreamReader_sample_rate(reader));
     }
     return n_sample_from_stereo(data, NStreamReader_sample_rate(reader));

@@ -1,5 +1,6 @@
 # capture.tcyr -- parity tests for src/capture.cyr (ports rust-old/src/capture.rs #[test]s).
 
+include "lib/chrono.cyr"
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
@@ -17,6 +18,36 @@ fn push_n(v, val, n) {
     var i = 0;
     while (i < n) { vec_push(v, val); i = i + 1; }
     return 0;
+}
+
+# uniform noise in [-0.5, 0.5), a fixed LCG so every run sees the same crossings
+fn lcg_noise(n, seed0) {
+    var d = vec_new();
+    var seed = seed0;
+    var i = 0;
+    while (i < n) {
+        seed = seed * 6364136223846793005 + 1442695040888963407;
+        vec_push(d, f64_sub(f64_div(f64_from((seed >> 33) & 0xFFFFFF), f64_from(16777216)), F64_HALF));
+        i = i + 1;
+    }
+    return d;
+}
+
+fn count_nonfinite(v) {
+    var n = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (n_is_finite(vec_get(v, i)) == 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# smallest power of two >= n, from vec's initial 16 (the cap a push-grown vec ends at)
+fn np2(n) {
+    var c = 16;
+    while (c < n) { c = c * 2; }
+    return c;
 }
 
 fn main() {
@@ -144,6 +175,136 @@ fn main() {
     assert_eq(n_recorder_frames(zr), 8, "mono frames before the bypass");
     NSampleRecorder_set_channels(zr, 0);
     assert_eq(n_recorder_frames(zr), 8, "channels=0 treated as mono, no divide-by-zero");
+
+    # --- 2.2.2: n_recorder_write is bounded and never ends the process ---
+    # It used to vec_push each sample, and vec_push exits on a refused grow: measured, a stereo
+    # 48 kHz take died at ~23 min under a 4 GB limit, and at VEC_CAP_MAX on any machine. The
+    # header below CLAIMS a take 5 samples short of the cap without allocating 2 GB; the old
+    # code tried to grow it past VEC_CAP_MAX ("vec: capacity overflow", exit 1).
+    test_group("recorder write is bounded, all-or-nothing (2.2.2)");
+    assert_eq(N_RECORDER_MAX_SAMPLES, VEC_CAP_MAX, "the documented cap is VEC_CAP_MAX");
+    var blk = vec_new();
+    push_n(blk, F64_HALF, 10);
+    var full = n_recorder_new(48000, 1);
+    var fake = alloc(24);
+    store64(fake, alloc(128));
+    store64(fake + 8, VEC_CAP_MAX - 5);
+    store64(fake + 16, VEC_CAP_MAX - 5);
+    NSampleRecorder_set_buffer(full, fake);
+    assert_eq(n_recorder_write(full, blk), NIDHI_ERR_INVALID_PARAMETER, "a write past the cap is refused");
+    assert_eq(vec_len(fake), VEC_CAP_MAX - 5, "nothing appended");
+    assert_eq(n_recorder_frames(full), VEC_CAP_MAX - 5, "frames unchanged");
+    # growth through the new path keeps every sample, in order, and still returns 0
+    var gr = n_recorder_new(44100, 2);
+    var gw = 0;
+    var gbad = 0;
+    while (gw < 50) {
+        var gb = vec_new();
+        var gk = 0;
+        while (gk < 37) { vec_push(gb, f64_from(gw * 37 + gk)); gk = gk + 1; }
+        if (n_recorder_write(gr, gb) != 0) { gbad = gbad + 1; }
+        gw = gw + 1;
+    }
+    assert_eq(gbad, 0, "50 growing writes all return 0");
+    var gbuf = NSampleRecorder_buffer(gr);
+    var gi = 0;
+    var gmis = 0;
+    while (gi < vec_len(gbuf)) {
+        if (f64_to(vec_get(gbuf, gi)) != gi) { gmis = gmis + 1; }
+        gi = gi + 1;
+    }
+    assert_eq(vec_len(gbuf), 1850, "1850 samples recorded");
+    assert_eq(gmis, 0, "every sample in order");
+    vec_push(gbuf, F64_ONE);
+    assert_eq(vec_len(gbuf), 1851, "the buffer is still an ordinary vec");
+    # a recorder fed its own buffer appends a copy, even when that write moves the buffer
+    var selfr = n_recorder_new(44100, 1);
+    var sd0 = vec_new();
+    var sdi = 0;
+    while (sdi < 20) { vec_push(sd0, f64_from(sdi)); sdi = sdi + 1; }
+    assert_eq(n_recorder_write(selfr, sd0), 0, "first write");
+    assert_eq(n_recorder_write(selfr, NSampleRecorder_buffer(selfr)), 0, "self-append");
+    assert_eq(n_recorder_frames(selfr), 40, "self-append doubles the take");
+    assert_eq(vec_get(NSampleRecorder_buffer(selfr), 25), f64_from(5), "and copies it");
+
+    # --- 2.2.2: a non-finite peak / gain leaves the buffer untouched ---
+    # Oracle-faithful defects closed per ADR 0002: one +inf sample erased the whole take and
+    # wrote a NaN (gain 1/inf = 0, inf * 0 = NaN); a NaN or inf target_rms was written into
+    # every sample (measured 100/100).
+    test_group("normalize with non-finite peak / target is a no-op (2.2.2)");
+    var ninf = vec_new();
+    push_n(ninf, F64_HALF, 100);
+    vec_set(ninf, 50, 0x7FF0000000000000);
+    var nis = n_sample_from_mono(ninf, 44100);
+    n_normalize_peak(nis);
+    assert_eq(vec_get(NSample_data(nis), 0), F64_HALF, "peak +inf: finite samples untouched");
+    assert_eq(count_nonfinite(NSample_data(nis)), 1, "peak +inf: no NaN written");
+    var rn = n_sample_from_mono(vec_new(), 44100);
+    var rv = vec_new();
+    push_n(rv, F64_HALF, 100);
+    NSample_set_data(rn, rv);
+    n_normalize_rms(rn, 0x7FF8000000000000);
+    assert_eq(count_nonfinite(rv), 0, "target NaN: every sample still finite");
+    n_normalize_rms(rn, 0x7FF0000000000000);
+    assert_eq(count_nonfinite(rv), 0, "target +inf: every sample still finite");
+    assert_eq(vec_get(rv, 7), F64_HALF, "and unchanged");
+    n_normalize_rms(nis, f64_div(f64_from(2), f64_from(10)));
+    assert_eq(count_nonfinite(NSample_data(nis)), 1, "rms +inf: no NaN written");
+    assert_eq(vec_get(NSample_data(nis), 0), F64_HALF, "rms +inf: finite samples untouched");
+    n_normalize_rms(rsm, f64_div(f64_from(3), f64_from(10)));
+    assert_eq(approx(naad_rms(NSample_data(rsm)), f64_div(f64_from(3), f64_from(10)), tol), 1, "finite target still normalizes");
+
+    # --- 2.2.2: detect_loop_points keeps a stable top 10 instead of sorting every candidate ---
+    # The insertion sort over all candidates was O(n^2), and on noise the first outer pass keeps
+    # ~one candidate per crossing: measured 1022 ms for 1 s of noise, 4087 ms for 2 s. The
+    # results must not move: the pin below was produced by the old full sort.
+    test_group("detect_loop_points is not quadratic, results unchanged (2.2.2)");
+    var pin = n_detect_loop_points(n_sample_from_mono(lcg_noise(6000, 4242), 44100), 50);
+    var pin_e = vec_new();
+    vec_push(pin_e, 4010); vec_push(pin_e, 5598); vec_push(pin_e, 2450); vec_push(pin_e, 2786); vec_push(pin_e, 5021);
+    vec_push(pin_e, 4919); vec_push(pin_e, 822); vec_push(pin_e, 2446); vec_push(pin_e, 3088); vec_push(pin_e, 3697);
+    assert_eq(vec_len(pin), 10, "noise: 10 pairs");
+    var pi2 = 0;
+    var pbad = 0;
+    while (pi2 < vec_len(pin)) {
+        if (load64(vec_get(pin, pi2)) != 4) { pbad = pbad + 1; }
+        if (load64(vec_get(pin, pi2) + 8) != vec_get(pin_e, pi2)) { pbad = pbad + 1; }
+        pi2 = pi2 + 1;
+    }
+    assert_eq(pbad, 0, "noise: same pairs, same order as the full stable sort");
+    # Deterministic: the old code kept three vecs of EVERY candidate; now only mono, the
+    # crossings and three lists of 10 are allocated. Bound computed from the push-doubling caps.
+    var nz = lcg_noise(88200, 12345);
+    var ncr = 0;
+    var zi = 1;
+    while (zi < 88200) {
+        if (f64_le(vec_get(nz, zi - 1), 0) == 1) {
+            if (f64_gt(vec_get(nz, zi), 0) == 1) { ncr = ncr + 1; }
+        }
+        zi = zi + 1;
+    }
+    var nzs = n_sample_from_mono(nz, 44100);
+    var la0 = alloc_used();
+    var lt0 = clock_now_ns();
+    var nlp = n_detect_loop_points(nzs, 100);
+    var lt1 = clock_now_ns();
+    var lused = alloc_used() - la0;
+    assert_eq(vec_len(nlp), 10, "2 s of noise: 10 pairs");
+    assert(lused < 16 * np2(88200) + 16 * np2(ncr) + 4096, "no per-candidate storage");
+    # 2 s of noise took 4087 ms; now ~23 ms. 1 s is 40x headroom, not a tight timing test.
+    assert((lt1 - lt0) / 1000000 < 1000, "2 s of noise in under 1 s (was 4.1 s)");
+
+    # --- 2.2.2: min_loop_frames * 2 no longer overflows the length guard ---
+    # min >= 2^62 wrapped `frames < min * 2` negative, so the guard passed and every crossing
+    # pair was visited for nothing (3136 ms on 2 s of noise). Now it returns before downmixing.
+    test_group("huge min_loop_frames returns at the guard (2.2.2)");
+    var ha0 = alloc_used();
+    var hl = n_detect_loop_points(nzs, 0x4000000000000000);
+    var hused = alloc_used() - ha0;
+    assert_eq(vec_len(hl), 0, "min 2^62 -> no candidates");
+    assert(hused < 1024, "min 2^62 returns before allocating the mono downmix");
+    assert_eq(vec_len(n_detect_loop_points(nzs, 44100)), 10, "min = frames/2 still searches");
+    assert_eq(vec_len(n_detect_loop_points(nzs, 44101)), 0, "min = frames/2 + 1 is refused, as before");
 
     return assert_summary();
 }

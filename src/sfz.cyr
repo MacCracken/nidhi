@@ -1,11 +1,18 @@
 # sfz.cyr -- SFZ text parser (v1 + v2 subset)
-# Requires: alloc, vec, str (str_*), string, math (f64_*, f64_parse_ok), byte ops (load8),
-#           sample, zone (n_zone_*), instrument (n_instrument_*), envelope (n_adsr_config_from_seconds),
-#           loop_mode (LOOP_*)
+# Requires: alloc, vec, str (str_*), string, math (f64_*, f64_parse), byte ops (load8),
+#           hashmap (map_new_str / map_get_or / map_set), sample, zone (n_zone_*),
+#           instrument (n_instrument_*), envelope (n_adsr_config_from_seconds), loop_mode (LOOP_*)
 #
 # Ports rust-old/src/sfz.rs. Line-based, whitespace-tokenized, key=value opcodes. Unknown opcodes
 # and malformed tokens are silently ignored. Strings are stdlib Str objects. Option<String> ->
 # null pointer (0 = None); Option<u8> -> -1 sentinel. parse is infallible (always returns a file).
+#
+# Every string the parsed file KEEPS (sample, loop_mode, fil_type, cc param, default_path,
+# includes) is an owned, NUL-terminated copy. They used to be views into the caller's input
+# buffer: a host that reused its read buffer for the next file (the pattern the stdlib's
+# file_read_whole_into recommends) found `sample=a.wav` reading back as the next file's bytes,
+# and a filename handed to n_load_wav (a cstr API) ran on to the end of the SFZ text. The oracle
+# copied every one of them into a String.
 
 var SFZ_HDR_NONE    = 0 - 1;
 var SFZ_HDR_CONTROL = 0;
@@ -14,18 +21,107 @@ var SFZ_HDR_GROUP   = 2;
 var SFZ_HDR_REGION  = 3;
 var SFZ_HDR_CURVE   = 4;
 
+# Longest `default_path` honoured: Linux PATH_MAX. The prefix is joined onto the filename of
+# every region, so its length multiplies into the heap: a 1.19 MB file carrying a 1 MB
+# default_path and 8,000 one-letter regions asked for ~8 GB and segfaulted once alloc returned 0
+# (5,000 regions: 4,055,809,968 bytes, 3,560 heap bytes per input byte). The oracle did the same
+# join. A longer prefix cannot name an openable file anyway -- open(2) answers ENAMETOOLONG -- so
+# an over-long `default_path=` is ignored like any other unusable value.
+var N_SFZ_PATH_MAX = 4096;
+
 # --- small helpers ---
-#inline
-fn sfz_is_ws(c) {
+
+# Byte length of the Unicode White_Space code point at p (n bytes readable), or 0.
+#
+# The oracle split with `str::split_whitespace` and trimmed with `str::trim`, and both use
+# char::is_whitespace -- all 25 White_Space code points, not just space/tab/CR/LF. A form feed
+# or an NBSP glued `<region>` to the next opcode here, and the region vanished. U+0009..U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000..U+200A, U+2028, U+2029,
+# U+202F, U+205F, U+3000. Every multi-byte form starts with a UTF-8 lead byte, which never occurs
+# as a continuation byte, so a byte-wise scan of valid UTF-8 can only match on a char boundary.
+# The oracle took &str, so it never saw invalid UTF-8; here such bytes are simply not whitespace.
+fn n_sfz_ws_at(p, n) {
+    if (n <= 0) { return 0; }
+    var c = load8(p);
     if (c == 32) { return 1; }
-    if (c == 9) { return 1; }
-    if (c == 13) { return 1; }
-    if (c == 10) { return 1; }
+    if (c >= 9) { if (c <= 13) { return 1; } }
+    if (c == 194) {
+        if (n < 2) { return 0; }
+        var d = load8(p + 1);
+        if (d == 133) { return 2; }
+        if (d == 160) { return 2; }
+        return 0;
+    }
+    if (c < 225) { return 0; }
+    if (c > 227) { return 0; }
+    if (n < 3) { return 0; }
+    var b1 = load8(p + 1);
+    var b2 = load8(p + 2);
+    if (c == 225) {
+        if (b1 == 154) { if (b2 == 128) { return 3; } }
+        return 0;
+    }
+    if (c == 227) {
+        if (b1 == 128) { if (b2 == 128) { return 3; } }
+        return 0;
+    }
+    if (b1 == 128) {
+        if (b2 >= 128) { if (b2 <= 138) { return 3; } }
+        if (b2 == 168) { return 3; }
+        if (b2 == 169) { return 3; }
+        if (b2 == 175) { return 3; }
+        return 0;
+    }
+    if (b1 == 129) { if (b2 == 159) { return 3; } }
     return 0;
 }
 
-fn sfz_starts(s, cstr) {
-    return str_starts_with(s, str_from(cstr));
+# Byte length of a White_Space code point ENDING at p + n, or 0 (the right-hand half of trim).
+fn n_sfz_ws_before(p, n) {
+    if (n <= 0) { return 0; }
+    if (n_sfz_ws_at(p + n - 1, 1) == 1) { return 1; }
+    if (n >= 2) { if (n_sfz_ws_at(p + n - 2, 2) == 2) { return 2; } }
+    if (n >= 3) { if (n_sfz_ws_at(p + n - 3, 3) == 3) { return 3; } }
+    return 0;
+}
+
+# 1 if the n bytes at p spell exactly the NUL-terminated cstr.
+fn n_sfz_span_eq(p, n, cstr) {
+    if (n != strlen(cstr)) { return 0; }
+    return memeq(p, cstr, n);
+}
+
+# 1 if the n bytes at p spell the lowercase cstr, ignoring ASCII case.
+fn n_sfz_span_eq_nocase(p, n, cstr) {
+    if (n != strlen(cstr)) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(p + i);
+        if (c >= 65) { if (c <= 90) { c = c + 32; } }
+        if (c != load8(cstr + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# An owned, NUL-terminated copy of n bytes at p, as a Str (0 on OOM).
+fn n_sfz_own(p, n) {
+    var buf = alloc(n + 1);
+    if (buf == 0) { return 0; }
+    memcpy(buf, p, n);
+    store8(buf + n, 0);
+    return str_new(buf, n);
+}
+
+# prefix + name as one owned, NUL-terminated Str (0 on OOM). str_cat does not terminate.
+fn n_sfz_join(prefix, name) {
+    var la = str_len(prefix);
+    var lb = str_len(name);
+    var buf = alloc(la + lb + 1);
+    if (buf == 0) { return 0; }
+    memcpy(buf, str_data(prefix), la);
+    memcpy(buf + la, str_data(name), lb);
+    store8(buf + la + lb, 0);
+    return str_new(buf, la + lb);
 }
 
 # parse a signed decimal integer from a Str (Rust i32/i64 FromStr: optional leading +/-).
@@ -61,7 +157,16 @@ fn sfz_int(s, out) {
     return 1;
 }
 
-# parse an unsigned decimal integer (Rust u32/usize FromStr: optional leading +, rejects -).
+# parse an unsigned decimal integer with Rust's parse::<usize>() semantics on a 64-bit target:
+# optional leading +, rejects -, accepts 0..=u64::MAX and rejects anything larger.
+#
+# Saturate, do not wrap. usize genuinely ACCEPTS values above i64::MAX (up to u64::MAX), so
+# rejecting those would break parity in one direction; they clamp to i64::MAX, which every
+# downstream range check then treats on its own terms. Values ABOVE u64::MAX are an Err in Rust
+# and leave the field unchanged -- the port used to saturate those too, so
+# `offset=99999999999999999999999` set an offset the oracle never set. The cut is decided on the
+# digit string (more than 20 significant digits, or 20 that compare above "18446744073709551615"),
+# because u64::MAX itself does not fit the i64 accumulator.
 fn sfz_uint(s, out) {
     var data = str_data(s);
     var len = str_len(s);
@@ -71,14 +176,14 @@ fn sfz_uint(s, out) {
     var val = 0;
     var any = 0;
     var over = 0;
+    var sig = 0;
+    var sig_at = 0 - 1;
     while (i < len) {
         var c = load8(data + i);
         if (c < 48) { return 0; }
         if (c > 57) { return 0; }
-        # Saturate, do not wrap. Rust's parse::<usize>() genuinely ACCEPTS values above
-        # i64::MAX on this target (up to u64::MAX), so rejecting them outright would break
-        # parity in the other direction; anything that large is clamped to i64::MAX, which
-        # every downstream range check then rejects on its own terms.
+        if (sig == 0) { if (c != 48) { sig_at = i; } }
+        if (sig_at >= 0) { sig = sig + 1; }
         if (val > 922337203685477580) { over = 1; }
         if (over == 0) {
             val = val * 10 + (c - 48);
@@ -88,6 +193,18 @@ fn sfz_uint(s, out) {
         i = i + 1;
     }
     if (any == 0) { return 0; }
+    if (sig > 20) { return 0; }
+    if (sig == 20) {
+        var umax = "18446744073709551615";
+        var k = 0;
+        while (k < 20) {
+            var dc = load8(data + sig_at + k);
+            var mc = load8(umax + k);
+            if (dc > mc) { return 0; }
+            if (dc < mc) { k = 20; }
+            k = k + 1;
+        }
+    }
     if (over == 1) { val = 9223372036854775807; }
     store64(out, val);
     return 1;
@@ -103,22 +220,6 @@ fn sfz_u8(s, out) {
     return 1;
 }
 
-# ASCII-lowercase a Str into a fresh Str (for the inf/nan spellings Rust accepts).
-fn sfz_lower(s) {
-    var len = str_len(s);
-    var data = str_data(s);
-    var buf = alloc(len + 1);
-    if (buf == 0) { return s; }
-    var i = 0;
-    while (i < len) {
-        var c = load8(data + i);
-        if (c >= 65) { if (c <= 90) { c = c + 32; } }
-        store8(buf + i, c);
-        i = i + 1;
-    }
-    return str_new(buf, len);
-}
-
 # parse a u32 (Rust parse::<u32>: 0..=4294967295).
 fn sfz_u32(s, out) {
     if (sfz_uint(s, out) == 0) { return 0; }
@@ -132,6 +233,29 @@ fn sfz_i32(s, out) {
     if (sfz_int(s, out) == 0) { return 0; }
     if (load64(out) < (0 - 2147483648)) { return 0; }
     if (load64(out) > 2147483647) { return 0; }
+    return 1;
+}
+
+# n_sfz_parse_span(p, n, out) -> 1 and the f64 bits of the validated token p[0..n) in out, or 0.
+#
+# The stdlib's span form, f64_parse_n, only arrived in cyrius 6.7.9, and nidhi's consumers may be
+# on 6.7.5. f64_parse reads a NUL-terminated string with the same grammar and rounding (on 6.7.18
+# it IS f64_parse_n over the span up to the NUL), and a validated token holds no NUL, so the bits
+# are identical. The copy goes on the stack for an ordinary token. Only a token of 64 bytes or more,
+# which takes a hostile file, copies to the heap.
+fn n_sfz_parse_span(p, n, out) {
+    var buf[64];
+    if (n < 64) {
+        memcpy(&buf, p, n);
+        store8(&buf + n, 0);
+        store64(out, f64_parse(&buf));
+        return 1;
+    }
+    var h = alloc(n + 1);
+    if (h == 0) { return 0; }
+    memcpy(h, p, n);
+    store8(h + n, 0);
+    store64(out, f64_parse(h));
     return 1;
 }
 
@@ -156,11 +280,14 @@ fn sfz_f64(s, out) {
     if (c0 == 45) { i = 1; }
     if (i >= len) { return 0; }
 
-    # inf / infinity / nan (case-insensitive) -- Rust accepts all three.
-    var rest = str_substr(s, i, len);
-    if (str_eq_cstr(sfz_lower(rest), "inf") == 1) { return f64_parse_ok(str_cstr(s), out); }
-    if (str_eq_cstr(sfz_lower(rest), "infinity") == 1) { return f64_parse_ok(str_cstr(s), out); }
-    if (str_eq_cstr(sfz_lower(rest), "nan") == 1) { return f64_parse_ok(str_cstr(s), out); }
+    # inf / infinity / nan (case-insensitive) -- Rust accepts all three. Compared in place and
+    # parsed through n_sfz_parse_span: this path used to build three lowercased heap copies and a
+    # heap NUL-terminated copy of every float token, all of it never reclaimed.
+    var rp = data + i;
+    var rn = len - i;
+    if (n_sfz_span_eq_nocase(rp, rn, "inf") == 1) { return n_sfz_parse_span(data, len, out); }
+    if (n_sfz_span_eq_nocase(rp, rn, "infinity") == 1) { return n_sfz_parse_span(data, len, out); }
+    if (n_sfz_span_eq_nocase(rp, rn, "nan") == 1) { return n_sfz_parse_span(data, len, out); }
 
     var digits = 0;
     while (i < len) {
@@ -203,7 +330,9 @@ fn sfz_f64(s, out) {
         if (edig == 0) { return 0; }
     }
     if (i != len) { return 0; }
-    if (f64_parse_ok(str_cstr(s), out) == 0) { return 0; }
+    # The whole token has been validated, so parsing exactly this span returns what f64_parse_ok
+    # on a heap NUL-terminated copy did, bit for bit.
+    if (n_sfz_parse_span(data, len, out) == 0) { return 0; }
     # Normalise -0.0 to +0.0. sfz_inh decides "was this opcode explicitly set?" by comparing
     # the stored value against the default as a RAW BIT PATTERN, and -0.0 is 0x8000...0, which
     # is not bit-equal to +0.0. The oracle compared with `== 0.0`, where -0.0 IS equal -- so
@@ -216,65 +345,21 @@ fn sfz_f64(s, out) {
     return 1;
 }
 
-# strip a single leading/trailing double-quote from a Str (trim_matches('"')).
-fn sfz_trim_quotes(s) {
-    var len = str_len(s);
-    var data = str_data(s);
-    var start = 0;
-    var end = len;
-    if (end > start) { if (load8(data + start) == 34) { start = start + 1; } }
-    if (end > start) { if (load8(data + end - 1) == 34) { end = end - 1; } }
-    return str_substr(s, start, end);
-}
-
-# split a Str into a vec of line Strs (on '\n'; no trailing empty after a final newline).
-fn sfz_lines(s) {
-    var out = vec_new();
-    var data = str_data(s);
-    var len = str_len(s);
-    var start = 0;
-    var i = 0;
-    while (i < len) {
-        if (load8(data + i) == 10) {
-            vec_push(out, str_new(data + start, i - start));
-            start = i + 1;
-        }
-        i = i + 1;
-    }
-    if (start < len) { vec_push(out, str_new(data + start, len - start)); }
-    return out;
-}
-
-# split a Str into a vec of token Strs on whitespace runs (no empties).
-fn sfz_tokenize(s) {
-    var out = vec_new();
-    var data = str_data(s);
-    var len = str_len(s);
-    var i = 0;
-    while (i < len) {
-        if (sfz_is_ws(load8(data + i)) == 1) {
-            i = i + 1;
-        } else {
-            var start = i;
-            var scanning = 1;
-            while (scanning == 1) {
-                if (i >= len) { scanning = 0; }
-                else { if (sfz_is_ws(load8(data + i)) == 1) { scanning = 0; } else { i = i + 1; } }
-            }
-            vec_push(out, str_new(data + start, i - start));
-        }
-    }
-    return out;
-}
-
 # --- parse_note_or_number(s) -> MIDI 0..127, or -1 (None) ---
+#
+# Two parse widths, both the oracle's (rust-old/src/sfz.rs parse_note_or_number):
+#   * the numeric attempt is `s.parse::<u8>()`. It was a SIGNED parse here, so "-0" came back as
+#     note 0 where u8 rejects the '-' and the note-name path then answers None: `hikey=-0` set
+#     hikey 0 (a zone that matches only note 0) instead of leaving 127.
+#   * the octave is `parse::<i32>()`. It was an i64 parse, and `(octave + 1) * 12` wrapped, so
+#     `c4611686018427387903` came back as note 0 and `e...` as note 4 -- nonsense accepted as a
+#     key. With the octave held to i32 the product cannot overflow an i64, so the range test
+#     below sees the true value. (The oracle computed in i32: in a release build an octave near
+#     2^30 wrapped there instead, and a debug build panicked. Those inputs return None here.)
 #must_use
 fn n_sfz_note_or_num(value) {
-    var out = alloc(8);
-    if (sfz_int(value, out) == 1) {
-        var v = load64(out);
-        if (v >= 0) { if (v <= 255) { return v; } }
-    }
+    var o[8];
+    if (sfz_u8(value, &o) == 1) { return load64(&o); }
     var data = str_data(value);
     var len = str_len(value);
     if (len == 0) { return 0 - 1; }
@@ -306,16 +391,19 @@ fn n_sfz_note_or_num(value) {
             }
         }
     }
-    var octave_str = str_substr(value, idx, len);
-    if (sfz_int(octave_str, out) == 0) { return 0 - 1; }
-    var octave = load64(out);
+    # A stack Str over the octave digits: nothing here outlives the call.
+    var os[16];
+    store64(&os, data + idx);
+    store64(&os + 8, len - idx);
+    if (sfz_i32(&os, &o) == 0) { return 0 - 1; }
+    var octave = load64(&o);
     var midi = (octave + 1) * 12 + base + accidental;
     if (midi < 0) { return 0 - 1; }
     if (midi > 127) { return 0 - 1; }
     return midi;
 }
 
-# --- SfzRegion (37 fields) ---
+# --- SfzRegion (39 fields: the oracle's 37, then 2.2.2's seq_length and seq_position) ---
 #derive(accessors)
 struct NSfzRegion {
     sample;
@@ -355,6 +443,8 @@ struct NSfzRegion {
     fil_keytrack;
     output;
     cc_modulations;
+    seq_length;
+    seq_position;
 }
 
 # a cc modulation entry: (param Str, cc int, depth f64)
@@ -378,6 +468,9 @@ fn n_sfz_region_new() {
     NSfzRegion_set_loop_start(r, 0);
     NSfzRegion_set_loop_end(r, 0);
     NSfzRegion_set_group(r, 0);
+    # 0 = unset, so <group>/<global> inheritance can tell; to_zones maps 0 to SFZ's default of 1.
+    NSfzRegion_set_seq_length(r, 0);
+    NSfzRegion_set_seq_position(r, 0);
     NSfzRegion_set_ampeg_attack(r, 0);
     NSfzRegion_set_ampeg_decay(r, 0);
     NSfzRegion_set_ampeg_sustain(r, f100);
@@ -406,9 +499,15 @@ fn n_sfz_region_new() {
 }
 
 # apply one opcode (key, value are Str). Numeric parse failure leaves the field unchanged.
+# Neither key nor value is retained: the string-valued opcodes store an owned copy, so a caller
+# may pass views into a buffer it later reuses (n_sfz_parse passes stack views into its input).
+# The numeric scratch is a stack slot; it was an alloc(8) per opcode, never reclaimed.
+# loop_start / loop_end / offset / end parse as usize, as the oracle does (sfz.rs:265-272,
+# 345-354), not u32: a value in (u32::MAX, u64::MAX] is accepted there and was refused here.
 fn n_sfz_apply_opcode(r, key, value) {
-    var o = alloc(8);
-    if (str_eq_cstr(key, "sample") == 1) { NSfzRegion_set_sample(r, value); return 0; }
+    var ob[8];
+    var o = &ob;
+    if (str_eq_cstr(key, "sample") == 1) { NSfzRegion_set_sample(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
     if (str_eq_cstr(key, "lokey") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_lokey(r, n); } return 0; }
     if (str_eq_cstr(key, "hikey") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_hikey(r, n); } return 0; }
     if (str_eq_cstr(key, "key") == 1) { var n = n_sfz_note_or_num(value); if (n >= 0) { NSfzRegion_set_key(r, n); } return 0; }
@@ -418,13 +517,17 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "tune") == 1) { if (sfz_i32(value, o) == 1) { NSfzRegion_set_tune(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "volume") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_volume(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "pan") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pan(r, f64_min(f64_max(load64(o), f64_neg(f64_from(100))), f64_from(100))); } return 0; }
-    if (str_eq_cstr(key, "loop_mode") == 1) { NSfzRegion_set_loop_mode(r, value); return 0; }
-    if (str_eq_cstr(key, "loopmode") == 1) { NSfzRegion_set_loop_mode(r, value); return 0; }
-    if (str_eq_cstr(key, "loop_start") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loopstart") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loop_end") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "loopend") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "seq_position") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loop_mode") == 1) { NSfzRegion_set_loop_mode(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
+    if (str_eq_cstr(key, "loopmode") == 1) { NSfzRegion_set_loop_mode(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
+    if (str_eq_cstr(key, "loop_start") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loopstart") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_start(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loop_end") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "loopend") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_loop_end(r, load64(o)); } return 0; }
+    # seq_length / seq_position are SFZ's round-robin. The oracle wrote seq_position into `group`,
+    # which gave each region of a round-robin set its OWN group, so the set could never cycle.
+    # See docs/adr/0012-round-robin-plays.md.
+    if (str_eq_cstr(key, "seq_length") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_seq_length(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "seq_position") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_seq_position(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "group") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_group(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "ampeg_attack") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_attack(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "ampeg_decay") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_ampeg_decay(r, f64_max(load64(o), 0)); } return 0; }
@@ -438,12 +541,12 @@ fn n_sfz_apply_opcode(r, key, value) {
     if (str_eq_cstr(key, "fileg_release") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_release(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fileg_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fileg_depth(r, f64_min(f64_max(load64(o), f64_neg(f64_from(9600))), f64_from(9600))); } return 0; }
     if (str_eq_cstr(key, "transpose") == 1) { if (sfz_i32(value, o) == 1) { NSfzRegion_set_transpose(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "offset") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_offset(r, load64(o)); } return 0; }
-    if (str_eq_cstr(key, "end") == 1) { if (sfz_u32(value, o) == 1) { NSfzRegion_set_end(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "offset") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_offset(r, load64(o)); } return 0; }
+    if (str_eq_cstr(key, "end") == 1) { if (sfz_uint(value, o) == 1) { NSfzRegion_set_end(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "fil_resonance") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_resonance(r, f64_max(load64(o), 0)); } return 0; }
-    if (str_eq_cstr(key, "fil_type") == 1) { NSfzRegion_set_fil_type(r, value); return 0; }
-    if (str_eq_cstr(key, "filtype") == 1) { NSfzRegion_set_fil_type(r, value); return 0; }
+    if (str_eq_cstr(key, "fil_type") == 1) { NSfzRegion_set_fil_type(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
+    if (str_eq_cstr(key, "filtype") == 1) { NSfzRegion_set_fil_type(r, n_sfz_own(str_data(value), str_len(value))); return 0; }
     if (str_eq_cstr(key, "pitchlfo_freq") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pitchlfo_freq(r, f64_max(load64(o), 0)); } return 0; }
     if (str_eq_cstr(key, "pitchlfo_depth") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_pitchlfo_depth(r, load64(o)); } return 0; }
     if (str_eq_cstr(key, "fillfo_freq") == 1) { if (sfz_f64(value, o) == 1) { NSfzRegion_set_fillfo_freq(r, f64_max(load64(o), 0)); } return 0; }
@@ -454,14 +557,15 @@ fn n_sfz_apply_opcode(r, key, value) {
     # CC modulation fallback: key contains "_oncc"
     var pos = str_index_of_cstr(key, "_oncc");
     if (pos >= 0) {
-        var param = str_substr(key, 0, pos);
-        var cc_str = str_substr(key, pos + 5, str_len(key));
-        var cc_out = alloc(8);
-        if (sfz_u8(cc_str, cc_out) == 1) {
+        var cs[16];
+        store64(&cs, str_data(key) + pos + 5);
+        store64(&cs + 8, str_len(key) - pos - 5);
+        var cc_out[8];
+        if (sfz_u8(&cs, &cc_out) == 1) {
             if (sfz_f64(value, o) == 1) {
                 var m = alloc(sizeof(NSfzCC));
-                NSfzCC_set_param(m, param);
-                NSfzCC_set_cc(m, load64(cc_out));
+                NSfzCC_set_param(m, n_sfz_own(str_data(key), pos));
+                NSfzCC_set_cc(m, load64(&cc_out));
                 NSfzCC_set_depth(m, load64(o));
                 vec_push(NSfzRegion_cc_modulations(r), m);
             }
@@ -472,7 +576,6 @@ fn n_sfz_apply_opcode(r, key, value) {
 }
 
 # inherit a numeric field from parent when self is at `def` and parent differs.
-#inline
 fn sfz_inh(self_v, parent_v, def) {
     if (self_v == def) { if (parent_v != def) { return parent_v; } }
     return self_v;
@@ -503,6 +606,8 @@ fn n_sfz_inherit_from(self, parent) {
     NSfzRegion_set_loop_start(self, sfz_inh(NSfzRegion_loop_start(self), NSfzRegion_loop_start(parent), 0));
     NSfzRegion_set_loop_end(self, sfz_inh(NSfzRegion_loop_end(self), NSfzRegion_loop_end(parent), 0));
     NSfzRegion_set_group(self, sfz_inh(NSfzRegion_group(self), NSfzRegion_group(parent), 0));
+    NSfzRegion_set_seq_length(self, sfz_inh(NSfzRegion_seq_length(self), NSfzRegion_seq_length(parent), 0));
+    NSfzRegion_set_seq_position(self, sfz_inh(NSfzRegion_seq_position(self), NSfzRegion_seq_position(parent), 0));
     NSfzRegion_set_ampeg_attack(self, sfz_inh(NSfzRegion_ampeg_attack(self), NSfzRegion_ampeg_attack(parent), 0));
     NSfzRegion_set_ampeg_decay(self, sfz_inh(NSfzRegion_ampeg_decay(self), NSfzRegion_ampeg_decay(parent), 0));
     NSfzRegion_set_ampeg_sustain(self, sfz_inh(NSfzRegion_ampeg_sustain(self), NSfzRegion_ampeg_sustain(parent), f100));
@@ -537,19 +642,35 @@ fn n_sfz_parse_header(token) {
     var data = str_data(token);
     if (load8(data) != 60) { return SFZ_HDR_NONE; }
     if (load8(data + len - 1) != 62) { return SFZ_HDR_NONE; }
-    var inner = str_substr(token, 1, len - 1);
-    if (str_eq_cstr(inner, "control") == 1) { return SFZ_HDR_CONTROL; }
-    if (str_eq_cstr(inner, "global") == 1) { return SFZ_HDR_GLOBAL; }
-    if (str_eq_cstr(inner, "group") == 1) { return SFZ_HDR_GROUP; }
-    if (str_eq_cstr(inner, "region") == 1) { return SFZ_HDR_REGION; }
-    if (str_eq_cstr(inner, "curve") == 1) { return SFZ_HDR_CURVE; }
+    var ip = data + 1;
+    var il = len - 2;
+    if (n_sfz_span_eq(ip, il, "control") == 1) { return SFZ_HDR_CONTROL; }
+    if (n_sfz_span_eq(ip, il, "global") == 1) { return SFZ_HDR_GLOBAL; }
+    if (n_sfz_span_eq(ip, il, "group") == 1) { return SFZ_HDR_GROUP; }
+    if (n_sfz_span_eq(ip, il, "region") == 1) { return SFZ_HDR_REGION; }
+    if (n_sfz_span_eq(ip, il, "curve") == 1) { return SFZ_HDR_CURVE; }
     return SFZ_HDR_NONE;
 }
 
 # parse(input_cstr) -> NSfzFile pointer (never fails).
+#
+# Lines, tokens, keys and values are SPANS over the input, carried in stack Str headers; only
+# what the file keeps is allocated (n_sfz_apply_opcode copies it). This loop used to build a vec
+# of every line, a trimmed Str per line, two str_from headers for the `//` / `#include` tests and
+# a fresh 152-byte token vec per line -- none of it ever reclaimed. Measured on 1 MB of "x\n":
+# 130,024,440 heap bytes (124 per input byte), so a 40 MB file exhausted a 4 GB address space
+# and segfaulted once alloc returned 0. Now 1,104 bytes for that input (the empty file), and a
+# realistic 1 MB instrument went from 13,875,928 to 6,331,968: heap tracks what is kept.
+#
+# Line handling follows the oracle (except that input ends at the first NUL -- this is a cstr
+# API, and the oracle's &str could carry one): split on '\n' (`str::lines` also drops a trailing
+# '\r', which trim removes anyway), `str::trim` with Unicode White_Space, `//` comments,
+# `trim_start_matches("#include")` -- which strips EVERY repeat of the prefix -- then `trim`,
+# then `trim_matches('"')`, which strips every leading and trailing quote, not one of each.
 #must_use
 fn n_sfz_parse(input_cstr) {
-    var input = str_from(input_cstr);
+    var data = input_cstr;
+    var len = strlen(input_cstr);
     var global = n_sfz_region_new();
     var groups = vec_new();
     var regions = vec_new();
@@ -558,62 +679,118 @@ fn n_sfz_parse(input_cstr) {
     var includes = vec_new();
     var current_header = SFZ_HDR_NONE;
     var current_group_idx = 0 - 1;
+    var tk[16];
+    var kk[16];
+    var vv[16];
 
-    var lines = sfz_lines(input);
-    var nl = vec_len(lines);
-    var li = 0;
-    while (li < nl) {
-        var line = str_trim(vec_get(lines, li));
-        li = li + 1;
-        if (str_len(line) == 0) {
-            # skip
-        } else {
-            if (sfz_starts(line, "//") == 1) {
-                # comment, skip
-            } else {
-                if (sfz_starts(line, "#include") == 1) {
-                    var rest = sfz_trim_quotes(str_trim(str_substr(line, 8, str_len(line))));
-                    if (str_len(rest) > 0) { vec_push(includes, rest); }
+    var ls = 0;
+    while (ls < len) {
+        var le = ls;
+        while (le < len) {
+            if (load8(data + le) == 10) { break; }
+            le = le + 1;
+        }
+        var next = le + 1;
+        # trim
+        var a = ls;
+        var b = le;
+        while (a < b) {
+            var wa = n_sfz_ws_at(data + a, b - a);
+            if (wa == 0) { break; }
+            a = a + wa;
+        }
+        while (b > a) {
+            var wb = n_sfz_ws_before(data + a, b - a);
+            if (wb == 0) { break; }
+            b = b - wb;
+        }
+        var p = data + a;
+        var n = b - a;
+        var skip = 0;
+        if (n == 0) { skip = 1; }
+        if (skip == 0) { if (n >= 2) { if (memeq(p, "//", 2) == 1) { skip = 1; } } }
+        if (skip == 0) {
+            if (n >= 8) {
+                if (memeq(p, "#include", 8) == 1) {
+                    skip = 1;
+                    var ia = a;
+                    while (b - ia >= 8) {
+                        if (memeq(data + ia, "#include", 8) == 0) { break; }
+                        ia = ia + 8;
+                    }
+                    var ib = b;
+                    while (ia < ib) {
+                        var wi = n_sfz_ws_at(data + ia, ib - ia);
+                        if (wi == 0) { break; }
+                        ia = ia + wi;
+                    }
+                    while (ib > ia) {
+                        var wj = n_sfz_ws_before(data + ia, ib - ia);
+                        if (wj == 0) { break; }
+                        ib = ib - wj;
+                    }
+                    while (ia < ib) {
+                        if (load8(data + ia) != 34) { break; }
+                        ia = ia + 1;
+                    }
+                    while (ib > ia) {
+                        if (load8(data + ib - 1) != 34) { break; }
+                        ib = ib - 1;
+                    }
+                    if (ib > ia) { vec_push(includes, n_sfz_own(data + ia, ib - ia)); }
+                }
+            }
+        }
+        if (skip == 0) {
+            var i = 0;
+            while (i < n) {
+                var w = n_sfz_ws_at(p + i, n - i);
+                if (w > 0) {
+                    i = i + w;
                 } else {
-                    var tokens = sfz_tokenize(line);
-                    var nt = vec_len(tokens);
-                    var ti = 0;
-                    while (ti < nt) {
-                        var token = vec_get(tokens, ti);
-                        ti = ti + 1;
-                        var hk = n_sfz_parse_header(token);
-                        if (hk != SFZ_HDR_NONE) {
-                            current_header = hk;
-                            if (hk == SFZ_HDR_GROUP) {
-                                vec_push(groups, n_sfz_region_new());
-                                current_group_idx = vec_len(groups) - 1;
-                            }
-                            if (hk == SFZ_HDR_REGION) {
-                                vec_push(regions, n_sfz_region_new());
-                                vec_push(group_indices, current_group_idx);
-                            }
-                        } else {
-                            var eq = str_index_of(token, 61);
-                            if (eq > 0) {
-                                var k = str_substr(token, 0, eq);
-                                var v = str_substr(token, eq + 1, str_len(token));
-                                if (str_len(k) > 0) {
-                                    if (str_len(v) > 0) {
-                                        if (current_header == SFZ_HDR_CONTROL) {
-                                            if (str_eq_cstr(k, "default_path") == 1) { default_path = v; }
-                                        } else {
-                                            if (current_header == SFZ_HDR_GLOBAL) { n_sfz_apply_opcode(global, k, v); }
-                                            else {
-                                                if (current_header == SFZ_HDR_GROUP) { n_sfz_apply_opcode(vec_get(groups, vec_len(groups) - 1), k, v); }
-                                                else {
-                                                    if (current_header == SFZ_HDR_REGION) { n_sfz_apply_opcode(vec_get(regions, vec_len(regions) - 1), k, v); }
-                                                    else {
-                                                        if (current_header == SFZ_HDR_NONE) { n_sfz_apply_opcode(global, k, v); }
-                                                    }
-                                                }
-                                            }
+                    var st = i;
+                    while (i < n) {
+                        if (n_sfz_ws_at(p + i, n - i) > 0) { break; }
+                        i = i + 1;
+                    }
+                    var tp = p + st;
+                    var tl = i - st;
+                    store64(&tk, tp);
+                    store64(&tk + 8, tl);
+                    var hk = n_sfz_parse_header(&tk);
+                    if (hk != SFZ_HDR_NONE) {
+                        current_header = hk;
+                        if (hk == SFZ_HDR_GROUP) {
+                            vec_push(groups, n_sfz_region_new());
+                            current_group_idx = vec_len(groups) - 1;
+                        }
+                        if (hk == SFZ_HDR_REGION) {
+                            vec_push(regions, n_sfz_region_new());
+                            vec_push(group_indices, current_group_idx);
+                        }
+                    } else {
+                        var eq = str_index_of(&tk, 61);
+                        # split_opcode: key and value must both be non-empty
+                        if (eq > 0) {
+                            if (eq + 1 < tl) {
+                                store64(&kk, tp);
+                                store64(&kk + 8, eq);
+                                store64(&vv, tp + eq + 1);
+                                store64(&vv + 8, tl - eq - 1);
+                                if (current_header == SFZ_HDR_CONTROL) {
+                                    if (str_eq_cstr(&kk, "default_path") == 1) {
+                                        if (tl - eq - 1 <= N_SFZ_PATH_MAX) {
+                                            default_path = n_sfz_own(tp + eq + 1, tl - eq - 1);
                                         }
                                     }
+                                } elif (current_header == SFZ_HDR_GLOBAL) {
+                                    n_sfz_apply_opcode(global, &kk, &vv);
+                                } elif (current_header == SFZ_HDR_GROUP) {
+                                    n_sfz_apply_opcode(vec_get(groups, vec_len(groups) - 1), &kk, &vv);
+                                } elif (current_header == SFZ_HDR_REGION) {
+                                    n_sfz_apply_opcode(vec_get(regions, vec_len(regions) - 1), &kk, &vv);
+                                } elif (current_header == SFZ_HDR_NONE) {
+                                    n_sfz_apply_opcode(global, &kk, &vv);
                                 }
                             }
                         }
@@ -621,6 +798,7 @@ fn n_sfz_parse(input_cstr) {
                 }
             }
         }
+        ls = next;
     }
 
     var f = alloc(sizeof(NSfzFile));
@@ -663,6 +841,13 @@ fn n_sfz_map_fil_veltrack(cents) {
 struct NSfzZoneFile { zone; filename; }
 
 # to_zones(sfzfile, sample_rate f64 bits) -> vec of NSfzZoneFile.
+#
+# The default_path join is memoized per distinct sample name (content-keyed). It used to be one
+# fresh |default_path| + |sample| allocation PER REGION, so heap was |default_path| x regions --
+# see N_SFZ_PATH_MAX for the 1.19 MB file that needed ~8 GB. With the path capped at PATH_MAX and
+# the join shared, a region whose sample repeats costs nothing extra, and a distinct sample costs
+# at most PATH_MAX more than the `sample=` token that introduced it. Regions that share a name now
+# share one filename Str, which nothing in nidhi mutates.
 #must_use
 fn n_sfz_to_zones(f, sample_rate) {
     var out = vec_new();
@@ -671,6 +856,8 @@ fn n_sfz_to_zones(f, sample_rate) {
     var group_indices = NSfzFile_group_indices(f);
     var global = NSfzFile_global(f);
     var default_path = NSfzFile_default_path(f);
+    var joined = 0;
+    if (default_path != 0) { joined = map_new_str(); }
     var nreg = vec_len(regions);
     var i = 0;
     while (i < nreg) {
@@ -690,15 +877,22 @@ fn n_sfz_to_zones(f, sample_rate) {
         }
 
         var samp = NSfzRegion_sample(merged);
-        if (samp == 0) {
-            # no sample -> skip region
-        } else {
-            var filename = samp;
+        var filename = samp;
+        if (samp != 0) {
             if (default_path != 0) {
-                if (str_starts_with(filename, default_path) == 0) {
-                    filename = str_cat(default_path, filename);
+                if (str_starts_with(samp, default_path) == 0) {
+                    filename = map_get_or(joined, samp, 0);
+                    if (filename == 0) {
+                        filename = n_sfz_join(default_path, samp);
+                        if (filename != 0) { map_set(joined, samp, filename); }
+                    }
                 }
             }
+        }
+        if (filename == 0) {
+            # no sample -> skip region. Also reached when the joined name could not be
+            # allocated: dropping the region beats handing back a null filename.
+        } else {
             # tune_cents = tune + transpose * 100
             var tune_cents = f64_add(f64_from(NSfzRegion_tune(merged)), f64_mul(f64_from(NSfzRegion_transpose(merged)), f64_from(100)));
             var filter_type = n_sfz_map_fil_type(NSfzRegion_fil_type(merged));
@@ -714,6 +908,7 @@ fn n_sfz_to_zones(f, sample_rate) {
             zone = n_zone_with_filter(zone, NSfzRegion_cutoff(merged), n_sfz_map_fil_veltrack(NSfzRegion_fil_veltrack(merged)));
             zone = n_zone_with_filter_type(zone, filter_type);
             zone = n_zone_with_group(zone, NSfzRegion_group(merged));
+            zone = n_zone_with_seq(zone, NSfzRegion_seq_length(merged), NSfzRegion_seq_position(merged));
 
             if (f64_gt(NSfzRegion_resonance(merged), 0) == 1) { zone = n_zone_with_filter_resonance(zone, NSfzRegion_resonance(merged)); }
             if (NSfzRegion_offset(merged) > 0) { zone = n_zone_with_sample_offset(zone, NSfzRegion_offset(merged)); }
@@ -776,28 +971,29 @@ fn n_sfz_clone_region(src) {
 struct NSfzInstResult { instrument; sample_files; }
 
 # to_instrument(name, sample_rate) -> NSfzInstResult. Dedups filenames -> sequential SampleIds.
+#
+# Dedup is a content-keyed hashmap lookup, in first-seen order exactly as the oracle's
+# `sample_files.iter().position(..)` scan assigns ids. That scan was ported literally, and it is
+# O(regions x files): 40,000 regions with distinct names (a 1.16 MB file) took 14,346 ms here,
+# 37 ms through the map. The stdlib map's hash is seeded per process, so a file cannot be
+# crafted to collide its way back to quadratic.
 #must_use
 fn n_sfz_to_instrument(f, name, sample_rate) {
     var pairs = n_sfz_to_zones(f, sample_rate);
     var inst = n_instrument_new(name);
     var sample_files = vec_new();
+    var seen = map_new_str();
     var np = vec_len(pairs);
     var i = 0;
     while (i < np) {
         var pair = vec_get(pairs, i);
         var zone = NSfzZoneFile_zone(pair);
         var filename = NSfzZoneFile_filename(pair);
-        # find filename in sample_files (string equality)
-        var idx = 0 - 1;
-        var nf = vec_len(sample_files);
-        var j = 0;
-        while (j < nf) {
-            if (str_eq(vec_get(sample_files, j), filename) == 1) { idx = j; j = nf; }
-            else { j = j + 1; }
-        }
+        var idx = map_get_or(seen, filename, 0 - 1);
         if (idx < 0) {
             vec_push(sample_files, filename);
             idx = vec_len(sample_files) - 1;
+            map_set(seen, filename, idx);
         }
         NZone_set_sample_id(zone, idx);
         n_instrument_add_zone(inst, zone);

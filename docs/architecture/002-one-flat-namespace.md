@@ -26,7 +26,8 @@ families in 2.2.0 specifically to de-collide with nidhi's.
 
 Every nidhi symbol carries `n_` (functions, constants) or `N` (types). It is not stylistic. As of
 2.1.0, 86 top-level names still skip it — measured at **0 collisions** against all 6,478
-top-level names in `lib/`, so the exposure is forward-looking rather than live. The two with a
+top-level names in `lib/`, so the exposure is forward-looking rather than live. (2.2.2: 80 skip
+it, and all 294 of nidhi's top-level names still collide with none of the 9,579 in `lib/`.) The two with a
 named growth path (`CC_*`, sitting where a RIFF-parsing codec dependency would collide, and
 `ignore_i`) were prefixed in 2.1.0; the rest is
 [ADR 0005](../adr/0005-namespace-prefix-scope.md).

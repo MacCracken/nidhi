@@ -1,5 +1,6 @@
 # sf2.cyr -- SF2 / SoundFont-2 RIFF binary parser
-# Requires: alloc, vec, str (str_new), math (f64_*), byte ops (load8), sample (n_sample_*),
+# Requires: alloc, vec, str (str_new, str_clone), math (f64_*), byte ops (load8),
+#           f64_util (n_vec_with_cap), sample (n_sample_*),
 #           zone (n_zone_*), instrument (n_instrument_*), loop_mode (LOOP_*)
 #
 # Ports rust-old/src/sf2.rs. ALL multi-byte integers are little-endian. Parses an in-memory byte
@@ -26,28 +27,24 @@ var N_CC_IGEN = 0x6E656769;
 var N_CC_SHDR = 0x72646873;
 
 # --- bounds-checked little-endian byte readers (0 past end) ---
-#inline
 fn sf2_u8(data, len, off) {
     if (off < 0) { return 0; }
     if (off >= len) { return 0; }
     return load8(data + off);
 }
 
-#inline
 fn sf2_u16(data, len, off) {
     if (off < 0) { return 0; }
     if (off + 2 > len) { return 0; }
     return load8(data + off) | (load8(data + off + 1) << 8);
 }
 
-#inline
 fn sf2_i16(data, len, off) {
     var v = sf2_u16(data, len, off);
     if (v >= 0x8000) { return v - 0x10000; }
     return v;
 }
 
-#inline
 fn sf2_u32(data, len, off) {
     if (off < 0) { return 0; }
     if (off + 4 > len) { return 0; }
@@ -55,12 +52,14 @@ fn sf2_u32(data, len, off) {
 }
 
 # fourcc packed LE (same as u32); compares against CC_* constants.
-#inline
 fn sf2_fourcc(data, len, off) {
     return sf2_u32(data, len, off);
 }
 
 # read a fixed-width field as a Str, cut at the first NUL (or the field width, or end of data).
+# The Str BORROWS the input buffer (str_new does not copy), which is fine for the record arrays:
+# they die with the parse. Every name that leaves sf2_parse is copied first -- see sf2_name_copy.
+# 0 when the 16-byte Str header cannot be allocated.
 #must_use
 fn sf2_cstr(data, dlen, off, flen) {
     var slen = 0;
@@ -78,6 +77,21 @@ fn sf2_cstr(data, dlen, off, flen) {
         }
     }
     return str_new(data + off, slen);
+}
+
+# sf2_name_copy(s) -> an owned copy of a borrowed record name, or 0 when it cannot be allocated.
+#
+# Preset, instrument and sample names were Strs pointing INTO the caller's file buffer, so a
+# caller that reused that buffer -- read the next .sf2 into it, the thing ADR 001's never-free
+# allocator pushes a long-lived host towards -- silently renamed every preset it had already
+# loaded, and an unmapped buffer turned the next name read into a segfault. Rust's parser
+# returned owned Strings (sf2.rs read_fixed_string -> String::from_utf8_lossy(..).into()).
+# Same class as 2.1.0's "aliasing where Rust took by value". Copied only at the three places a
+# name escapes, not per record: a hostile phdr flood should not pay for names nobody sees.
+#must_use
+fn sf2_name_copy(s) {
+    if (s == 0) { return 0; }
+    return str_clone(s);
 }
 
 # range-generator amount: lo = low byte, hi = high byte of the 16-bit amount.
@@ -109,15 +123,29 @@ struct Sf2Result { presets; instruments; bank; }
 struct Sf2PRange { pk_lo; pk_hi; have_pk; pv_lo; pv_hi; have_pv; }
 
 # --- record-array parsers (count = chunklen / SIZE, floor) ---
+#
+# Each returns its vec, or NIDHI_ERR_IMPORT when an allocation fails. None of them checked
+# before: alloc() answers 0 when memory runs out and Cyrius has no null trap, so the first
+# record setter after a failed alloc stored through address 0, and vec_push's failed grow is
+# _vec_die, an exit(1) nothing can catch. Records cost ~10x their file size in heap (a 40 MB
+# igen chunk took 416 MB), so a 300 MB SF2 killed the host: exit 1 "vec: alloc failed" under
+# a 2 GB address-space limit, SIGSEGV under 800 MB (measured). It now returns NIDHI_ERR_IMPORT
+# under both. The vec is sized once from the count, which also drops the doubling chain (the
+# never-freed outgrown buffers): the 40 MB chunk now takes 240 MB. A count past VEC_CAP_MAX is
+# refused by n_vec_with_cap rather than aborting in vec_push.
 #must_use
 fn sf2_parse_phdr(data, len) {
-    var out = vec_new();
     var count = len / 38;
+    var out = n_vec_with_cap(count);
+    if (out == 0) { return NIDHI_ERR_IMPORT; }
     var i = 0;
     while (i < count) {
         var off = i * 38;
         var r = alloc(sizeof(Sf2Phdr));
-        Sf2Phdr_set_name(r, sf2_cstr(data, len, off, 20));
+        if (r == 0) { return NIDHI_ERR_IMPORT; }
+        var nm = sf2_cstr(data, len, off, 20);
+        if (nm == 0) { return NIDHI_ERR_IMPORT; }
+        Sf2Phdr_set_name(r, nm);
         Sf2Phdr_set_preset(r, sf2_u16(data, len, off + 20));
         Sf2Phdr_set_bank(r, sf2_u16(data, len, off + 22));
         Sf2Phdr_set_bag_index(r, sf2_u16(data, len, off + 24));
@@ -129,11 +157,13 @@ fn sf2_parse_phdr(data, len) {
 
 #must_use
 fn sf2_parse_bag(data, len) {
-    var out = vec_new();
     var count = len / 4;
+    var out = n_vec_with_cap(count);
+    if (out == 0) { return NIDHI_ERR_IMPORT; }
     var i = 0;
     while (i < count) {
         var r = alloc(sizeof(Sf2Bag));
+        if (r == 0) { return NIDHI_ERR_IMPORT; }
         Sf2Bag_set_gen_index(r, sf2_u16(data, len, i * 4));
         vec_push(out, r);
         i = i + 1;
@@ -143,12 +173,14 @@ fn sf2_parse_bag(data, len) {
 
 #must_use
 fn sf2_parse_gen(data, len) {
-    var out = vec_new();
     var count = len / 4;
+    var out = n_vec_with_cap(count);
+    if (out == 0) { return NIDHI_ERR_IMPORT; }
     var i = 0;
     while (i < count) {
         var off = i * 4;
         var r = alloc(sizeof(Sf2Gen));
+        if (r == 0) { return NIDHI_ERR_IMPORT; }
         Sf2Gen_set_oper(r, sf2_u16(data, len, off));
         Sf2Gen_set_amount(r, sf2_i16(data, len, off + 2));
         vec_push(out, r);
@@ -159,13 +191,17 @@ fn sf2_parse_gen(data, len) {
 
 #must_use
 fn sf2_parse_inst(data, len) {
-    var out = vec_new();
     var count = len / 22;
+    var out = n_vec_with_cap(count);
+    if (out == 0) { return NIDHI_ERR_IMPORT; }
     var i = 0;
     while (i < count) {
         var off = i * 22;
         var r = alloc(sizeof(Sf2Inst));
-        Sf2Inst_set_name(r, sf2_cstr(data, len, off, 20));
+        if (r == 0) { return NIDHI_ERR_IMPORT; }
+        var nm = sf2_cstr(data, len, off, 20);
+        if (nm == 0) { return NIDHI_ERR_IMPORT; }
+        Sf2Inst_set_name(r, nm);
         Sf2Inst_set_bag_index(r, sf2_u16(data, len, off + 20));
         vec_push(out, r);
         i = i + 1;
@@ -175,13 +211,17 @@ fn sf2_parse_inst(data, len) {
 
 #must_use
 fn sf2_parse_shdr(data, len) {
-    var out = vec_new();
     var count = len / 46;
+    var out = n_vec_with_cap(count);
+    if (out == 0) { return NIDHI_ERR_IMPORT; }
     var i = 0;
     while (i < count) {
         var off = i * 46;
         var r = alloc(sizeof(Sf2Shdr));
-        Sf2Shdr_set_name(r, sf2_cstr(data, len, off, 20));
+        if (r == 0) { return NIDHI_ERR_IMPORT; }
+        var nm = sf2_cstr(data, len, off, 20);
+        if (nm == 0) { return NIDHI_ERR_IMPORT; }
+        Sf2Shdr_set_name(r, nm);
         Sf2Shdr_set_start(r, sf2_u32(data, len, off + 20));
         Sf2Shdr_set_end(r, sf2_u32(data, len, off + 24));
         Sf2Shdr_set_loop_start(r, sf2_u32(data, len, off + 28));
@@ -195,21 +235,37 @@ fn sf2_parse_shdr(data, len) {
     return out;
 }
 
-# pcm16_to_f32: 16-bit LE PCM -> vec of f64 in [-1,1). Divisor 32768. Empty on bad range.
+# 2^-15 = 1/32768 as an f64 bit pattern (the PCM16 scale).
+var N_F64_2_NEG_15 = 0x3F00000000000000;
+
+# pcm16_to_f32: 16-bit LE PCM -> vec of f64 in [-1,1). Divisor 32768. Empty on bad range;
+# 0 when the vec cannot be allocated.
+#
+# Written straight into a vec sized from the range. It was vec_push per sample from vec_new()
+# plus an f64_div each: measured on 1M samples, 22.7 ms and 16.78 MB of heap (the doubling
+# chain's outgrown buffers are never freed), now 3.9 ms and 8.00 MB. The output is
+# bit-identical: 32768 is 2^15, so x / 32768 and x * 2^-15 are both exact for every 16-bit x,
+# and the range check above the loop is the bounds check sf2_i16 repeated per sample.
 #must_use
 fn sf2_pcm16_to_f32(data, dlen, start_sample, end_sample) {
-    var out = vec_new();
     var byte_start = start_sample * 2;
     var byte_end = end_sample * 2;
-    if (byte_end > dlen) { return out; }
-    if (byte_start > byte_end) { return out; }
+    if (byte_end > dlen) { return vec_new(); }
+    if (byte_start > byte_end) { return vec_new(); }
     var num = (byte_end - byte_start) / 2;
+    var out = n_vec_with_cap(num);
+    if (out == 0) { return 0; }
+    if (num == 0) { return out; }
+    var dst = load64(out);
+    var src = data + byte_start;
     var i = 0;
     while (i < num) {
-        var s = sf2_i16(data, dlen, byte_start + i * 2);
-        vec_push(out, f64_div(f64_from(s), f64_from(32768)));
+        var s = load8(src + i * 2) | (load8(src + i * 2 + 1) << 8);
+        if (s >= 0x8000) { s = s - 0x10000; }
+        store64(dst + i * 8, f64_mul(f64_from(s), N_F64_2_NEG_15));
         i = i + 1;
     }
+    store64(out + 8, num);
     return out;
 }
 
@@ -233,10 +289,46 @@ fn sf2_pcm16_to_f32(data, dlen, start_sample, end_sample) {
 # here it takes the audio host down mid-render.
 var N_SF2_MAX_ZONES = 65536;
 
+# --- work budget: every bag and generator the walk visits costs one unit ---
+#
+# The zone budget bounds what the walk BUILDS, not what it READS. A preset bag that names no
+# instrument, or an instrument bag with no sampleID, costs nothing against N_SF2_MAX_ZONES, and
+# bag ranges may overlap and point backwards. pbag gen_index alternating 0 / 65535 makes every
+# other bag rescan all 65,535 pgens: 2.1e9 generator visits, 14.4 s, from ONE preset in a
+# 525 KB file, and each further 76-byte phdr pair adds another 14 s (a 1000-pair file is about
+# 4 hours) -- a parse that never returns, on the host's loader thread. Inherited from the oracle
+# (sf2.rs has the same un-budgeted walk).
+#
+# 2^24 is above anything a file inside the zone budget can legitimately need. SF2 defines 61
+# generator operators and a zone lists each at most once, so a zone is one ibag plus <= 61
+# generators: 65,536 zones read at most 65,536 x 62 units. On top of that every preset bag reads
+# itself, its own <= 61 generators and at most one global instrument zone of 62; phdr bag
+# indices are u16 and the spec requires them to increase, so a conforming file visits at most
+# 65,536 preset bags: 65,536 x (62 + 124) = 12.2M < 16.8M. Measured: the two bomb shapes now
+# return NIDHI_ERR_IMPORT in 0.19 s and 0.69 s, and the valid fixtures parse unchanged.
+var N_SF2_MAX_WORK = 16777216;
+
+# Per-parse walk state: the shdr memo, both budgets, and the preset-range record.
+#
+# prange is reset per preset bag, so ONE record per parse is enough. It was alloc(48) per
+# preset-bag visit, ahead of the instrument check and outside the zone budget: presets whose
+# bag ranges all overlap one 65,536-bag pbag chunk made 3.15 GB of never-freed heap from a
+# 338 KB file, and a 376 KB file ran out and SIGSEGV'd storing through the 0 alloc returned
+# (measured, exit 139).
 #derive(accessors)
 struct Sf2Ctx {
     memo;
     zones_left;
+    work_left;
+    prange;
+}
+
+# sf2_spend(ctx) -> 1 while the walk is inside its work budget, 0 once it is spent.
+fn sf2_spend(ctx) {
+    var w = Sf2Ctx_work_left(ctx) - 1;
+    Sf2Ctx_set_work_left(ctx, w);
+    if (w < 0) { return 0; }
+    return 1;
 }
 
 # resolve one instrument bag: read igens, apply preset-range clamp, build a zone, add to inst_obj.
@@ -258,6 +350,7 @@ fn sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, pran
     if (vec_len(igens) < iglim) { iglim = vec_len(igens); }
     var ig = igen_start;
     while (ig < iglim) {
+        if (sf2_spend(ctx) == 0) { return NIDHI_ERR_IMPORT; }
         var igr = vec_get(igens, ig);
         var ioper = Sf2Gen_oper(igr);
         var iamt = Sf2Gen_amount(igr);
@@ -309,8 +402,11 @@ fn sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, pran
     if (sample_id < vec_len(memo)) { sid = vec_get(memo, sample_id); }
     if (sid < 0) {
         var pcm = sf2_pcm16_to_f32(smpl_ptr, smpl_len, Sf2Shdr_start(shdr), Sf2Shdr_end(shdr));
+        if (pcm == 0) { return NIDHI_ERR_IMPORT; }
+        var sname = sf2_name_copy(Sf2Shdr_name(shdr));
+        if (sname == 0) { return NIDHI_ERR_IMPORT; }
         var sample = n_sample_from_mono(pcm, Sf2Shdr_sample_rate(shdr));
-        sample = n_sample_with_name(sample, Sf2Shdr_name(shdr));
+        sample = n_sample_with_name(sample, sname);
         sid = n_sample_bank_add(bank, sample);
         if (sid < 0) { return NIDHI_ERR_IMPORT; }
         if (sample_id < vec_len(memo)) { vec_set(memo, sample_id, sid); }
@@ -338,7 +434,7 @@ fn sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, ban
     if (bi + 1 < vec_len(pbags)) { gen_end = Sf2Bag_gen_index(vec_get(pbags, bi + 1)); }
 
     var inst_index = 0 - 1;
-    var prange = alloc(sizeof(Sf2PRange));
+    var prange = Sf2Ctx_prange(ctx);
     Sf2PRange_set_have_pk(prange, 0);
     Sf2PRange_set_have_pv(prange, 0);
 
@@ -346,6 +442,7 @@ fn sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, ban
     if (vec_len(pgens) < glim) { glim = vec_len(pgens); }
     var g = gen_start;
     while (g < glim) {
+        if (sf2_spend(ctx) == 0) { return NIDHI_ERR_IMPORT; }
         var pg = vec_get(pgens, g);
         var oper = Sf2Gen_oper(pg);
         var amt = Sf2Gen_amount(pg);
@@ -374,6 +471,7 @@ fn sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, ban
     var ib = ibag_start;
     while (ib < ibag_end) {
         if (ib >= vec_len(ibags)) { return 0; }
+        if (sf2_spend(ctx) == 0) { return NIDHI_ERR_IMPORT; }
         var ir = sf2_do_ibag(ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, ib, prange, ctx);
         if (ir < 0) { return ir; }
         ib = ib + 1;
@@ -401,6 +499,7 @@ fn sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_l
                 if (bi >= vec_len(pbags)) {
                     looping = 0;
                 } else {
+                    if (sf2_spend(ctx) == 0) { return NIDHI_ERR_IMPORT; }
                     var pr = sf2_do_pbag(pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, bank, inst_obj, bi, ctx);
                     if (pr < 0) { return pr; }
                     bi = bi + 1;
@@ -409,12 +508,17 @@ fn sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_l
         }
 
         if (n_instrument_zone_count(inst_obj) > 0) {
+            # One owned copy, shared by the preset and its instrument (both immutable).
+            var pname = sf2_name_copy(Sf2Phdr_name(phdr));
+            if (pname == 0) { return NIDHI_ERR_IMPORT; }
+            NInstrument_set_name(inst_obj, pname);
             var preset = alloc(sizeof(Sf2Preset));
-            Sf2Preset_set_name(preset, Sf2Phdr_name(phdr));
+            if (preset == 0) { return NIDHI_ERR_IMPORT; }
+            Sf2Preset_set_name(preset, pname);
             Sf2Preset_set_bank(preset, Sf2Phdr_bank(phdr));
             Sf2Preset_set_preset_number(preset, Sf2Phdr_preset(phdr));
-            vec_push(presets, preset);
-            vec_push(instruments, inst_obj);
+            if (vec_push_a(default_alloc(), presets, preset) < 0) { return NIDHI_ERR_IMPORT; }
+            if (vec_push_a(default_alloc(), instruments, inst_obj) < 0) { return NIDHI_ERR_IMPORT; }
         }
         pi = pi + 1;
     }
@@ -530,30 +634,45 @@ fn sf2_parse(data, len) {
     if (shdr_found == 0) { return NIDHI_ERR_IMPORT; }
 
     var phdrs = sf2_parse_phdr(phdr_ptr, phdr_len);
+    if (phdrs < 0) { return phdrs; }
     var pbags = sf2_parse_bag(pbag_ptr, pbag_len);
+    if (pbags < 0) { return pbags; }
     var pgens = sf2_parse_gen(pgen_ptr, pgen_len);
+    if (pgens < 0) { return pgens; }
     var insts = sf2_parse_inst(inst_ptr, inst_len);
+    if (insts < 0) { return insts; }
     var ibags = sf2_parse_bag(ibag_ptr, ibag_len);
+    if (ibags < 0) { return ibags; }
     var igens = sf2_parse_gen(igen_ptr, igen_len);
+    if (igens < 0) { return igens; }
     var shdrs = sf2_parse_shdr(shdr_ptr, shdr_len);
+    if (shdrs < 0) { return shdrs; }
 
     var presets = vec_new();
+    if (presets == 0) { return NIDHI_ERR_IMPORT; }
     var instruments = vec_new();
+    if (instruments == 0) { return NIDHI_ERR_IMPORT; }
     var bank = n_sample_bank_new();
 
     # memo[shdr_index] = SampleId, -1 = not converted yet.
-    var memo = vec_new();
+    var memo = n_vec_with_cap(vec_len(shdrs));
+    if (memo == 0) { return NIDHI_ERR_IMPORT; }
     var mi = 0;
     while (mi < vec_len(shdrs)) { vec_push(memo, 0 - 1); mi = mi + 1; }
     var ctx = alloc(sizeof(Sf2Ctx));
     if (ctx == 0) { return NIDHI_ERR_IMPORT; }
+    var prange = alloc(sizeof(Sf2PRange));
+    if (prange == 0) { return NIDHI_ERR_IMPORT; }
     Sf2Ctx_set_memo(ctx, memo);
     Sf2Ctx_set_zones_left(ctx, N_SF2_MAX_ZONES);
+    Sf2Ctx_set_work_left(ctx, N_SF2_MAX_WORK);
+    Sf2Ctx_set_prange(ctx, prange);
 
     var rr = sf2_resolve(phdrs, pbags, pgens, insts, ibags, igens, shdrs, smpl_ptr, smpl_len, presets, instruments, bank, ctx);
     if (rr < 0) { return rr; }
 
     var result = alloc(sizeof(Sf2Result));
+    if (result == 0) { return NIDHI_ERR_IMPORT; }
     Sf2Result_set_presets(result, presets);
     Sf2Result_set_instruments(result, instruments);
     Sf2Result_set_bank(result, bank);

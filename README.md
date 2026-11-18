@@ -12,7 +12,8 @@ in git history — see [`docs/port/oracle-build-identity.md`](docs/port/oracle-b
 ## Features
 
 - **Polyphonic engine** — configurable voice stealing (Oldest/Quietest/Lowest/None), poly/mono/legato
-- **Key/velocity zones** — full MIDI range mapping, round-robin groups, choke groups, velocity curves
+- **Key/velocity zones** — full MIDI range mapping, round-robin groups and SFZ sequences
+  (`seq_length` / `seq_position`), choke groups, velocity curves
 - **ADSR envelopes** — per-voice and per-zone, with smooth release from any level
 - **Filters** — SVF (LP/HP/BP/Notch) via naad, true stereo, with envelope and LFO modulation
 - **Loop modes** — OneShot, Forward, PingPong, Reverse, LoopSustain, and seam-closing crossfade loops
@@ -20,8 +21,12 @@ in git history — see [`docs/port/oracle-build-identity.md`](docs/port/oracle-b
 - **SFZ import** — 40+ opcodes, note names, `<control>`/`<curve>`, `#include`, `_onccN` CC modulation
 - **SF2 import** — RIFF/SoundFont binary parser, preset and zone extraction
 - **Sample capture** — record, auto-trim, normalize, onset detection, loop-point detection
-- **Effects** — per-instrument chain (reverb, delay, chorus, compressor, limiter) via naad
-- **Audio loading** — WAV and, via shravan's dispatch, AIFF/FLAC/OGG/MP3/ALAC; plus a chunked reader
+- **Effects** — per-instrument chain (reverb, delay, chorus, compressor, limiter) via naad. The
+  reverb and chorus work since 2.2.2; before that they were a 1-sample resonator and a passthrough
+  ([ADR 0011](docs/adr/0011-effect-slots-get-the-parameters-meant.md))
+- **Audio loading** — `n_load_wav` takes WAV and, via shravan's dispatch, AIFF, FLAC, OGG, MP3,
+  ALAC, AAC/MP4 and Opus; `n_load_wav_from_memory` and the chunked reader take WAV. Files with
+  more than two channels load their front pair, and every sample plays at its own rate's pitch
 - **Time-stretching** — WSOLA and OLA (offline)
 - **Allocation-free render path** — asserted, not assumed: `tests/engine.tcyr` pins a zero-byte
   `alloc_used()` delta across a rendered block at 8 and 64 voices

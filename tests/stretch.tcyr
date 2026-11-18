@@ -169,6 +169,95 @@ fn main() {
         bri = bri + 1;
     }
 
+    # --- 2.2.2: a read position past 2^63 is refused in f64, before f64_to ---
+    # Needs nothing but the public builder: frame_size 2 or 3 gives syn_hop 1, ratio 1e-19 makes
+    # frame 1 read at ~1e19, f64_to saturated it to i64::MAX, `optimal + frame_size` wrapped
+    # negative, both guards passed, and vec_get ended the process (exit 1). The oracle's usize
+    # arithmetic does not wrap there and simply stops, which is what both loops do now.
+    test_group("ratio 1e-19 with a 1-sample hop returns, not exits (2.2.2)");
+    var tiny = 0x3BFD83C94FB6D2AC;
+    var tin = vec_new();
+    var ti = 0;
+    while (ti < 4096) { vec_push(tin, F64_HALF); ti = ti + 1; }
+    var tfs = 2;
+    while (tfs <= 3) {
+        var tst = n_stretcher_with_frame_size(n_stretcher_new(tin, f64_from(44100)), tfs);
+        assert_eq(vec_len(n_stretch(tst, tiny)), 0, "wsola frame 2/3, ratio 1e-19 -> empty");
+        assert_eq(vec_len(n_stretch_ola(tst, tiny)), 0, "ola frame 2/3, ratio 1e-19 -> empty");
+        tfs = tfs + 1;
+    }
+
+    # --- 2.2.2: overlap through the derived setter cannot end the process ---
+    # The oracle's overlap was private and always 0.5; NTimeStretcher_set_overlap is public.
+    # Past 1.0 syn_hop went negative and vec_get(output, oi < 0) ended the process (exit 1); the
+    # oracle's `as usize` saturates that hop to 0, so it now takes the oracle's copy path. Just
+    # under 1.0 the hop is 1 and the tiny-ratio wrap above applies.
+    test_group("overlap past 1.0 via the setter copies the input (2.2.2)");
+    var ost = n_stretcher_new(tin, f64_from(44100));
+    NTimeStretcher_set_overlap(ost, 0x3FF8000000000000);
+    assert_eq(vec_len(n_stretch(ost, F64_ONE)), 4096, "overlap 1.5 wsola -> input copy");
+    assert_eq(vec_len(n_stretch_ola(ost, F64_ONE)), 4096, "overlap 1.5 ola -> input copy");
+    assert_eq(vec_get(n_stretch(ost, f64_from(2)), 4095), F64_HALF, "the copy is the input");
+    NTimeStretcher_set_overlap(ost, 0x3FEFF80000000000);
+    assert_eq(vec_len(n_stretch(ost, tiny)), 0, "overlap 1-1/1024, ratio 1e-19 wsola -> empty");
+    assert_eq(vec_len(n_stretch_ola(ost, tiny)), 0, "overlap 1-1/1024, ratio 1e-19 ola -> empty");
+
+    # --- 2.2.2: cross_correlate is seeded as the oracle seeds it (-inf, lag 0) ---
+    # stretch.rs: `best_lag = 0; best_corr = f64::NEG_INFINITY`, taken on a strict `>`. The port
+    # seeded from the first lag evaluated, which differs only when that first sum is NaN or -inf.
+    test_group("cross_correlate non-finite seeding matches the oracle (2.2.2)");
+    var xa = vec_new();
+    vec_push(xa, 0);
+    vec_push(xa, 0x7FF0000000000000);
+    vec_push(xa, 0);
+    vec_push(xa, 0);
+    var xb = vec_new();
+    var xi = 0;
+    while (xi < 4) { vec_push(xb, 0); xi = xi + 1; }
+    # lag -1 sums inf*0 = NaN (never > anything); lag -2 sums 0 > -inf; every other lag is NaN
+    assert_eq(n_cross_correlate(xa, xb, 2), 0 - 2, "first lag NaN: oracle picks -2 (was -1)");
+    var xc = vec_new();
+    vec_push(xc, 0xFFF0000000000000);
+    vec_push(xc, 0xFFF0000000000000);
+    var xd = vec_new();
+    vec_push(xd, F64_ONE);
+    vec_push(xd, F64_ONE);
+    assert_eq(n_cross_correlate(xc, xd, 1), 0, "every sum -inf: oracle keeps lag 0 (was -1)");
+    assert_eq(n_cross_correlate(cc, cc, 64), 0, "finite input unchanged: identical -> lag 0");
+
+    # --- 2.2.2: stretch buffers are sized once, not grown by vec_push ---
+    # Push-doubling on a bump allocator leaves every smaller buffer behind: a one-second x2
+    # stretch allocated 4,210,528 bytes (1,444,168 sized), and a refused grow ended the process
+    # even for requests n_stretch_fits accepts.
+    test_group("stretch buffers are sized once (2.2.2)");
+    var zv = n_vec_zeros(1000);
+    assert_eq(vec_len(zv), 1000, "n_vec_zeros len");
+    assert_eq(vec_cap(zv), 1000, "n_vec_zeros cap is exact");
+    assert_eq(vec_get(zv, 999), 0, "n_vec_zeros zeroed");
+    vec_push(zv, F64_ONE);
+    assert_eq(vec_len(zv), 1001, "still an ordinary vec: pushable past its cap");
+    assert_eq(vec_len(n_vec_zeros(5)), 5, "n below the initial capacity");
+    assert_eq(vec_len(n_vec_zeros(0)), 0, "n = 0 is an empty vec");
+    assert_eq(n_vec_zeros(0 - 1), 0, "negative n refused");
+    assert_eq(n_vec_zeros(VEC_CAP_MAX + 1), 0, "n past VEC_CAP_MAX refused (n * 8 cannot wrap)");
+    var sec = make_sine(440, 44100, 44100);
+    var sst = n_stretcher_new(sec, f64_from(44100));
+    var a0 = alloc_used();
+    var sola = n_stretch_ola(sst, f64_from(2));
+    var used = alloc_used() - a0;
+    assert_eq(vec_len(sola), 88200, "1 s x2 ola length");
+    assert(used < 1600000, "1 s x2 ola allocates < 1.6 MB (was 4.2 MB)");
+    var sh_in = vec_new();
+    var shi = 0;
+    while (shi < 100) { vec_push(sh_in, F64_HALF); shi = shi + 1; }
+    var shst = n_stretcher_new(sh_in, f64_from(44100));
+    var a1 = alloc_used();
+    var shout = n_stretch_short(shst, f64_from(1000));
+    var used2 = alloc_used() - a1;
+    assert_eq(vec_len(shout), 100000, "short path 100 x1000 length");
+    assert(used2 < 900000, "short path allocates < 0.9 MB (was 2.1 MB)");
+    assert_eq(vec_len(n_stretch_short(shst, f64_neg(F64_ONE))), 0, "short path negative ratio -> empty");
+
     return assert_summary();
 }
 

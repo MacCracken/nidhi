@@ -144,6 +144,65 @@ fn first_zone(res) {
     return vec_get(NInstrument_zones(vec_get(Sf2Result_instruments(res), 0)), 0);
 }
 
+# A structurally valid SF2 whose walk shape is set by its index fields alone: npresets presets
+# whose phdr bag_index alternates 0 / nbags - 1 (so every other preset spans every pbag), nbags
+# pbags whose gen_index alternates 0 / ngens (so every other pbag spans every pgen), and ngens
+# pgens of an operator the walk ignores. No pbag names an instrument, so no zone is ever built
+# and the zone budget never moves -- the hostile shape behind the prange and walk-budget fixes.
+fn build_walk_sf2(npresets, nbags, ngens) {
+    var b = bb_new(64 + npresets * 38 + nbags * 4 + ngens * 4 + 256);
+    var riff = bb_chunk_begin(b, "RIFF");
+    bb_str4(b, "sfbk");
+    var sdta = bb_chunk_begin(b, "LIST");
+    bb_str4(b, "sdta");
+    var smpl = bb_chunk_begin(b, "smpl");
+    bb_u32(b, 0);
+    bb_chunk_end(b, smpl);
+    bb_chunk_end(b, sdta);
+    var pdta = bb_chunk_begin(b, "LIST");
+    bb_str4(b, "pdta");
+    var phdr = bb_chunk_begin(b, "phdr");
+    var i = 0;
+    while (i < npresets) {
+        bb_fixed_str(b, "P", 20); bb_u16(b, 0); bb_u16(b, 0);
+        if ((i & 1) == 0) { bb_u16(b, 0); } else { bb_u16(b, nbags - 1); }
+        bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+        i = i + 1;
+    }
+    bb_fixed_str(b, "EOP", 20); bb_u16(b, 0); bb_u16(b, 0); bb_u16(b, nbags - 1);
+    bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_chunk_end(b, phdr);
+    var pbag = bb_chunk_begin(b, "pbag");
+    i = 0;
+    while (i < nbags) {
+        if ((i & 1) == 0) { bb_u16(b, 0); } else { bb_u16(b, ngens); }
+        bb_u16(b, 0);
+        i = i + 1;
+    }
+    bb_chunk_end(b, pbag);
+    var pgen = bb_chunk_begin(b, "pgen");
+    i = 0;
+    while (i < ngens) { bb_u16(b, 8); bb_i16(b, 1000); i = i + 1; }
+    bb_chunk_end(b, pgen);
+    var inst = bb_chunk_begin(b, "inst");
+    bb_fixed_str(b, "I", 20); bb_u16(b, 0); bb_fixed_str(b, "EOI", 20); bb_u16(b, 0);
+    bb_chunk_end(b, inst);
+    var ibag = bb_chunk_begin(b, "ibag");
+    bb_u16(b, 0); bb_u16(b, 0);
+    bb_chunk_end(b, ibag);
+    var igen = bb_chunk_begin(b, "igen");
+    bb_u16(b, 0); bb_i16(b, 0);
+    bb_chunk_end(b, igen);
+    var shdr = bb_chunk_begin(b, "shdr");
+    bb_fixed_str(b, "EOS", 20);
+    bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0); bb_u32(b, 0);
+    bb_u8(b, 0); bb_u8(b, 0); bb_u16(b, 0); bb_u16(b, 0);
+    bb_chunk_end(b, shdr);
+    bb_chunk_end(b, pdta);
+    bb_chunk_end(b, riff);
+    return b;
+}
+
 fn main() {
     alloc_init();
     var tol = f64_div(F64_ONE, f64_from(1000));
@@ -225,6 +284,76 @@ fn main() {
     store8(ov + 16, 255); store8(ov + 17, 255); store8(ov + 18, 255); store8(ov + 19, 255);
     store8(ov + 20, 0); store8(ov + 21, 0); store8(ov + 22, 0); store8(ov + 23, 0);
     assert(sf2_parse(ov, 24) < 0, "chunk size overflow -> error (no panic)");
+
+    # --- 2.2.2: per-pbag Sf2PRange allocation ---
+    # sf2_do_pbag ran alloc(48) on every preset-bag VISIT, before the instrument check and
+    # outside the zone budget. 32 presets spanning 1024 empty pbags are 32,736 visits: 1.57 MB of
+    # never-freed heap from a 6.6 KB file (the 376 KB version reached 4.7 GB and SIGSEGV'd).
+    test_group("preset-bag visits allocate nothing (2.2.2)");
+    var bw = build_walk_sf2(64, 1024, 1);
+    var heap0 = alloc_used();
+    var rw = sf2_parse(bb_buf(bw), bb_len(bw));
+    var walk_heap = alloc_used() - heap0;
+    assert(rw > 0, "overlapping empty preset bags parse");
+    assert_eq(vec_len(Sf2Result_presets(rw)), 0, "no preset has a zone");
+    assert(walk_heap < 262144, "32,736 preset-bag visits cost < 256 KB of heap (was 1.57 MB)");
+
+    # --- 2.2.2: the walk has a work budget ---
+    # pbag gen_index alternating 0 / 4096 makes every other bag rescan all 4096 pgens: 16.8M
+    # generator visits for ONE preset of a 49 KB file, none of which builds a zone. At 65,535
+    # pgens that was 14.4 s per preset; any number of presets could be stacked on it.
+    test_group("generator-scan bomb hits the work budget (2.2.2)");
+    var bg = build_walk_sf2(1, 8192, 4096);
+    assert_eq(sf2_parse(bb_buf(bg), bb_len(bg)), NIDHI_ERR_IMPORT, "16.8M-visit walk -> NIDHI_ERR_IMPORT");
+    # Under the budget, the same shape still parses: 2048 x 2048 = 4.2M visits.
+    var bgo = build_walk_sf2(1, 4096, 2048);
+    assert(sf2_parse(bb_buf(bgo), bb_len(bgo)) > 0, "a 4.2M-visit walk is inside the budget");
+
+    # --- 2.2.2: a record count no vec can hold is an error, not an exit ---
+    # vec_push past VEC_CAP_MAX is _vec_abort -> exit(1), with no error return; a pbag chunk
+    # that large is ~1 GiB, so the test lowers the cap instead of building one. The parser must
+    # refuse the chunk and return, never push it.
+    test_group("record count past VEC_CAP_MAX -> NIDHI_ERR_IMPORT (2.2.2)");
+    var bc = build_walk_sf2(1, 4097, 1);
+    var cap_saved = VEC_CAP_MAX;
+    VEC_CAP_MAX = 4096;
+    var rc_cap = sf2_parse(bb_buf(bc), bb_len(bc));
+    VEC_CAP_MAX = cap_saved;
+    assert_eq(rc_cap, NIDHI_ERR_IMPORT, "4097 pbags with VEC_CAP_MAX 4096 -> error return");
+
+    # --- 2.2.2: names are owned, not borrowed from the caller's buffer ---
+    # str_new borrows. Overwriting (or reusing) the file buffer after the parse renamed every
+    # preset, instrument and sample; Rust returned owned Strings.
+    test_group("names survive the caller reusing its buffer (2.2.2)");
+    var bn = build_minimal_sf2("Piano", make_samples(16), 60, 0, 127, 0, 127, 0, 0, 0);
+    var rn = sf2_parse(bb_buf(bn), bb_len(bn));
+    assert(rn > 0, "parsed");
+    var zi = 0;
+    while (zi < bb_len(bn)) { store8(bb_buf(bn) + zi, 88); zi = zi + 1; }
+    assert_eq(str_eq(Sf2Preset_name(vec_get(Sf2Result_presets(rn), 0)), str_from("Piano")), 1, "preset name intact");
+    assert_eq(str_eq(NInstrument_name(vec_get(Sf2Result_instruments(rn), 0)), str_from("Piano")), 1, "instrument name intact");
+    assert_eq(str_eq(NSample_name(n_sample_bank_get(Sf2Result_bank(rn), 0)), str_from("Sample")), 1, "sample name intact");
+
+    # --- 2.2.2: pcm16 conversion is sized once and bit-identical to x / 32768 ---
+    test_group("pcm16 exact for all 65536 values, one allocation (2.2.2)");
+    var allv = alloc(131072);
+    var ai = 0;
+    while (ai < 65536) { store_i16le(allv, ai * 2, ai); ai = ai + 1; }
+    var pheap0 = alloc_used();
+    var pv = sf2_pcm16_to_f32(allv, 131072, 0, 65536);
+    var pheap = alloc_used() - pheap0;
+    assert_eq(vec_len(pv), 65536, "65536 samples");
+    var bad = 0;
+    ai = 0;
+    while (ai < 65536) {
+        var sv = ai;
+        if (sv >= 0x8000) { sv = sv - 0x10000; }
+        if (vec_get(pv, ai) != f64_div(f64_from(sv), f64_from(32768))) { bad = bad + 1; }
+        ai = ai + 1;
+    }
+    assert_eq(bad, 0, "every 16-bit value bit-identical to the oracle's x / 32768");
+    # 65536 x 8 bytes plus the 24-byte header; vec_push from vec_new() spent ~2x that.
+    assert(pheap <= 65536 * 8 + 64, "one exact-size buffer, no doubling chain");
 
     return assert_summary();
 }

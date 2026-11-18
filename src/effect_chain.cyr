@@ -8,10 +8,14 @@
 # (the Rust no_std passthrough is dropped). Effects run SERIALLY with per-slot bypass + wet/dry
 # mix. process_stereo runs L then R through the SAME stateful chain (source behavior, preserved).
 #
-# NOTE (bug-for-bug parity): the Rust source builds the Reverb with positional args
-# (sr, 1.5, 0.3, 0.5, 0.6) against naad's reverb_new(decay, damping, pre_delay_ms, mix,
-# sample_rate) -- i.e. the sample_rate arrives in `decay` and 0.6 in `sample_rate`. Replicated
-# verbatim; if reverb_new rejects it, the slot falls back to None (Rust `.unwrap_or(None)`).
+# DIVERGENCE (2.2.2), deliberate -- see docs/adr/0011-effect-slots-get-the-parameters-meant.md.
+# The oracle's reverb and chorus arguments did not mean what they said, and 2.0.0 to 2.2.1
+# replicated them bug for bug:
+#   * Reverb: (sr, 1.5, 0.3, 0.5, 0.6) against reverb_new(decay, damping, pre_delay_ms, mix,
+#     sample_rate). The rate arrived in `decay` (clamped to 0.99) and 0.6 in `sample_rate`, so
+#     every comb and all-pass was 1 sample long: a resonator, not a reverb.
+#   * Chorus: 0.02 and 0.002, seconds, against millisecond parameters. The delay line was 1
+#     sample long and read back the sample just written, so the chorus was an exact passthrough.
 
 var FX_NONE       = 0;
 var FX_REVERB     = 1;
@@ -83,9 +87,10 @@ fn n_effect_chain_new(sample_rate) {
 fn n_effect_chain_create_state(chain, effect_type) {
     var sr = NEffectChain_sample_rate(chain);
     if (effect_type == FX_REVERB) {
-        # (sr, 1.5, 0.3, 0.5, 0.6) -> reverb_new(decay, damping, pre_delay_ms, mix, sample_rate)
-        var st = reverb_new(sr, f64_div(f64_from(3), f64_from(2)),
-            f64_div(f64_from(3), f64_from(10)), F64_HALF, f64_div(f64_from(6), f64_from(10)));
+        # The oracle's five numbers, each in the slot whose range it fits (ADR 0011):
+        # decay 0.6, damping 0.3, pre-delay 1.5 ms, mix 0.5, and the real sample rate.
+        var st = reverb_new(f64_div(f64_from(6), f64_from(10)), f64_div(f64_from(3), f64_from(10)),
+            f64_div(f64_from(3), f64_from(2)), F64_HALF, sr);
         if (naad_is_err(st) == 1) { return 0; }
         return st;
     }
@@ -99,9 +104,9 @@ fn n_effect_chain_create_state(chain, effect_type) {
         return comb_filter_new(f64_to(delay_len), f64_div(f64_from(4), f64_from(10)));      # feedback 0.4
     }
     if (effect_type == FX_CHORUS) {
-        # (3, 0.02, 0.002, 1.5, 0.5, sr)
-        var st2 = effects_chorus_new(3, f64_div(f64_from(2), f64_from(100)),
-            f64_div(f64_from(2), f64_from(1000)), f64_div(f64_from(3), f64_from(2)), F64_HALF, sr);
+        # 3 voices, 20 ms base delay, 2 ms depth, 1.5 Hz, mix 0.5. The oracle passed 0.02 and
+        # 0.002 (seconds) to these millisecond parameters (ADR 0011).
+        var st2 = effects_chorus_new(3, f64_from(20), f64_from(2), f64_div(f64_from(3), f64_from(2)), F64_HALF, sr);
         if (naad_is_err(st2) == 1) { return 0; }
         return st2;
     }
@@ -166,7 +171,6 @@ fn n_effect_chain_slot(chain, index) {
 # apply one effect to a sample -> wet value. Reverb returns a stereo pair; take the left (.0).
 # `state <= 0`, not `== 0`: create_state returns 0 for None, but a naad constructor can
 # also hand back a negative error code, and using that as a pointer is a wild read.
-#inline
 fn n_effect_apply(effect_type, state_type, state, input, scratch) {
     if (state <= 0) { return input; }
     # The tag was changed without rebuilding the state: the slot is inconsistent, so pass
@@ -184,7 +188,6 @@ fn n_effect_apply(effect_type, state_type, state, input, scratch) {
 }
 
 # process_sample(input) -> output. Serial; skip bypassed/None slots; wet/dry blend per slot.
-#inline
 fn n_effect_chain_process_sample(chain, input) {
     var slots = NEffectChain_slots(chain);
     var n = vec_len(slots);
@@ -206,7 +209,6 @@ fn n_effect_chain_process_sample(chain, input) {
 }
 
 # process_stereo(left, right, out2) -> out2[0]=L, out2[1]=R. L then R share the stateful chain.
-#inline
 fn n_effect_chain_process_stereo(chain, left, right, out2) {
     store64(out2, n_effect_chain_process_sample(chain, left));
     store64(out2 + 8, n_effect_chain_process_sample(chain, right));

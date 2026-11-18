@@ -20,7 +20,6 @@ var VEL_CURVE_SWITCH  = 3;
 # SVF for the voice's whole life. The UPPER bound is deliberately NOT clamped: u8
 # legitimately spans 0..255 (gain up to 2.008) and n_zone_with_vel_range imposes no
 # ceiling either, so clamping high would diverge from the oracle.
-#inline
 #must_use
 fn n_velocity_curve_apply(curve, vel) {
     var vc = vel;
@@ -41,7 +40,9 @@ var FILTER_HIGHPASS = 1;
 var FILTER_BANDPASS = 2;
 var FILTER_NOTCH    = 3;
 
-# --- Zone (32 fields; order matches rust-old/src/zone.rs) ---
+# --- Zone (34 fields: the oracle's 32 in rust-old/src/zone.rs order, then 2.2.2's two) ---
+# seq_length / seq_position are SFZ's round-robin sequence (docs/adr/0012-round-robin-plays.md).
+# Both default to 1, which is "not sequenced", so every zone the oracle could build behaves as it did.
 #derive(accessors)
 struct NZone {
     sample_id;
@@ -76,6 +77,8 @@ struct NZone {
     fil_keytrack;
     time_stretch;
     output_bus;
+    seq_length;
+    seq_position;
 }
 
 # n_zone_new(sample_id) -> Zone with all Rust defaults.
@@ -114,6 +117,8 @@ fn n_zone_new(sample_id) {
     NZone_set_fil_keytrack(z, 0);
     NZone_set_time_stretch(z, 0);
     NZone_set_output_bus(z, 0);
+    NZone_set_seq_length(z, 1);
+    NZone_set_seq_position(z, 1);
     return z;
 }
 
@@ -142,10 +147,20 @@ fn n_zone_with_tune(z, cents) {
     return z;
 }
 
-# volume_db: no clamp
+# volume_db: no clamp here, as in the oracle. The engine clamps where it applies the value.
 fn n_zone_with_volume(z, db) {
     NZone_set_volume_db(z, db);
     return z;
+}
+
+# n_volume_db_clamp(db) -> db clamped to [-144, 24], applied by note_on (ADR 0004).
+# The oracle stored volume unclamped and never applied it. Since 2.1.0 note_on does, so an
+# unclamped NaN or +Inf (SFZ `volume=nan`, `volume=inf`, or a 400-digit number) put a non-finite
+# value in every output sample. -144 dB is SFZ's floor. +24 dB is well past SFZ's +6 dB ceiling,
+# so no level a caller means is cut. NaN takes the low bound, as ADR 0002 decides: silence.
+#must_use
+fn n_volume_db_clamp(db) {
+    return f64_min(f64_max(db, f64_from(0 - 144)), f64_from(24));
 }
 
 # pan = clamp(pan, -1.0, 1.0)
@@ -214,8 +229,12 @@ fn n_zone_with_velocity_curve(z, curve) {
 # pointer, so one config handed to several zones made them share mutable state -- and a later
 # n_engine_set_release_ms or a direct NAdsrConfig_set_* rewrote every one of them at once.
 # Same class as the set_release_ms aliasing fixed in 2.0.2.
+#
+# A negative config is an error code, not a config. Stored as-is it reached note_on's `== 0`
+# default test, failed it, and n_amp_envelope_rearm read the code as a pointer: a segfault on the
+# first note. Every `config <= 0` is stored as 0 (none), so the engine default applies.
 fn n_zone_with_adsr(z, config) {
-    if (config <= 0) { NZone_set_adsr(z, config); return z; }
+    if (config <= 0) { NZone_set_adsr(z, 0); return z; }
     NZone_set_adsr(z, n_adsr_config_new(
         NAdsrConfig_attack_samples(config), NAdsrConfig_decay_samples(config),
         NAdsrConfig_sustain_level(config), NAdsrConfig_release_samples(config)));
@@ -230,7 +249,8 @@ fn n_zone_with_filter_envelope(z, config, depth_cents) {
             NAdsrConfig_attack_samples(config), NAdsrConfig_decay_samples(config),
             NAdsrConfig_sustain_level(config), NAdsrConfig_release_samples(config)));
     } else {
-        NZone_set_fileg(z, config);
+        # 0, never a negative code: see n_zone_with_adsr.
+        NZone_set_fileg(z, 0);
     }
     NZone_set_fileg_depth(z, f64_min(f64_max(depth_cents, f64_from(0 - 4800)), f64_from(4800)));
     return z;
@@ -267,10 +287,25 @@ fn n_zone_with_output_bus(z, bus) {
     return z;
 }
 
+# seq_length, seq_position = clamp to [1, u32::MAX]. SFZ's round-robin: the zone sounds on the
+# note-ons where (its sequence counter % seq_length) == seq_position - 1. The counter advances on
+# every note-on the zone matches, whether or not it sounds (n_instrument_find_zone_rr). A
+# seq_position past seq_length never sounds, as in SFZ.
+fn n_zone_with_seq(z, length, position) {
+    var l = length;
+    if (l < 1) { l = 1; }
+    if (l > 4294967295) { l = 4294967295; }
+    var p = position;
+    if (p < 1) { p = 1; }
+    if (p > 4294967295) { p = 4294967295; }
+    NZone_set_seq_length(z, l);
+    NZone_set_seq_position(z, p);
+    return z;
+}
+
 # --- Behavioral methods ---
 
 # matches(note, vel) -> 1 if note/vel fall within this zone's inclusive ranges.
-#inline
 #must_use
 fn n_zone_matches(z, note, vel) {
     if (note < NZone_key_lo(z)) { return 0; }
@@ -283,11 +318,10 @@ fn n_zone_matches(z, note, vel) {
 # playback_ratio(note) -> resampling ratio (f64 bits). 1.0 at root, x2 per octave.
 #   semitones = (note - root_note) + tune_cents / 100
 #   ratio     = 2^(semitones / 12)
-#inline
 #must_use
 fn n_zone_playback_ratio(z, note) {
     var semitones = f64_add(
-        f64_sub(f64_from(note), f64_from(NZone_root_note(z))),
-        f64_div(NZone_tune_cents(z), f64_from(100)));
+      f64_sub(f64_from(note), f64_from(NZone_root_note(z))),
+      f64_div(NZone_tune_cents(z), f64_from(100)));
     return f64_pow(f64_from(2), f64_div(semitones, f64_from(12)));
 }

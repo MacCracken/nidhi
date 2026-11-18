@@ -25,15 +25,56 @@ fn n_recorder_new(sample_rate, channels) {
     return r;
 }
 
-# write(data) -- append all f64 elements of the vec `data` (interleaved) to the buffer.
+# N_RECORDER_MAX_SAMPLES -- the most interleaved samples one take can hold: 2^28, VEC_CAP_MAX,
+# which is also exactly ALLOC_MAX (2 GiB) of f64. That is 101.4 min mono / 50.7 min stereo at
+# 44.1 kHz, 46.6 min stereo at 48 kHz, 23.3 min stereo at 96 kHz. On the bump allocator the
+# buffer's abandoned grows add about as much again, so a full take costs ~4 GiB of heap.
+var N_RECORDER_MAX_SAMPLES = 0x10000000;
+
+# write(data) -> 0, or a negative code with NOTHING appended (a write is all or nothing):
+#   NIDHI_ERR_INVALID_PARAMETER -- the take would pass N_RECORDER_MAX_SAMPLES.
+#   NIDHI_ERR_PLAYBACK          -- the allocator refused to grow the buffer.
+# Either way the samples already recorded are intact, and n_recorder_finish still works.
+#
+# This used to vec_push each sample, and vec_push ENDS THE PROCESS when it cannot grow: at
+# VEC_CAP_MAX ("vec: capacity overflow"), or earlier when the heap runs out ("vec: alloc
+# failed"). The oracle's Vec just kept growing, so a long take in the host (dhvani, shruti)
+# killed it and lost the take. Measured under a 4 GB limit: stereo 48 kHz died at ~23 min.
+# The buffer now grows here, once per write, by the same doubling vec_push used (so memory
+# use is unchanged), and a refusal is a return code. Relies on the {data, len, cap} header
+# lib/vec.cyr documents, as naad_vec_zeros does; tests/capture.tcyr pins it.
 fn n_recorder_write(r, data) {
     var buffer = NSampleRecorder_buffer(r);
     var n = vec_len(data);
+    var len = vec_len(buffer);
+    if (n > N_RECORDER_MAX_SAMPLES - len) { return NIDHI_ERR_INVALID_PARAMETER; }
+    var need = len + n;
+    var cap = vec_cap(buffer);
+    if (need > cap) {
+        var new_cap = cap;
+        if (new_cap < 16) { new_cap = 16; }
+        while (new_cap < need) { new_cap = new_cap * 2; }
+        if (new_cap > N_RECORDER_MAX_SAMPLES) { new_cap = N_RECORDER_MAX_SAMPLES; }
+        var grown = alloc(new_cap * 8);
+        if (grown == 0) { return NIDHI_ERR_PLAYBACK; }
+        var old = load64(buffer);
+        var k = 0;
+        while (k < len) {
+            store64(grown + k * 8, load64(old + k * 8));
+            k = k + 1;
+        }
+        store64(buffer, grown);
+        store64(buffer + 16, new_cap);
+    }
+    # Read the source pointer only now: when `data` IS the buffer, the grow just moved it.
+    var dst = load64(buffer) + len * 8;
+    var src = load64(data);
     var i = 0;
     while (i < n) {
-        vec_push(buffer, vec_get(data, i));
+        store64(dst + i * 8, load64(src + i * 8));
         i = i + 1;
     }
+    store64(buffer + 8, need);
     return 0;
 }
 
@@ -158,6 +199,12 @@ fn n_normalize_peak(sample) {
     var n = vec_len(data);
     if (n == 0) { return 0; }
     var peak = naad_peak(data);
+    # A non-finite peak is a no-op, not a scale. One +inf sample makes the peak +inf and the gain
+    # 1/inf = 0 -- a FINITE gain, so testing the gain would not catch it: every finite sample
+    # became 0 and the inf became NaN (inf * 0). The take was erased and a NaN written into it,
+    # measured. The oracle does the same; ADR 0002 (a NaN reaching the SVF latches the voice) is
+    # why nidhi does not. Past this test, peak > 1e-10 bounds the gain below 1e10.
+    if (n_is_finite(peak) == 0) { return 0; }
     var eps = f64_div(F64_ONE, f64_from(10000000000));
     if (f64_gt(peak, eps) == 1) {
         var gain = f64_div(F64_ONE, peak);
@@ -175,9 +222,16 @@ fn n_normalize_rms(sample, target_rms) {
     var data = NSample_data(sample);
     if (vec_len(data) == 0) { return 0; }
     var r = naad_rms(data);
+    # Non-finite gain -> no-op. A NaN or +/-inf target_rms used to be written into EVERY sample:
+    # measured, target NaN -> 100/100 samples NaN, target +inf -> 100/100 +inf. The oracle does
+    # the same (gain = target / rms, unchecked); a non-finite parameter must not reach the audio
+    # (ADR 0002). An rms of +inf (one inf sample) gives the finite gain 0 and the erase-plus-NaN
+    # of n_normalize_peak, so it is refused first, for the same reason.
+    if (n_is_finite(r) == 0) { return 0; }
     var eps = f64_div(F64_ONE, f64_from(10000000000));
     if (f64_gt(r, eps) == 1) {
         var gain = f64_div(target_rms, r);
+        if (n_is_finite(gain) == 0) { return 0; }
         var n = vec_len(data);
         var i = 0;
         while (i < n) {
@@ -188,14 +242,61 @@ fn n_normalize_rms(sample, target_rms) {
     return 0;
 }
 
+# n_loop_score_is_nan(x) -> 1 when the f64 bit pattern x is a NaN.
+#must_use
+fn n_loop_score_is_nan(x) {
+    if ((x & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000) { return 1; }
+    return 0;
+}
+
+# n_loop_top_insert -- insert (start, end, score) into the descending top-10 lists where a
+# STABLE descending sort would put it: after the last kept entry that is not less than it.
+# Past index 9 it is dropped. Returns 1 when kept, 0 when dropped. Three parallel vecs of at
+# most 10, so this is O(10) per candidate.
+fn n_loop_top_insert(top_s, top_e, top_sc, start, end, score) {
+    var nt = vec_len(top_sc);
+    var pos = nt;
+    while (pos > 0) {
+        if (f64_lt(vec_get(top_sc, pos - 1), score) == 1) {
+            pos = pos - 1;
+        } else {
+            break;
+        }
+    }
+    if (pos >= 10) { return 0; }
+    vec_push(top_s, 0);
+    vec_push(top_e, 0);
+    vec_push(top_sc, 0);
+    var m = nt;
+    while (m > pos) {
+        vec_set(top_s, m, vec_get(top_s, m - 1));
+        vec_set(top_e, m, vec_get(top_e, m - 1));
+        vec_set(top_sc, m, vec_get(top_sc, m - 1));
+        m = m - 1;
+    }
+    vec_set(top_s, pos, start);
+    vec_set(top_e, pos, end);
+    vec_set(top_sc, pos, score);
+    vec_truncate(top_s, 10);
+    vec_truncate(top_e, 10);
+    vec_truncate(top_sc, 10);
+    return 1;
+}
+
 # --- detect_loop_points: zero-crossing + normalized cross-correlation ---
 # Returns a vec of pair pointers (each alloc(16): start at +0, end at +8), best score first,
 # at most 10. Empty if frames < min_loop_frames*2 or < 2 positive zero crossings.
+#
+# The length guard is `min_loop_frames > frames / 2`, the oracle's `frames < min * 2` without
+# the multiply. That multiply overflowed for min >= 2^62 (2^63 wraps negative), the guard let
+# it through, no pair could ever qualify, so the 100-candidate break never fired and every
+# crossing pair was visited: measured, 3136 ms on 2 s of noise to return nothing. For min >= 0
+# the two forms agree exactly (frames < 2m <=> m > floor(frames/2)).
 #must_use
 fn n_detect_loop_points(sample, min_loop_frames) {
     var out = vec_new();
     var frames = NSample_frames(sample);
-    if (frames < min_loop_frames * 2) { return out; }
+    if (min_loop_frames > frames / 2) { return out; }
     var data = NSample_data(sample);
     var ch = NSample_channels(sample);
     var eps = f64_div(F64_ONE, f64_from(10000000000));
@@ -226,12 +327,30 @@ fn n_detect_loop_points(sample, min_loop_frames) {
     }
     if (vec_len(crossings) < 2) { return out; }
 
-    # 3. score candidate pairs
+    # 3. score candidate pairs, keeping only the 10 best.
+    #
+    # The oracle collects every candidate and stable-sorts them all (`sort_by`, O(n log n)). The
+    # port's O(n^2) insertion sort over ALL of them was a regression, and n is large: the
+    # 100-candidate break is checked once per OUTER pass, so on noise the first pass alone keeps
+    # about one candidate per crossing (~frames/4). Measured, 1 s of noise took 1022 ms and 2 s
+    # took 4087 ms -- quadratic, so a minute of cymbal would take an hour.
+    #
+    # Only the first 10 of the sorted order are returned, so keep exactly that prefix: each
+    # candidate lands after the last kept entry whose score is NOT less than its own, which is
+    # where a stable descending sort puts it (ties keep insertion order), and it falls off if
+    # that is past index 9. Identical output, 111/111 cases against the full sort (tests pin it),
+    # 2 s of noise 4193 -> 23 ms.
+    #
+    # NaN (only from an inf in the data: inf/inf) is not ordered against anything. In the full
+    # insertion sort a NaN never moves left, and nothing moves left past it, so one parked at
+    # index >= 10 kept every LATER candidate out of the top 10. `frozen` reproduces that.
     var compare_len = 64;
     if (frames / 4 < compare_len) { compare_len = frames / 4; }
-    var c_starts = vec_new();
-    var c_ends = vec_new();
-    var c_scores = vec_new();
+    var top_s = vec_new();
+    var top_e = vec_new();
+    var top_sc = vec_new();
+    var ncand = 0;
+    var frozen = 0;
     var ncross = vec_len(crossings);
     var ci = 0;
     while (ci < ncross) {
@@ -257,56 +376,27 @@ fn n_detect_loop_points(sample, min_loop_frames) {
                         var denom = f64_sqrt(f64_mul(na, nb));
                         var score = 0;
                         if (f64_gt(denom, eps) == 1) { score = f64_div(dot, denom); }
-                        vec_push(c_starts, start);
-                        vec_push(c_ends, end);
-                        vec_push(c_scores, score);
+                        ncand = ncand + 1;
+                        if (frozen == 0) {
+                            if (n_loop_top_insert(top_s, top_e, top_sc, start, end, score) == 0) {
+                                if (n_loop_score_is_nan(score) == 1) { frozen = 1; }
+                            }
+                        }
                     }
                 }
             }
             cj = cj + 1;
         }
         # 100-candidate cap: checked once per OUTER iteration
-        if (vec_len(c_starts) > 100) { ci = ncross; } else { ci = ci + 1; }
+        if (ncand > 100) { ci = ncross; } else { ci = ci + 1; }
     }
 
-    # 4. STABLE insertion sort by score DESCENDING (ties keep insertion order, matching
-    #    Rust's stable sort_by). Element a2 shifts left past strictly-smaller scores only.
-    var ncand = vec_len(c_starts);
-    var a2 = 1;
-    while (a2 < ncand) {
-        var ks = vec_get(c_starts, a2);
-        var ke = vec_get(c_ends, a2);
-        var ksc = vec_get(c_scores, a2);
-        var b2 = a2 - 1;
-        var shifting = 1;
-        while (shifting == 1) {
-            if (b2 < 0) {
-                shifting = 0;
-            } else {
-                if (f64_lt(vec_get(c_scores, b2), ksc) == 1) {
-                    vec_set(c_starts, b2 + 1, vec_get(c_starts, b2));
-                    vec_set(c_ends, b2 + 1, vec_get(c_ends, b2));
-                    vec_set(c_scores, b2 + 1, vec_get(c_scores, b2));
-                    b2 = b2 - 1;
-                } else {
-                    shifting = 0;
-                }
-            }
-        }
-        vec_set(c_starts, b2 + 1, ks);
-        vec_set(c_ends, b2 + 1, ke);
-        vec_set(c_scores, b2 + 1, ksc);
-        a2 = a2 + 1;
-    }
-
-    # 5. top 10 (start,end) pairs
-    var take = ncand;
-    if (take > 10) { take = 10; }
+    # 4. the kept (start,end) pairs, best first
     var t = 0;
-    while (t < take) {
+    while (t < vec_len(top_s)) {
         var pair = alloc(16);
-        store64(pair, vec_get(c_starts, t));
-        store64(pair + 8, vec_get(c_ends, t));
+        store64(pair, vec_get(top_s, t));
+        store64(pair + 8, vec_get(top_e, t));
         vec_push(out, pair);
         t = t + 1;
     }

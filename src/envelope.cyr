@@ -117,9 +117,12 @@ fn n_amp_envelope_new(config, sample_rate) {
 # field and naad's own constructor sets them through exactly these generated accessors. Reading
 # only for a named `*_set_params` and inferring absence was the mistake.
 #
-# No separate reset is needed either: `envelope_adsr_gate_on` sets state=ATTACK and
-# stage_samples=0, and `envelope_adsr_next_value` recomputes current_value from stage_samples in
-# every branch, so nothing of the previous note survives the first tick.
+# The run-time state is reset too, to exactly what envelope_adsr_with_sample_rate leaves: IDLE,
+# current 0, release start 0, stage 0. `envelope_adsr_gate_on` alone resets only state and
+# stage_samples, and 2.1.1 to 2.2.1 relied on the first tick to overwrite current_value. A note_off
+# BEFORE that tick (note on and off in one MIDI block) found the previous note's level still in
+# current_value, and `envelope_adsr_gate_off` released from it: a full-level tail where the
+# oracle's freshly built envelope, at 0, released silence. Fixed in 2.2.2.
 #
 # The parameter guards mirror n_amp_envelope_new exactly -- setters skip naad's constructor
 # validation, so nidhi must not hand them a value the constructor would have rejected. That
@@ -148,6 +151,10 @@ fn n_amp_envelope_rearm(env, config, sample_rate) {
     Adsr_set_sustain_level(env, s);
     Adsr_set_release_time(env, rel);
     Adsr_set_sample_rate(env, esr);
+    Adsr_set_state(env, ENV_STATE_IDLE);
+    Adsr_set_current_value(env, 0);
+    Adsr_set_release_start_value(env, 0);
+    Adsr_set_stage_samples(env, 0);
     return 1;
 }
 
@@ -165,7 +172,6 @@ fn n_amp_envelope_tick(env) { return envelope_adsr_next_value(env); }
 #must_use
 fn n_amp_envelope_is_active(env) { return envelope_adsr_is_active(env); }
 
-#inline
 #must_use
 fn n_amp_envelope_is_releasing(env) {
     if (envelope_adsr_state(env) == ENV_STATE_RELEASE) { return 1; }

@@ -11,6 +11,7 @@ struct NInstrument {
     name;
     zones;
     rr_counters;
+    seq_counters;
 }
 
 #must_use
@@ -19,6 +20,8 @@ fn n_instrument_new(name) {
     NInstrument_set_name(inst, name);
     NInstrument_set_zones(inst, vec_new());
     NInstrument_set_rr_counters(inst, vec_new());
+    # One SFZ sequence counter per zone, parallel to `zones` (docs/adr/0012-round-robin-plays.md).
+    NInstrument_set_seq_counters(inst, vec_new());
     return inst;
 }
 
@@ -41,10 +44,15 @@ fn n_instrument_ensure_counters(inst, needed) {
     return 0;
 }
 
+# A negative group is normalised to 0 (ungrouped). Rust's group is a u32, so the value is
+# unrepresentable there; here n_zone_with_group takes any i64, `group > 0` skipped the sizing, and
+# find_zone_rr then indexed rr_counters at -1 -- `vec: index < 0`, exit(1) of the host.
 fn n_instrument_add_zone(inst, zone) {
     var zones = NInstrument_zones(inst);
     vec_push(zones, zone);
+    vec_push(NInstrument_seq_counters(inst), 0);
     var group = NZone_group(zone);
+    if (group < 0) { NZone_set_group(zone, 0); }
     if (group > 0) {
         if (group > N_MAX_ZONE_GROUP) {
             NZone_set_group(zone, 0);
@@ -92,45 +100,116 @@ fn n_instrument_find_first_zone(inst, note, vel) {
     return N_ZONE_NO_MATCH;
 }
 
-# find_zone_rr(note, vel) -> 0-based zone index, or -1 if no zone matches.
-# The RR group is the group of the FIRST matching zone; only same-group matches
-# participate. Ungrouped (group 0) always returns the first match.
+# n_instrument_seq_ok(inst, i, z) -> 1 if zone `z` (index `i`) is on its SFZ sequence step, else 0.
+# An unsequenced zone (seq_length 1) is always on step unless its seq_position is past 1, which
+# SFZ never plays. A zone pushed straight into NInstrument_zones has no counter slot and reads 0.
 #must_use
-fn n_instrument_find_zone_rr(inst, note, vel) {
+fn n_instrument_seq_ok(inst, i, z) {
+    var len = NZone_seq_length(z);
+    var pos = NZone_seq_position(z);
+    if (len <= 1) {
+        if (pos <= 1) { return 1; }
+        return 0;
+    }
+    var sc = NInstrument_seq_counters(inst);
+    var c = 0;
+    if (i < vec_len(sc)) { c = vec_get(sc, i); }
+    if (c % len == pos - 1) { return 1; }
+    return 0;
+}
+
+# Advance the sequence counter of every sequenced zone matching (note, vel). SFZ advances a
+# region's counter on every note-on it matches, whether or not it sounds, which is what keeps a
+# set of N regions in lockstep. u32 wrap, as the group counters.
+fn n_instrument_seq_advance(inst, note, vel) {
     var zones = NInstrument_zones(inst);
+    var sc = NInstrument_seq_counters(inst);
     var n = vec_len(zones);
-    var matching = vec_new();
+    if (vec_len(sc) < n) { n = vec_len(sc); }
     var i = 0;
     while (i < n) {
         var z = vec_get(zones, i);
-        if (n_zone_matches(z, note, vel) == 1) { vec_push(matching, i); }
+        if (NZone_seq_length(z) > 1) {
+            if (n_zone_matches(z, note, vel) == 1) { vec_set(sc, i, (vec_get(sc, i) + 1) & 0xFFFFFFFF); }
+        }
         i = i + 1;
     }
-    if (vec_len(matching) == 0) { return N_ZONE_NO_MATCH; }
+    return 0;
+}
 
-    var first_match = vec_get(matching, 0);
-    var group = NZone_group(vec_get(zones, first_match));
-    if (group == 0) { return first_match; }
+# find_zone_rr(note, vel) -> 0-based zone index, or -1 if no zone matches.
+# The RR group is the group of the FIRST matching zone; only same-group matches
+# participate. Ungrouped (group 0) always returns the first match.
+#
+# Since 2.2.2 the candidates are first filtered by SFZ's sequence (seq_length / seq_position;
+# docs/adr/0012-round-robin-plays.md): a zone off its step is not a match for this note-on. Every
+# zone the oracle could build is unsequenced, so for those this is the oracle's function exactly.
+# Afterwards every matching sequenced zone advances its counter, sounding or not.
+#
+# Two passes over the zones and no allocation. The oracle collected `matching` and then
+# `group_matches` into Vecs, and the literal port did the same with two vec_new() per call --
+# 304 never-reclaimed bytes per grouped call, 152 per ungrouped one, on a path driven by note-ons.
+# Pass 1 finds the first match, its group, and how many matches share that group; pass 2 walks to
+# the pick-th of them. Same counter arithmetic, so the same zone is picked on every call.
+#
+# A group outside 0..=N_MAX_ZONE_GROUP plays as ungrouped. add_zone caps it on the way in, but a
+# zone is a shared pointer and can be re-grouped AFTER it was added (Rust's Instrument owns its
+# zones, so it cannot), and then `vec_get(rr, group)` ran past the counters it had refused to
+# grow -- `vec: index out of bounds`, exit(1).
+#must_use
+fn n_instrument_find_zone_rr(inst, note, vel) {
+    var pick_idx = n_instrument_pick_zone(inst, note, vel);
+    n_instrument_seq_advance(inst, note, vel);
+    return pick_idx;
+}
 
-    var group_matches = vec_new();
-    var j = 0;
-    var m = vec_len(matching);
-    while (j < m) {
-        var idx = vec_get(matching, j);
-        if (NZone_group(vec_get(zones, idx)) == group) { vec_push(group_matches, idx); }
-        j = j + 1;
+# The selection itself, before any sequence counter moves.
+#must_use
+fn n_instrument_pick_zone(inst, note, vel) {
+    var zones = NInstrument_zones(inst);
+    var n = vec_len(zones);
+    var first_match = N_ZONE_NO_MATCH;
+    var group = 0;
+    var count = 0;
+    var i = 0;
+    while (i < n) {
+        var z = vec_get(zones, i);
+        if (n_zone_matches(z, note, vel) == 1) {
+            if (n_instrument_seq_ok(inst, i, z) == 1) {
+                if (first_match < 0) {
+                    first_match = i;
+                    group = NZone_group(z);
+                    if (group == 0) { return first_match; }
+                }
+                if (NZone_group(z) == group) { count = count + 1; }
+            }
+        }
+        i = i + 1;
     }
-    # Invariant assertion, not dead code: group_matches always contains first_match,
-    # because first_match's own group IS `group`. Any future change to how `group` is
-    # derived, or to the :81 predicate, must preserve that -- this re-arms if it does not.
-    if (vec_len(group_matches) == 0) { return N_ZONE_NO_MATCH; }
+    if (first_match < 0) { return N_ZONE_NO_MATCH; }
+    if (group < 0) { return first_match; }
+    if (group > N_MAX_ZONE_GROUP) { return first_match; }
 
     n_instrument_ensure_counters(inst, group + 1);
     var rr = NInstrument_rr_counters(inst);
     var counter = vec_get(rr, group);
-    var pick = counter % vec_len(group_matches);
+    # count >= 1: first_match itself is in the group.
+    var pick = counter % count;
     vec_set(rr, group, (counter + 1) & 0xFFFFFFFF);
-    return vec_get(group_matches, pick);
+    var j = first_match;
+    while (j < n) {
+        var zj = vec_get(zones, j);
+        if (n_zone_matches(zj, note, vel) == 1) {
+            if (n_instrument_seq_ok(inst, j, zj) == 1) {
+                if (NZone_group(zj) == group) {
+                    if (pick == 0) { return j; }
+                    pick = pick - 1;
+                }
+            }
+        }
+        j = j + 1;
+    }
+    return first_match;
 }
 
 #must_use

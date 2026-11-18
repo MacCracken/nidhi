@@ -25,11 +25,11 @@ fn main() {
     test_group("adsr from_seconds");
     # from_seconds(0.01, 0.05, 0.7, 0.1, 44100) -> 441, 2205, 0.7, 4410
     var cfg = n_adsr_config_from_seconds(
-        f64_div(f64_from(1), f64_from(100)),
-        f64_div(f64_from(5), f64_from(100)),
-        f64_div(f64_from(7), f64_from(10)),
-        f64_div(f64_from(1), f64_from(10)),
-        sr);
+      f64_div(f64_from(1), f64_from(100)),
+      f64_div(f64_from(5), f64_from(100)),
+      f64_div(f64_from(7), f64_from(10)),
+      f64_div(f64_from(1), f64_from(10)),
+      sr);
     assert_eq(NAdsrConfig_attack_samples(cfg), 441, "attack_samples == 441");
     assert_eq(NAdsrConfig_decay_samples(cfg), 2205, "decay_samples == 2205");
     assert_eq(NAdsrConfig_release_samples(cfg), 4410, "release_samples == 4410");
@@ -109,7 +109,7 @@ fn main() {
     var zlevel = n_amp_envelope_tick(zenv);
     var ztol = f64_div(f64_from(5), f64_from(100));
     assert_eq(approx(zlevel, f64_div(f64_from(8), f64_from(10)), ztol), 1,
-        "zero attack/decay settles at sustain 0.8");
+      "zero attack/decay settles at sustain 0.8");
     assert_eq(n_amp_envelope_is_active(zenv), 1, "still active while held");
 
     # rust-old/src/envelope.rs amp_envelope_smooth_release_from_mid_attack.
@@ -130,7 +130,7 @@ fn main() {
     ignore(n_amp_envelope_release(menv));
     var first_release = n_amp_envelope_tick(menv);
     assert_eq(f64_le(first_release, at_release), 1,
-        "release ramps DOWN from the mid-attack level, never jumps up");
+      "release ramps DOWN from the mid-attack level, never jumps up");
 
     var mk = 0;
     while (mk < 10000) {

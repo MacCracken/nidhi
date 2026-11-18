@@ -43,17 +43,18 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "ass
 # interpolation, onset/normalize). naad transitively references hisab + goonj, and
 # shravan references sankoch — declared here so the flat bundle resolves.
 # Every tag below is both the newest upstream tag and the matched set for cyrius 6.7.18:
-# naad, hisab and shravan pin exactly that toolchain. goonj 2.3.1 and sakshi 2.5.10
-# arrive transitively; sankoch 2.8.9 and sakshi 2.5.10 are the copies the 6.7.18
-# snapshot bundles.
+# naad, hisab and shravan pin exactly that toolchain. goonj 2.3.2 arrives transitively
+# (naad's). sankoch 2.8.9 is the copy the 6.7.18 snapshot bundles. sakshi 2.5.10 is a
+# stdlib leaf from that snapshot since hisab 3.4.2, not a package, so cyrius.lock no
+# longer commit-pins it.
 [deps.naad]
 git = "https://github.com/MacCracken/naad.git"
-tag = "2.3.3"
+tag = "2.3.5"
 modules = ["dist/naad.cyr"]
 
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "3.4.1"
+tag = "3.5.0"
 modules = ["dist/hisab.cyr"]
 
 # Keep sankoch ABOVE shravan. Both define a global `detect_format`, deps are prepended
@@ -69,5 +70,5 @@ modules = ["dist/sankoch.cyr"]
 
 [deps.shravan]
 git = "https://github.com/MacCracken/shravan.git"
-tag = "2.9.3"
+tag = "2.12.4"
 modules = ["dist/shravan.cyr"]

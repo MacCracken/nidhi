@@ -8,10 +8,12 @@ var SM_OLA           = 0;
 var SM_WSOLA         = 1;
 var SM_PHASE_VOCODER = 2;
 
+# -inf as an f64 bit pattern: the oracle's seed for every best-correlation search.
+var N_F64_NEG_INF = 0xFFF0000000000000;
+
 # --- helpers ---
 
 # n_dot(a, a_off, b, b_off, n) -- sum_{i<n} a[a_off+i]*b[b_off+i]  (f64).
-#inline
 # Raw-pointer dot product over n f64 elements, a and b given as byte addresses into a vec's
 # buffer. The caller must already have proven both spans in range. This exists because the
 # WSOLA correlation search evaluates ~88M element pairs for a one-second stretch, and
@@ -39,6 +41,12 @@ fn n_dot(a, a_off, b, b_off, n) {
 
 # cross_correlate(a, b, max_lag) -- signed lag maximizing the dot product of a vs b shifted by
 # that lag. Negative lag shifts a forward; non-negative lag shifts b forward (lag 0 included).
+#
+# Seeded exactly as the oracle seeds it (stretch.rs: `best_lag = 0; best_corr =
+# f64::NEG_INFINITY`), and a lag wins only on a strict `sum > best_corr`. The port used to seed
+# from the FIRST lag it evaluated instead. For finite sums the two are the same, but not when that
+# first sum is NaN or -inf: measured, a NaN at lag -1 returned -1 where the oracle returns -2, and
+# all sums -inf returned -1 where the oracle returns 0.
 #must_use
 fn n_cross_correlate(a, b, max_lag) {
     var alen = vec_len(a);
@@ -46,8 +54,7 @@ fn n_cross_correlate(a, b, max_lag) {
     if (alen == 0) { return 0; }
     if (blen == 0) { return 0; }
     var best_lag = 0;
-    var have_best = 0;
-    var best_corr = 0;
+    var best_corr = N_F64_NEG_INF;
 
     var max_neg = max_lag;
     if (alen - 1 < max_neg) { max_neg = alen - 1; }
@@ -57,15 +64,9 @@ fn n_cross_correlate(a, b, max_lag) {
         if (blen < ol) { ol = blen; }
         if (ol > 0) {
             var sum = n_dot(a, lag, b, 0, ol);
-            if (have_best == 0) {
+            if (f64_gt(sum, best_corr) == 1) {
                 best_corr = sum;
                 best_lag = 0 - lag;
-                have_best = 1;
-            } else {
-                if (f64_gt(sum, best_corr) == 1) {
-                    best_corr = sum;
-                    best_lag = 0 - lag;
-                }
             }
         }
         lag = lag + 1;
@@ -79,15 +80,9 @@ fn n_cross_correlate(a, b, max_lag) {
         if (blen - lag2 < ol2) { ol2 = blen - lag2; }
         if (ol2 > 0) {
             var sum2 = n_dot(a, 0, b, lag2, ol2);
-            if (have_best == 0) {
+            if (f64_gt(sum2, best_corr) == 1) {
                 best_corr = sum2;
                 best_lag = lag2;
-                have_best = 1;
-            } else {
-                if (f64_gt(sum2, best_corr) == 1) {
-                    best_corr = sum2;
-                    best_lag = lag2;
-                }
             }
         }
         lag2 = lag2 + 1;
@@ -126,6 +121,41 @@ fn n_normalize_by_window_sum(output, window_sum) {
         i = i + 1;
     }
     return 0;
+}
+
+# n_vec_zeros(n) -> a vec of n zeros sized ONCE, or 0 when n is outside [0, VEC_CAP_MAX] or the
+# allocation is refused.
+#
+# Every stretch buffer used to be grown by vec_push from 16 slots. On a bump allocator that frees
+# nothing, doubling leaves each smaller buffer behind: measured, a one-second x2 WSOLA allocated
+# 4,210,528 bytes, 2.8 MB of it dead copies; sized once it is 1,444,168. Worse, vec_push ENDS THE
+# PROCESS when a grow is refused, so a request n_stretch_fits accepts could still exit(1):
+# measured under a 4 GB limit, OLA of 4096 frames x40000 died in the zero-fill, and sized once it
+# returns all 163,840,000 samples. A refusal here is an empty result instead.
+#
+# Same shape as naad_vec_zeros: it relies on the {data, len, cap} header lib/vec.cyr documents,
+# and tests/stretch.tcyr pins that the result is an ordinary vec (len n, cap n, still pushable).
+# The n bound is what keeps `n * 8` from wrapping.
+#must_use
+fn n_vec_zeros(n) {
+    if (n < 0) { return 0; }
+    if (n > VEC_CAP_MAX) { return 0; }
+    var v = vec_new();
+    if (v == 0) { return 0; }
+    if (n > vec_cap(v)) {
+        var buf = alloc(n * 8);
+        if (buf == 0) { return 0; }
+        store64(v, buf);
+        store64(v + 16, n);
+    }
+    var data = load64(v);
+    var i = 0;
+    while (i < n) {
+        store64(data + i * 8, 0);
+        i = i + 1;
+    }
+    store64(v + 8, n);
+    return v;
 }
 
 # --- TimeStretcher ---
@@ -170,13 +200,17 @@ fn n_stretch_fits(input_len, frame_size, ratio) {
 }
 
 # stretch_short(ratio) -- linear-interpolation resample for input_len < frame_size.
+# The output is sized once (see n_vec_zeros): a target_len outside [0, VEC_CAP_MAX], or a
+# refused allocation, is an empty result. The callers' n_stretch_fits already bounds it; this
+# function is public, so it does not rely on that.
 #must_use
 fn n_stretch_short(s, ratio) {
     var input = NTimeStretcher_input(s);
     var input_len = vec_len(input);
-    var out = vec_new();
     var target_len = f64_to(n_round_half_away(f64_mul(f64_from(input_len), ratio)));
-    if (target_len == 0) { return out; }
+    if (target_len <= 0) { return vec_new(); }
+    var out = n_vec_zeros(target_len);
+    if (out == 0) { return vec_new(); }
     var i = 0;
     while (i < target_len) {
         var src = f64_div(f64_from(i), ratio);
@@ -186,42 +220,105 @@ fn n_stretch_short(s, ratio) {
         if (idx >= 0) { if (idx < input_len) { a = vec_get(input, idx); } }
         var b = a;
         if (idx + 1 >= 0) { if (idx + 1 < input_len) { b = vec_get(input, idx + 1); } }
-        vec_push(out, f64_add(a, f64_mul(f64_sub(b, a), frac)));
+        vec_set(out, i, f64_add(a, f64_mul(f64_sub(b, a), frac)));
         i = i + 1;
     }
     return out;
 }
 
-# stretch(ratio) -- WSOLA. ratio>1 = longer/slower; <1 = shorter/faster.
+# --- shared by n_stretch (WSOLA) and n_stretch_ola ---
+# The two used to carry 49 identical lines: guard prologue, buffer setup, normalize-and-truncate
+# epilogue. Every repair to that code had to land twice, and the 2.0.5 audit found the OLA copy's
+# guards had never been tested. The frame loops stay separate: OLA carries none of WSOLA's
+# prev/tolerance bookkeeping.
+
+# Returned by n_stretch_prologue when the caller should run its frame loop. Never a valid vec
+# pointer (heap addresses are far above it), and never 0, which a refused vec_new returns.
+var N_STRETCH_RUN = 1;
+
+# n_stretch_syn_hop(s) -- the synthesis hop, truncating, as the oracle computes it.
 #must_use
-fn n_stretch(s, ratio) {
+fn n_stretch_syn_hop(s) {
+    var fs = f64_from(NTimeStretcher_frame_size(s));
+    return f64_to(f64_mul(fs, f64_sub(F64_ONE, NTimeStretcher_overlap(s))));
+}
+
+# n_stretch_prologue(s, ratio) -> N_STRETCH_RUN, or the finished result: an empty vec on invalid
+# input, stretch_short's output, or a copy of the input when syn_hop is not positive.
+#
+# `syn_hop <= 0`, not the oracle's `== 0`. The oracle's overlap was private and always 0.5;
+# #derive(accessors) exports NTimeStretcher_set_overlap. Past 1.0 the hop goes negative, out_pos
+# marches below 0, `oi < out_len` still passes and vec_get(output, oi) ends the process:
+# measured, overlap 1.5 -> `vec: index < 0`, exit 1. The oracle's `as usize` saturates a negative
+# hop to 0, so the copy path IS the oracle's answer for it.
+#must_use
+fn n_stretch_prologue(s, ratio) {
     var input = NTimeStretcher_input(s);
     var input_len = vec_len(input);
     var frame_size = NTimeStretcher_frame_size(s);
-    var out = vec_new();
-    if (input_len == 0) { return out; }
-    if (frame_size <= 0) { return out; }
-    if (f64_le(ratio, 0) == 1) { return out; }
-    if (n_is_finite(ratio) == 0) { return out; }
-    if (n_stretch_fits(input_len, frame_size, ratio) == 0) { return out; }
+    if (input_len == 0) { return vec_new(); }
+    if (frame_size <= 0) { return vec_new(); }
+    if (f64_le(ratio, 0) == 1) { return vec_new(); }
+    if (n_is_finite(ratio) == 0) { return vec_new(); }
+    if (n_stretch_fits(input_len, frame_size, ratio) == 0) { return vec_new(); }
     if (input_len < frame_size) { return n_stretch_short(s, ratio); }
-
-    var overlap = NTimeStretcher_overlap(s);
-    var syn_hop = f64_to(f64_mul(f64_from(frame_size), f64_sub(F64_ONE, overlap)));
-    if (syn_hop == 0) {
+    if (n_stretch_syn_hop(s) <= 0) {
+        var out = vec_new();
         var c = 0;
-        while (c < input_len) { vec_push(out, vec_get(input, c)); c = c + 1; }
+        while (c < input_len) {
+            vec_push(out, vec_get(input, c));
+            c = c + 1;
+        }
         return out;
     }
+    return N_STRETCH_RUN;
+}
+
+# n_stretch_out_len(s, ratio) -- ceil(input_len * ratio) + frame_size. n_stretch_fits has
+# already proven it below VEC_CAP_MAX, in f64, before this cast.
+#must_use
+fn n_stretch_out_len(s, ratio) {
+    var input_len = vec_len(NTimeStretcher_input(s));
+    var c = f64_to(f64_ceil(f64_mul(f64_from(input_len), ratio)));
+    return c + NTimeStretcher_frame_size(s);
+}
+
+# n_stretch_epilogue(output, window_sum, input_len, ratio) -- normalize by the window sum, then
+# truncate to round(input_len * ratio), half away from zero as Rust's .round() is.
+#must_use
+fn n_stretch_epilogue(output, window_sum, input_len, ratio) {
+    n_normalize_by_window_sum(output, window_sum);
+    var target_len = f64_to(n_round_half_away(f64_mul(f64_from(input_len), ratio)));
+    var final_len = target_len;
+    if (vec_len(output) < final_len) { final_len = vec_len(output); }
+    vec_truncate(output, final_len);
+    return output;
+}
+
+# The read position, frame_idx * ana_hop, is tested in f64 BEFORE f64_to (naad ADR-0004). With a
+# hop of 1 (overlap 1 - 1/1024 through the setter) and ratio 1e-19, frame 1 reads at 1e19: f64_to
+# saturates it to i64::MAX, `expected + tolerance` and `optimal + frame_size` wrap, both guards
+# pass, and vec_get ends the process (measured: `vec: index out of bounds`, exit 1). Stopping at
+# `pos >= input_len` changes nothing reachable without the setter: from there both loops already
+# stop, because no frame starting at or past input_len fits inside it.
+
+# stretch(ratio) -- WSOLA. ratio>1 = longer/slower; <1 = shorter/faster.
+#must_use
+fn n_stretch(s, ratio) {
+    var pre = n_stretch_prologue(s, ratio);
+    if (pre != N_STRETCH_RUN) { return pre; }
+    var input = NTimeStretcher_input(s);
+    var input_len = vec_len(input);
+    var frame_size = NTimeStretcher_frame_size(s);
+    var syn_hop = n_stretch_syn_hop(s);
     var ana_hop = f64_div(f64_from(syn_hop), ratio);
     var tolerance = frame_size / 4;
     var window = n_hann_window(frame_size);
-    var out_len = f64_to(f64_ceil(f64_mul(f64_from(input_len), ratio))) + frame_size;
-
-    var output = vec_new();
-    var window_sum = vec_new();
-    var z = 0;
-    while (z < out_len) { vec_push(output, 0); vec_push(window_sum, 0); z = z + 1; }
+    var out_len = n_stretch_out_len(s, ratio);
+    var output = n_vec_zeros(out_len);
+    if (output == 0) { return vec_new(); }
+    var window_sum = n_vec_zeros(out_len);
+    if (window_sum == 0) { return vec_new(); }
 
     # `prev` is an INDEX into `input`, not a copy of it. It used to be a fresh frame_size vec
     # built per frame -- but the frame is a pure slice of `input`, and the guard below
@@ -231,142 +328,123 @@ fn n_stretch(s, ratio) {
     var have_prev = 0;
     var prev_start = 0;
     var in_base = load64(input);
+    var len_f = f64_from(input_len);
     var frame_idx = 0;
     var looping = 1;
     while (looping == 1) {
         var out_pos = frame_idx * syn_hop;
+        var exp_f = f64_mul(f64_from(frame_idx), ana_hop);
         if (out_pos + frame_size > out_len) {
             looping = 0;
         } else {
-            var expected_input = f64_to(f64_mul(f64_from(frame_idx), ana_hop));
-            var optimal_input = expected_input;
-            if (optimal_input < 0) { optimal_input = 0; }
-            if (have_prev == 1) {
-                var ss = expected_input - tolerance;
-                if (ss < 0) { ss = 0; }
-                var se = expected_input + tolerance;
-                var cap = input_len - frame_size;
-                if (se > cap) { se = cap; }
-                if (ss > se) {
-                    optimal_input = expected_input;
-                    if (optimal_input < 0) { optimal_input = 0; }
-                } else {
-                    var best_pos = ss;
-                    var have_bc = 0;
-                    var best_corr = 0;
-                    var pos = ss;
-                    while (pos <= se) {
-                        var rem = input_len - pos;
-                        var nn = frame_size;
-                        if (rem < nn) { nn = rem; }
-                        var corr = n_dot_raw(in_base + prev_start * 8, in_base + pos * 8, nn);
-                        if (have_bc == 0) {
-                            best_corr = corr;
-                            best_pos = pos;
-                            have_bc = 1;
-                        } else {
+            if (f64_ge(exp_f, len_f) == 1) {
+                looping = 0;
+            } else {
+                var expected_input = f64_to(exp_f);
+                var optimal_input = expected_input;
+                if (optimal_input < 0) { optimal_input = 0; }
+                if (have_prev == 1) {
+                    var ss = expected_input - tolerance;
+                    if (ss < 0) { ss = 0; }
+                    var se = expected_input + tolerance;
+                    var cap = input_len - frame_size;
+                    if (se > cap) { se = cap; }
+                    if (ss > se) {
+                        optimal_input = expected_input;
+                        if (optimal_input < 0) { optimal_input = 0; }
+                    } else {
+                        # Seeded as the oracle seeds it; see n_cross_correlate.
+                        var best_pos = ss;
+                        var best_corr = N_F64_NEG_INF;
+                        var pos = ss;
+                        while (pos <= se) {
+                            var rem = input_len - pos;
+                            var nn = frame_size;
+                            if (rem < nn) { nn = rem; }
+                            var corr = n_dot_raw(in_base + prev_start * 8, in_base + pos * 8, nn);
                             if (f64_gt(corr, best_corr) == 1) {
                                 best_corr = corr;
                                 best_pos = pos;
                             }
+                            pos = pos + 1;
                         }
-                        pos = pos + 1;
+                        optimal_input = best_pos;
                     }
-                    optimal_input = best_pos;
                 }
-            }
-            if (optimal_input + frame_size > input_len) {
-                looping = 0;
-            } else {
-                var i = 0;
-                while (i < frame_size) {
-                    var sv = vec_get(input, optimal_input + i);
-                    var oi = out_pos + i;
-                    if (oi < out_len) {
-                        var wv = vec_get(window, i);
-                        vec_set(output, oi, f64_add(vec_get(output, oi), f64_mul(sv, wv)));
-                        vec_set(window_sum, oi, f64_add(vec_get(window_sum, oi), f64_mul(wv, wv)));
+                if (optimal_input + frame_size > input_len) {
+                    looping = 0;
+                } else {
+                    var i = 0;
+                    while (i < frame_size) {
+                        var sv = vec_get(input, optimal_input + i);
+                        var oi = out_pos + i;
+                        if (oi < out_len) {
+                            var wv = vec_get(window, i);
+                            vec_set(output, oi, f64_add(vec_get(output, oi), f64_mul(sv, wv)));
+                            vec_set(window_sum, oi, f64_add(vec_get(window_sum, oi), f64_mul(wv, wv)));
+                        }
+                        i = i + 1;
                     }
-                    i = i + 1;
+                    prev_start = optimal_input;
+                    have_prev = 1;
+                    frame_idx = frame_idx + 1;
                 }
-                prev_start = optimal_input;
-                have_prev = 1;
-                frame_idx = frame_idx + 1;
             }
         }
     }
-
-    n_normalize_by_window_sum(output, window_sum);
-    var target_len = f64_to(n_round_half_away(f64_mul(f64_from(input_len), ratio)));
-    var final_len = target_len;
-    if (vec_len(output) < final_len) { final_len = vec_len(output); }
-    vec_truncate(output, final_len);
-    return output;
+    return n_stretch_epilogue(output, window_sum, input_len, ratio);
 }
 
 # stretch_ola(ratio) -- plain overlap-add (no correlation search; direct input position).
 #must_use
 fn n_stretch_ola(s, ratio) {
+    var pre = n_stretch_prologue(s, ratio);
+    if (pre != N_STRETCH_RUN) { return pre; }
     var input = NTimeStretcher_input(s);
     var input_len = vec_len(input);
     var frame_size = NTimeStretcher_frame_size(s);
-    var out = vec_new();
-    if (input_len == 0) { return out; }
-    if (frame_size <= 0) { return out; }
-    if (f64_le(ratio, 0) == 1) { return out; }
-    if (n_is_finite(ratio) == 0) { return out; }
-    if (n_stretch_fits(input_len, frame_size, ratio) == 0) { return out; }
-    if (input_len < frame_size) { return n_stretch_short(s, ratio); }
-
-    var overlap = NTimeStretcher_overlap(s);
-    var syn_hop = f64_to(f64_mul(f64_from(frame_size), f64_sub(F64_ONE, overlap)));
-    if (syn_hop == 0) {
-        var c = 0;
-        while (c < input_len) { vec_push(out, vec_get(input, c)); c = c + 1; }
-        return out;
-    }
+    var syn_hop = n_stretch_syn_hop(s);
     var ana_hop = f64_div(f64_from(syn_hop), ratio);
     var window = n_hann_window(frame_size);
-    var out_len = f64_to(f64_ceil(f64_mul(f64_from(input_len), ratio))) + frame_size;
+    var out_len = n_stretch_out_len(s, ratio);
+    var output = n_vec_zeros(out_len);
+    if (output == 0) { return vec_new(); }
+    var window_sum = n_vec_zeros(out_len);
+    if (window_sum == 0) { return vec_new(); }
 
-    var output = vec_new();
-    var window_sum = vec_new();
-    var z = 0;
-    while (z < out_len) { vec_push(output, 0); vec_push(window_sum, 0); z = z + 1; }
-
+    var len_f = f64_from(input_len);
     var frame_idx = 0;
     var looping = 1;
     while (looping == 1) {
         var out_pos = frame_idx * syn_hop;
+        var pos_f = f64_mul(f64_from(frame_idx), ana_hop);
         if (out_pos + frame_size > out_len) {
             looping = 0;
         } else {
-            var input_pos = f64_to(f64_mul(f64_from(frame_idx), ana_hop));
-            if (input_pos + frame_size > input_len) {
+            if (f64_ge(pos_f, len_f) == 1) {
                 looping = 0;
             } else {
-                var i = 0;
-                while (i < frame_size) {
-                    var oi = out_pos + i;
-                    if (oi < out_len) {
-                        var wv = vec_get(window, i);
-                        var sv = vec_get(input, input_pos + i);
-                        vec_set(output, oi, f64_add(vec_get(output, oi), f64_mul(sv, wv)));
-                        vec_set(window_sum, oi, f64_add(vec_get(window_sum, oi), f64_mul(wv, wv)));
+                var input_pos = f64_to(pos_f);
+                if (input_pos + frame_size > input_len) {
+                    looping = 0;
+                } else {
+                    var i = 0;
+                    while (i < frame_size) {
+                        var oi = out_pos + i;
+                        if (oi < out_len) {
+                            var wv = vec_get(window, i);
+                            var sv = vec_get(input, input_pos + i);
+                            vec_set(output, oi, f64_add(vec_get(output, oi), f64_mul(sv, wv)));
+                            vec_set(window_sum, oi, f64_add(vec_get(window_sum, oi), f64_mul(wv, wv)));
+                        }
+                        i = i + 1;
                     }
-                    i = i + 1;
+                    frame_idx = frame_idx + 1;
                 }
-                frame_idx = frame_idx + 1;
             }
         }
     }
-
-    n_normalize_by_window_sum(output, window_sum);
-    var target_len = f64_to(n_round_half_away(f64_mul(f64_from(input_len), ratio)));
-    var final_len = target_len;
-    if (vec_len(output) < final_len) { final_len = vec_len(output); }
-    vec_truncate(output, final_len);
-    return output;
+    return n_stretch_epilogue(output, window_sum, input_len, ratio);
 }
 
 # stretch_with_mode(ratio, mode) -- Ola -> OLA; Wsola/PhaseVocoder -> WSOLA.

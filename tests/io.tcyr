@@ -12,6 +12,37 @@ fn approx(a, b, tol) {
     return 0;
 }
 
+# ch-channel test signal, exact in f32: channel c of frame f is (c + 1) / 16 + f / 1024, and
+# channel 1 is negated so a swapped or shifted pair cannot pass for the right one.
+fn mc_value(f, c) {
+    var v = f64_add(f64_div(f64_from(c + 1), f64_from(16)), f64_div(f64_from(f), f64_from(1024)));
+    if (c == 1) { return f64_neg(v); }
+    return v;
+}
+
+fn mc_wav(channels, frames, out) {
+    var v = vec_new();
+    var f = 0;
+    while (f < frames) {
+        var c = 0;
+        while (c < channels) { vec_push(v, mc_value(f, c)); c = c + 1; }
+        f = f + 1;
+    }
+    return wav_encode(v, 44100, channels, PCM_F32, out);
+}
+
+# 1 when the interleaved stereo vec `d` holds frames [first, first + n) of mc_value's front pair.
+fn mc_front_pair_ok(d, first, n) {
+    if (vec_len(d) != n * 2) { return 0; }
+    var f = 0;
+    while (f < n) {
+        if (vec_get(d, f * 2) != mc_value(first + f, 0)) { return 0; }
+        if (vec_get(d, f * 2 + 1) != mc_value(first + f, 1)) { return 0; }
+        f = f + 1;
+    }
+    return 1;
+}
+
 fn write_file(path, buf, len) {
     var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);   # mode 0644
     if (fd < 0) { return 0 - 1; }
@@ -179,6 +210,128 @@ fn main() {
     # 5000 mono f64 frames = 40 KB decoded, plus the raw file buffer. Two decoded copies plus
     # a pending vec would be far more; assert well under that.
     assert(open_bytes < 4000000, "open does not hold multiple decoded copies");
+
+    # --- 2.2.2: read_all hands over the decoded buffer instead of copying it ---
+    # It was read_chunk(total) -- vec_push per sample from vec_new(), so the doubling chain on
+    # top of a full copy: 16.78 MB of heap for a 10 s stereo file's 7.06 MB of samples.
+    test_group("read_all of a fresh reader copies nothing (2.2.2)");
+    var rasr = n_stream_reader_open("/tmp/nidhi_io_big.wav");
+    var ra0 = alloc_used();
+    var rall = n_stream_reader_read_all(rasr);
+    var ra_bytes = alloc_used() - ra0;
+    assert_eq(NSample_frames(rall), 5000, "read_all frames 5000");
+    assert(ra_bytes < 4096, "read_all of a fresh reader allocates < 4 KB (was ~128 KB)");
+    assert_eq(vec_len(n_stream_reader_read_chunk(rasr, 10)), 0, "read_all exhausts the reader");
+    assert_eq(vec_get(NSample_data(rall), 4999), vec_get(NSample_data(bload), 4999), "read_all data == load_wav data");
+
+    # --- 2.2.2: n_read_file reports a read error instead of treating it as end-of-file ---
+    # A directory opens, then read() fails with -EISDIR: the loop took that as EOF and handed
+    # back a non-0 buffer of length 0. A read error mid-file returned a silent prefix the same way.
+    test_group("n_read_file: a failed read is an error (2.2.2)");
+    var dslot = alloc(8);
+    assert_eq(n_read_file("tests", dslot), 0, "reading a directory -> 0 (an error), not an empty buffer");
+    assert_eq(load64(dslot), 0, "length 0 on error");
+    assert_eq(n_read_file("/tmp/nidhi_io_no_such_file.wav", dslot), 0, "missing file -> 0");
+
+    # --- 2.2.2: n_load_wav reads through nidhi's checked reader, then codec_open ---
+    # shravan's decode_file started every read at a 1 MB buffer and never checked its growth
+    # alloc (n_load_wav("/dev/zero") SIGSEGV'd under a 700 MB address-space limit). The format
+    # coverage is decode_file's own dispatch, codec_open, so AIFF and FLAC must still load.
+    test_group("n_load_wav: small read buffer, same format coverage (2.2.2)");
+    var lw0 = alloc_used();
+    var lwk = 0;
+    while (lwk < 8) {
+        assert(n_load_wav("/tmp/nidhi_io_test.wav") > 0, "tiny WAV loads");
+        lwk = lwk + 1;
+    }
+    var lw_per = (alloc_used() - lw0) / 8;
+    assert(lw_per < 65536, "a 4-frame WAV costs < 64 KB per load (was 1,049,832 B)");
+    var aiffbuf = alloc(8192);
+    var aiffn = aiff_encode(ipcm, 44100, 1, 16, aiffbuf);
+    assert(aiffn > 0, "aiff_encode");
+    write_file("/tmp/nidhi_io_test.aif", aiffbuf, aiffn);
+    var la = n_load_wav("/tmp/nidhi_io_test.aif");
+    assert(la > 0, "AIFF loads through n_load_wav");
+    assert_eq(approx(vec_get(NSample_data(la), 0), F64_HALF, f64_div(F64_ONE, f64_from(1000))), 1, "AIFF value[0] ~ 0.5");
+    var flacbuf = alloc(65536);
+    var flacn = flac_encode(ipcm, 44100, 1, 16, flacbuf);
+    assert(flacn > 0, "flac_encode");
+    write_file("/tmp/nidhi_io_test.flac", flacbuf, flacn);
+    var lf = n_load_wav("/tmp/nidhi_io_test.flac");
+    assert(lf > 0, "FLAC loads through n_load_wav");
+    assert_eq(NSample_frames(lf), 4, "FLAC frames 4");
+    assert_eq(vec_get(NSample_data(lf), 1), f64_neg(F64_HALF), "FLAC value[1] == -0.5 exactly");
+
+    # --- 2.2.2: the stream reader applies the same non-finite scrub as n_load_wav ---
+    # shravan zeroes non-finite f32 samples itself but copies 64-bit float samples raw, so a
+    # PCM_F64 WAV holding NaN/Inf reached the consumer through the stream reader only.
+    test_group("stream reader scrubs NaN/Inf like n_load_wav (2.2.2)");
+    var nanv = vec_new();
+    vec_push(nanv, F64_HALF);
+    vec_push(nanv, 0x7FF8000000000000);
+    vec_push(nanv, 0x7FF0000000000000);
+    vec_push(nanv, 0xFFF0000000000001);
+    var nanbuf = alloc(8192);
+    var nann = wav_encode(nanv, 44100, 1, PCM_F64, nanbuf);
+    write_file("/tmp/nidhi_io_nan.wav", nanbuf, nann);
+    var nl = n_load_wav("/tmp/nidhi_io_nan.wav");
+    assert_eq(vec_get(NSample_data(nl), 1), 0, "n_load_wav: NaN -> +0.0");
+    var nsr = n_stream_reader_open("/tmp/nidhi_io_nan.wav");
+    var nch = n_stream_reader_read_chunk(nsr, 4);
+    assert_eq(vec_get(nch, 0), F64_HALF, "finite sample untouched");
+    assert_eq(vec_get(nch, 1), 0, "stream: NaN -> +0.0");
+    assert_eq(vec_get(nch, 2), 0, "stream: +Inf -> +0.0");
+    assert_eq(vec_get(nch, 3), 0, "stream: NaN with sign + payload -> +0.0");
+
+    # --- 2.2.2: the Sample name is a copy, not a view of the caller's path ---
+    test_group("sample name survives the caller reusing its path buffer (2.2.2)");
+    write_file("/tmp/nidhi_io_aaaa.wav", wavbuf, nbytes);
+    write_file("/tmp/nidhi_io_bbbb.wav", wavbuf, nbytes);
+    var pbuf = alloc(64);
+    memcpy(pbuf, "/tmp/nidhi_io_aaaa.wav", 23);
+    var na = n_load_wav(pbuf);
+    memcpy(pbuf, "/tmp/nidhi_io_bbbb.wav", 23);
+    var nb = n_load_wav(pbuf);
+    assert_eq(str_eq(NSample_name(na), str_from("nidhi_io_aaaa")), 1, "first name unchanged after reuse");
+    assert_eq(str_eq(NSample_name(nb), str_from("nidhi_io_bbbb")), 1, "second name");
+
+    # --- 2.2.2: more than two channels load the front pair (docs/adr/0010) ---
+    # They were handed to n_sample_from_stereo as they were: a 3-channel file of F frames loaded
+    # as 3F/2 "frames" of interleaved channels, and the stream reader reported F frames while
+    # serving 3F/2.
+    test_group("3- and 6-channel WAV load the front pair (2.2.2)");
+    var mcs = vec_new();
+    vec_push(mcs, 3);
+    vec_push(mcs, 6);
+    var mi = 0;
+    while (mi < vec_len(mcs)) {
+        var mch = vec_get(mcs, mi);
+        var mbuf = alloc(65536);
+        var mn = mc_wav(mch, 50, mbuf);
+        assert(mn > 0, "multichannel wav_encode");
+        var mm = n_load_wav_from_memory(mbuf, mn);
+        assert_eq(NSample_channels(mm), 2, "from_memory: channels 2");
+        assert_eq(NSample_frames(mm), 50, "from_memory: 50 frames");
+        assert_eq(mc_front_pair_ok(NSample_data(mm), 0, 50), 1, "from_memory: L/R are channels 1 and 2");
+        write_file("/tmp/nidhi_io_mc.wav", mbuf, mn);
+        var mf = n_load_wav("/tmp/nidhi_io_mc.wav");
+        assert_eq(NSample_channels(mf), 2, "load_wav: channels 2");
+        assert_eq(NSample_frames(mf), 50, "load_wav: 50 frames");
+        assert_eq(mc_front_pair_ok(NSample_data(mf), 0, 50), 1, "load_wav: L/R are channels 1 and 2");
+        var ms = n_stream_reader_open("/tmp/nidhi_io_mc.wav");
+        assert_eq(NStreamReader_channels(ms), 2, "stream: channels 2");
+        assert_eq(NStreamReader_total_frames(ms), 50, "stream: total_frames 50");
+        var mc1 = n_stream_reader_read_chunk(ms, 7);
+        assert_eq(mc_front_pair_ok(mc1, 0, 7), 1, "stream: chunk of 7 front-pair frames");
+        var mrest = n_stream_reader_read_all(ms);
+        assert_eq(NSample_frames(mrest), 43, "stream: read_all serves the other 43");
+        assert_eq(mc_front_pair_ok(NSample_data(mrest), 7, 43), 1, "stream: read_all continues the pair");
+        var ms2 = n_stream_reader_open("/tmp/nidhi_io_mc.wav");
+        var mall = n_stream_reader_read_all(ms2);
+        assert_eq(NSample_frames(mall), NSample_frames(mf), "read_all frames == load_wav frames");
+        assert_eq(mc_front_pair_ok(NSample_data(mall), 0, 50), 1, "read_all data == load_wav data");
+        mi = mi + 1;
+    }
 
     return assert_summary();
 }

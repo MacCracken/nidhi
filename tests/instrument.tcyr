@@ -6,6 +6,8 @@ include "src/loop_mode.cyr"
 include "src/zone.cyr"
 include "src/instrument.cyr"
 
+fn n_ignore_rr(v) { return 0; }
+
 fn main() {
     alloc_init();
 
@@ -64,6 +66,86 @@ fn main() {
     assert_eq(n_instrument_find_zone_rr(inst4, 50, 100), 0 - 1, "no match -> -1 (None)");
     assert_eq(n_instrument_zone_count(inst4), 1, "zone_count == 1");
 
+    # --- 2.2.2: find_zone_rr hardening (P(-1) audit) ---
+
+    # A negative group (unrepresentable in Rust's u32) skipped add_zone's sizing, and
+    # find_zone_rr then read rr_counters[-1]: `vec: index < 0`, exit(1) of the host.
+    test_group("negative group is ungrouped, not fatal (2.2.2)");
+    var ineg = n_instrument_new(str_from("neg"));
+    var zneg = n_zone_with_group(n_zone_with_key_range(n_zone_new(0), 60, 72), 0 - 1);
+    n_instrument_add_zone(ineg, zneg);
+    assert_eq(NZone_group(zneg), 0, "add_zone normalises group -1 to 0");
+    assert_eq(n_instrument_find_zone_rr(ineg, 66, 100), 0, "find_zone_rr returns the match");
+    # Zones are shared pointers, so a zone can be re-grouped after add_zone; the counters were
+    # never sized for it and vec_get ran off their end.
+    zneg = n_zone_with_group(zneg, 0 - 7);
+    assert_eq(n_instrument_find_zone_rr(ineg, 66, 100), 0, "re-grouped to -7 after add: plays ungrouped");
+    zneg = n_zone_with_group(zneg, 5000);
+    assert_eq(n_instrument_find_zone_rr(ineg, 66, 100), 0, "re-grouped to 5000 after add: plays ungrouped");
+
+    # Two vec_new() per call, never reclaimed: 304 B per grouped call.
+    test_group("find_zone_rr allocates nothing and picks as before (2.2.2)");
+    var ia = n_instrument_new(str_from("a"));
+    var k = 0;
+    while (k < 6) {
+        var zk = n_zone_with_key_range(n_zone_new(k), 60, 72);
+        # zones 0,2,4 in group 2; 1,3,5 in group 3 -- the first match decides the group
+        if ((k % 2) == 0) { zk = n_zone_with_group(zk, 2); } else { zk = n_zone_with_group(zk, 3); }
+        n_instrument_add_zone(ia, zk);
+        k = k + 1;
+    }
+    var h0 = alloc_used();
+    var picks = 0;
+    var c = 0;
+    while (c < 100) { picks = picks + n_instrument_find_zone_rr(ia, 66, 100); c = c + 1; }
+    assert_eq(alloc_used() - h0, 0, "100 grouped calls allocate 0 bytes");
+    # cycles 0, 2, 4 within group 2: 34 x 0 + 33 x 2 + 33 x 4 = 198
+    assert_eq(picks, 198, "round robin cycles the first match's group in zone order");
+    var iu = n_instrument_new(str_from("u2"));
+    n_instrument_add_zone(iu, n_zone_with_key_range(n_zone_new(0), 60, 72));
+    var h1 = alloc_used();
+    assert_eq(n_instrument_find_zone_rr(iu, 66, 100), 0, "ungrouped returns first");
+    assert_eq(alloc_used() - h1, 0, "ungrouped call allocates 0 bytes");
+
+
+    # --- 2.2.2: SFZ sequences (seq_length / seq_position), ADR 0012 ---
+    test_group("a sequence cycles by position, not zone order (2.2.2)");
+    var iseq = n_instrument_new(str_from("seq"));
+    # added out of order: positions 3, 1, 2 at zone indices 0, 1, 2
+    n_instrument_add_zone(iseq, n_zone_with_seq(n_zone_with_key_range(n_zone_new(0), 60, 60), 3, 3));
+    n_instrument_add_zone(iseq, n_zone_with_seq(n_zone_with_key_range(n_zone_new(1), 60, 60), 3, 1));
+    n_instrument_add_zone(iseq, n_zone_with_seq(n_zone_with_key_range(n_zone_new(2), 60, 60), 3, 2));
+    assert_eq(n_instrument_find_zone_rr(iseq, 60, 100), 1, "step 1 plays seq_position 1");
+    assert_eq(n_instrument_find_zone_rr(iseq, 60, 100), 2, "step 2 plays seq_position 2");
+    assert_eq(n_instrument_find_zone_rr(iseq, 60, 100), 0, "step 3 plays seq_position 3");
+    assert_eq(n_instrument_find_zone_rr(iseq, 60, 100), 1, "step 4 wraps to seq_position 1");
+    assert_eq(n_instrument_find_zone_rr(iseq, 61, 100), 0 - 1, "a note no zone matches finds nothing");
+    assert_eq(n_instrument_find_zone_rr(iseq, 60, 100), 2, "and does not advance the sequence");
+
+    test_group("sequences on different keys advance independently (2.2.2)");
+    var ikeys = n_instrument_new(str_from("k"));
+    n_instrument_add_zone(ikeys, n_zone_with_seq(n_zone_with_key_range(n_zone_new(0), 60, 60), 2, 1));
+    n_instrument_add_zone(ikeys, n_zone_with_seq(n_zone_with_key_range(n_zone_new(1), 60, 60), 2, 2));
+    n_instrument_add_zone(ikeys, n_zone_with_seq(n_zone_with_key_range(n_zone_new(2), 62, 62), 2, 1));
+    n_instrument_add_zone(ikeys, n_zone_with_seq(n_zone_with_key_range(n_zone_new(3), 62, 62), 2, 2));
+    assert_eq(n_instrument_find_zone_rr(ikeys, 60, 100), 0, "60: first");
+    assert_eq(n_instrument_find_zone_rr(ikeys, 62, 100), 2, "62: first, untouched by 60");
+    assert_eq(n_instrument_find_zone_rr(ikeys, 60, 100), 1, "60: second");
+    assert_eq(n_instrument_find_zone_rr(ikeys, 62, 100), 3, "62: second");
+
+    test_group("a seq_position past seq_length never sounds (2.2.2)");
+    var ipast = n_instrument_new(str_from("p"));
+    n_instrument_add_zone(ipast, n_zone_with_seq(n_zone_with_key_range(n_zone_new(0), 60, 60), 1, 2));
+    assert_eq(n_instrument_find_zone_rr(ipast, 60, 100), 0 - 1, "length 1, position 2: no step plays it");
+    assert_eq(NZone_seq_length(n_zone_new(0)), 1, "a new zone is unsequenced (length 1)");
+    assert_eq(NZone_seq_position(n_zone_new(0)), 1, "a new zone is unsequenced (position 1)");
+    assert_eq(NZone_seq_length(n_zone_with_seq(n_zone_new(0), 0 - 5, 0)), 1, "length and position clamp up to 1");
+
+    test_group("a sequenced call allocates nothing (2.2.2)");
+    var h2 = alloc_used();
+    var s2 = 0;
+    while (s2 < 100) { n_ignore_rr(n_instrument_find_zone_rr(iseq, 60, 100)); s2 = s2 + 1; }
+    assert_eq(alloc_used() - h2, 0, "100 sequenced calls allocate 0 bytes");
     return assert_summary();
 }
 

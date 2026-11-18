@@ -351,7 +351,10 @@ Limiter    -> naad::dynamics::Limiter::new(-1.0, 0.05, sr)                 // in
   `sample_rate`. naad clamps `decay = sr.clamp(0.0,0.99)` and validates `sample_rate=0.6` (>0, ok).
   This is what the source does; if you port the naad Reverb, feed these SAME positional values.
 - `Chorus::new(num_voices, base_delay_ms, depth_ms, rate, mix, sample_rate)` — nidhi passes
-  `(3, 0.02, 0.002, 1.5, 0.5, sr)` (these line up sensibly).
+  `(3, 0.02, 0.002, 1.5, 0.5, sr)`. **They do not line up** (corrected 2.2.2): 0.02 and 0.002 are
+  seconds in millisecond slots, a 0.88-sample delay that made the chorus a passthrough. 2.2.2
+  passes 20 ms / 2 ms, and remaps the reverb's arguments too:
+  [ADR 0011](../adr/0011-effect-slots-get-the-parameters-meant.md).
 - `CombFilter::new(delay_samples, feedback)` — `(samples, 0.4)`.
 - `Compressor::new(threshold_db, ratio, attack, release, sample_rate)` — `(-20, 4, 0.01, 0.1, sr)`.
 - `Limiter::new(ceiling_db, release, sample_rate)` — `(-1.0, 0.05, sr)`.

@@ -24,6 +24,50 @@ fn zone0(f, sr) {
     return NSfzZoneFile_zone(vec_get(n_sfz_to_zones(f, sr), 0));
 }
 
+# `pat` repeated to fill `total` bytes, NUL-terminated.
+fn rep_buf(pat, total) {
+    var pl = strlen(pat);
+    var reps = total / pl;
+    var b = alloc(reps * pl + 1);
+    var i = 0;
+    while (i < reps) { memcpy(b + i * pl, pat, pl); i = i + 1; }
+    store8(b + reps * pl, 0);
+    return b;
+}
+
+# `hdr` then `nreg` lines "<region> sample=sNNNNNNN.wav": a distinct name per region when
+# distinct == 1, the same name for all when distinct == 0.
+fn region_buf(hdr, nreg, distinct) {
+    var line = "\n<region> sample=s0000000.wav";
+    var hl = strlen(hdr);
+    var pl = strlen(line);
+    var b = alloc(hl + nreg * pl + 1);
+    memcpy(b, hdr, hl);
+    var i = 0;
+    while (i < nreg) {
+        var p = b + hl + i * pl;
+        memcpy(p, line, pl);
+        var v = i * distinct;
+        var d = 0;
+        while (d < 7) { store8(p + 18 + 6 - d, 48 + (v % 10)); v = v / 10; d = d + 1; }
+        i = i + 1;
+    }
+    store8(b + hl + nreg * pl, 0);
+    return b;
+}
+
+# "<control> default_path=" followed by n 'a' bytes.
+fn dp_buf(n) {
+    var h = "<control> default_path=";
+    var hl = strlen(h);
+    var b = alloc(hl + n + 1);
+    memcpy(b, h, hl);
+    var i = 0;
+    while (i < n) { store8(b + hl + i, 97); i = i + 1; }
+    store8(b + hl + n, 0);
+    return b;
+}
+
 fn main() {
     alloc_init();
     var sr = f64_from(44100);
@@ -207,7 +251,11 @@ fn main() {
     test_group("huge group imports without aborting (2.0.2)");
     var gp = n_sfz_parse("<region> sample=x.wav group=300000000");
     assert(gp > 0, "huge group parses");
-    var ginst = n_sfz_to_instrument(gp, str_from("g"), f64_from(44100));
+    # n_sfz_to_instrument returns an NSfzInstResult, not an instrument. 2.0.2 to 2.2.1 passed the
+    # result itself to the two instrument calls below, which then read its sample_files vec as the
+    # zone list: zone_count saw 1 file and passed by accident, and find_zone_rr walked file-name
+    # Strs as zones. 2.2.2's sequence counters read past the 2-slot result and segfaulted.
+    var ginst = NSfzInstResult_instrument(n_sfz_to_instrument(gp, str_from("g"), f64_from(44100)));
     assert(ginst > 0, "huge group builds an instrument");
     # Reaching this line IS the assertion. Before the N_MAX_ZONE_GROUP cap, group=300000000
     # made n_instrument_ensure_counters push ~300M slots -- ~4 GB, then `vec: capacity
@@ -292,6 +340,151 @@ fn main() {
     assert_eq(approx(NZone_volume_db(negz), f64_neg(f64_from(6)), tol), 1,
         "volume=-0 inherits the group's -6, matching the oracle");
 
+    # --- 2.2.2: hostile-input hardening (P(-1) audit) ---
+
+    # default_path is joined onto every region's filename, so its length multiplied into the
+    # heap: a 1.19 MB file (1 MB path, 8,000 one-letter regions) needed ~8 GB and segfaulted.
+    test_group("default_path: over-long path ignored, join shared per sample (2.2.2)");
+    var dpl = n_sfz_parse(region_buf(dp_buf(8192), 3, 0));
+    assert_eq(NSfzFile_default_path(dpl), 0, "an 8 KB default_path (> PATH_MAX) is ignored");
+    assert_eq(str_eq_cstr(NSfzZoneFile_filename(vec_get(n_sfz_to_zones(dpl, sr), 0)), "s0000000.wav"), 1,
+        "and the filename stays the raw sample");
+    var dpk = n_sfz_parse(region_buf(dp_buf(4096), 1, 0));
+    assert(NSfzFile_default_path(dpk) != 0, "a 4096-byte default_path is still honoured");
+    # 2,000 regions sharing one sample under a 4,000-byte path: the join used to cost 2,000 x 4 KB.
+    var with_dp = n_sfz_parse(region_buf(dp_buf(4000), 2000, 0));
+    var no_dp = n_sfz_parse(region_buf("", 2000, 0));
+    var h0 = alloc_used();
+    ignore(n_sfz_to_zones(no_dp, sr));
+    var h1 = alloc_used();
+    ignore(n_sfz_to_zones(with_dp, sr));
+    var h2 = alloc_used();
+    assert((h2 - h1) - (h1 - h0) < 65536, "default_path adds < 64 KB over 2,000 regions sharing a sample");
+    var jz = n_sfz_to_zones(with_dp, sr);
+    assert_eq(NSfzZoneFile_filename(vec_get(jz, 0)), NSfzZoneFile_filename(vec_get(jz, 1999)),
+        "regions with the same sample share one joined filename");
+    assert_eq(str_len(NSfzZoneFile_filename(vec_get(jz, 0))), 4000 + 12, "joined = path + sample");
+
+    # The dedup scanned every known filename per zone: 40,000 distinct names took 14.9 s.
+    test_group("to_instrument dedup is not quadratic (2.2.2)");
+    var dd = n_sfz_parse(region_buf("", 20000, 1));
+    var t0 = now_ns();
+    var ddi = n_sfz_to_instrument(dd, str_from("dd"), sr);
+    var dms = (now_ns() - t0) / 1000000;
+    # 20,000 distinct names: ~3,700 ms quadratic, ~20 ms hashed. The bound sits far from both.
+    assert(dms < 1500, "to_instrument over 20,000 distinct samples finishes in < 1.5 s");
+    assert_eq(vec_len(NSfzInstResult_sample_files(ddi)), 20000, "20,000 sample files");
+    var ddz = NInstrument_zones(NSfzInstResult_instrument(ddi));
+    assert_eq(NZone_sample_id(vec_get(ddz, 0)), 0, "first-seen order: zone 0 -> id 0");
+    assert_eq(NZone_sample_id(vec_get(ddz, 19999)), 19999, "first-seen order: zone 19999 -> id 19999");
+    var dr = n_sfz_to_instrument(n_sfz_parse("<region> sample=b.wav\n<region> sample=a.wav\n<region> sample=b.wav\n<region> sample=c.wav\n<region> sample=a.wav\n"), str_from("r"), sr);
+    var drz = NInstrument_zones(NSfzInstResult_instrument(dr));
+    assert_eq(NZone_sample_id(vec_get(drz, 2)), 0, "repeat of b -> id 0");
+    assert_eq(NZone_sample_id(vec_get(drz, 3)), 2, "c -> id 2");
+    assert_eq(NZone_sample_id(vec_get(drz, 4)), 1, "repeat of a -> id 1");
+
+    # Parsing allocated ~124 heap bytes per input byte (a vec of lines, a trimmed Str and two
+    # str_from headers per line, a fresh token vec per line), so a 40 MB file segfaulted.
+    test_group("parse heap tracks what the file keeps, not its line count (2.2.2)");
+    var xb = rep_buf("x\n", 262144);
+    var pa0 = alloc_used();
+    ignore(n_sfz_parse(xb));
+    var pa1 = alloc_used();
+    assert((pa1 - pa0) < 65536, "256 KB of opcode-free lines allocates < 64 KB (was ~32 MB)");
+
+    # Kept strings were views into the caller's buffer, and not NUL-terminated.
+    test_group("parsed strings are owned and NUL-terminated (2.2.2)");
+    var srcl = "<control> default_path=d/\n#include \"i.sfz\"\n<region> sample=a.wav loop_mode=loop_continuous fil_type=hpf_2p volume_oncc7=3\n";
+    var obuf = alloc(strlen(srcl) + 1);
+    memcpy(obuf, srcl, strlen(srcl) + 1);
+    var of = n_sfz_parse(obuf);
+    var k = 0;
+    while (k < strlen(srcl)) { store8(obuf + k, 90); k = k + 1; }
+    var oreg = vec_get(NSfzFile_regions(of), 0);
+    assert_eq(str_eq_cstr(NSfzRegion_sample(oreg), "a.wav"), 1, "sample survives the caller reusing its buffer");
+    assert_eq(str_eq_cstr(NSfzRegion_loop_mode(oreg), "loop_continuous"), 1, "loop_mode survives");
+    assert_eq(str_eq_cstr(NSfzRegion_fil_type(oreg), "hpf_2p"), 1, "fil_type survives");
+    assert_eq(str_eq_cstr(NSfzCC_param(vec_get(NSfzRegion_cc_modulations(oreg), 0)), "volume"), 1, "cc param survives");
+    assert_eq(str_eq_cstr(NSfzFile_default_path(of), "d/"), 1, "default_path survives");
+    assert_eq(str_eq_cstr(vec_get(NSfzFile_includes(of), 0), "i.sfz"), 1, "include survives");
+    var osf = vec_get(NSfzInstResult_sample_files(n_sfz_to_instrument(of, str_from("o"), sr)), 0);
+    assert_eq(str_eq_cstr(osf, "d/a.wav"), 1, "joined filename correct");
+    assert_eq(strlen(str_data(osf)), str_len(osf), "joined filename is NUL-terminated (a cstr path)");
+    var nsf = vec_get(NSfzInstResult_sample_files(n_sfz_to_instrument(n_sfz_parse("<region> sample=a.wav key=60\n"), str_from("n"), sr)), 0);
+    assert_eq(strlen(str_data(nsf)), str_len(nsf), "plain filename is NUL-terminated (a cstr path)");
+
+    # rust-old/src/sfz.rs parse_note_or_number: `parse::<u8>()` then an i32 octave.
+    test_group("note names: u8 numeric, i32 octave (2.2.2)");
+    assert_eq(n_sfz_note_or_num(str_from("-0")), 0 - 1, "-0 is not a u8 and not a note -> None");
+    assert_eq(n_sfz_note_or_num(str_from("+60")), 60, "+60 is a u8 -> 60");
+    assert_eq(n_sfz_note_or_num(str_from("c4611686018427387903")), 0 - 1, "octave past i32 -> None (wrapped to 0)");
+    assert_eq(n_sfz_note_or_num(str_from("e4611686018427387903")), 0 - 1, "octave past i32 -> None (wrapped to 4)");
+    assert_eq(n_sfz_note_or_num(str_from("c1073741823")), 0 - 1, "huge i32 octave -> None, no wrap");
+    assert_eq(n_sfz_note_or_num(str_from("c+4")), 60, "c+4 -> 60 (i32 accepts a leading +)");
+    var mz = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav hikey=-0 pitch_keycenter=-0\n")), 0);
+    assert_eq(NSfzRegion_hikey(mz), 127, "hikey=-0 leaves 127");
+    assert_eq(NSfzRegion_pitch_keycenter(mz), 60, "pitch_keycenter=-0 leaves 60");
+
+    # parse(): `trim_start_matches("#include").trim().trim_matches('"')`.
+    test_group("#include path trimming follows trim_matches (2.2.2)");
+    var qi = n_sfz_parse("#include \"\"a.sfz\"\"\n#include \"\"\"\n#include#include \"b.sfz\"\n");
+    assert_eq(vec_len(NSfzFile_includes(qi)), 2, "an all-quotes path is empty -> not recorded");
+    assert_eq(str_eq_cstr(vec_get(NSfzFile_includes(qi), 0), "a.sfz"), 1, "every surrounding quote stripped");
+    assert_eq(str_eq_cstr(vec_get(NSfzFile_includes(qi), 1), "b.sfz"), 1, "a repeated #include prefix stripped");
+
+    # str::split_whitespace and str::trim split on every Unicode White_Space code point.
+    test_group("Unicode White_Space separates tokens and trims lines (2.2.2)");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse("<region>\x0Csample=a.wav\x0Ckey=60\n"))), 1, "form feed (U+000C)");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse("<region>\x0Bsample=a.wav\n"))), 1, "vertical tab (U+000B)");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse("<region>\xC2\xA0sample=a.wav\n"))), 1, "NBSP (U+00A0)");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse("<region>\xE3\x80\x80sample=a.wav\n"))), 1, "ideographic space (U+3000)");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse("<region>\xE2\x80\xA8sample=a.wav\n"))), 1, "line separator (U+2028)");
+    var wsf = n_sfz_parse("<region>\xE2\x80\x8Asample=a.wav\xC2\x85key=62\n");
+    assert_eq(vec_len(NSfzFile_regions(wsf)), 1, "hair space (U+200A) after <region>");
+    if (vec_len(NSfzFile_regions(wsf)) == 1) {
+        var wsr = vec_get(NSfzFile_regions(wsf), 0);
+        assert_eq(str_eq_cstr(NSfzRegion_sample(wsr), "a.wav"), 1, "NEL (U+0085) ends the sample token");
+        assert_eq(NSfzRegion_key(wsr), 62, "NEL (U+0085) separates key=62");
+    }
+    assert_eq(vec_len(NSfzFile_includes(n_sfz_parse("\xC2\xA0#include \"a.sfz\"\xE3\x80\x80\n"))), 1, "a line is trimmed of Unicode spaces before #include");
+    assert_eq(vec_len(NSfzFile_regions(n_sfz_parse("<region>\xC2\xA1sample=a.wav\n"))), 0, "U+00A1 is not whitespace");
+
+    # rust-old/src/sfz.rs:265-272, 345-354: loop points, offset and end are `usize`.
+    test_group("loop points / offset / end parse as usize (2.2.2)");
+    var uz = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav offset=4294967296 end=4294967297 loop_start=4294967298 loop_end=18446744073709551615\n")), 0);
+    assert_eq(NSfzRegion_offset(uz), 4294967296, "offset above u32::MAX accepted");
+    assert_eq(NSfzRegion_end(uz), 4294967297, "end above u32::MAX accepted");
+    assert_eq(NSfzRegion_loop_start(uz), 4294967298, "loop_start above u32::MAX accepted");
+    assert_eq(NSfzRegion_loop_end(uz), 9223372036854775807, "u64::MAX accepted, saturated to i64::MAX");
+    var ux = vec_get(NSfzFile_regions(n_sfz_parse("<region> sample=a.wav offset=7 offset=18446744073709551616 end=99999999999999999999999\n")), 0);
+    assert_eq(NSfzRegion_offset(ux), 7, "above u64::MAX is an Err -> field unchanged");
+    assert_eq(NSfzRegion_end(ux), 0, "far above u64::MAX is an Err -> field unchanged");
+    var uo = alloc(8);
+    assert_eq(sfz_uint(str_from("00018446744073709551615"), uo), 1, "leading zeros do not count toward the 20 digits");
+    assert_eq(sfz_uint(str_from("18446744073709551616"), uo), 0, "u64::MAX + 1 rejected");
+    assert_eq(sfz_uint(str_from("+"), uo), 0, "a lone + rejected");
+
+
+    # --- 2.2.2: seq_length / seq_position are SFZ's round-robin (ADR 0012) ---
+    # The oracle wrote seq_position into `group`, giving every region of a round-robin set its own
+    # group, so find_zone_rr could never cycle the set: a3.wav below never played.
+    test_group("seq_length / seq_position round-robin (2.2.2)");
+    var rrf = n_sfz_parse("<group> seq_length=3 key=60\n<region> sample=a1.wav seq_position=1\n<region> sample=a2.wav seq_position=2\n<region> sample=a3.wav seq_position=3\n");
+    var rrz = n_sfz_to_zones(rrf, sr);
+    assert_eq(vec_len(rrz), 3, "3 regions");
+    var rrz2 = NSfzZoneFile_zone(vec_get(rrz, 2));
+    assert_eq(NZone_seq_length(rrz2), 3, "seq_length inherits from <group>");
+    assert_eq(NZone_seq_position(rrz2), 3, "seq_position from the region");
+    assert_eq(NZone_group(rrz2), 0, "seq_position no longer writes the RR group");
+    var rri = NSfzInstResult_instrument(n_sfz_to_instrument(rrf, str_from("rr"), sr));
+    assert_eq(n_instrument_find_zone_rr(rri, 60, 100), 0, "note 1 plays a1");
+    assert_eq(n_instrument_find_zone_rr(rri, 60, 100), 1, "note 2 plays a2");
+    assert_eq(n_instrument_find_zone_rr(rri, 60, 100), 2, "note 3 plays a3");
+    assert_eq(n_instrument_find_zone_rr(rri, 60, 100), 0, "note 4 plays a1 again");
+    var rrd = zone0(n_sfz_parse("<region> sample=a.wav\n"), sr);
+    assert_eq(NZone_seq_length(rrd), 1, "no seq opcodes: length 1");
+    assert_eq(NZone_seq_position(rrd), 1, "no seq opcodes: position 1");
+    assert_eq(NZone_group(zone0(n_sfz_parse("<region> sample=a.wav group=4\n"), sr)), 4, "group= still sets the RR group, as in the oracle");
     return assert_summary();
 }
 

@@ -56,42 +56,70 @@ fn n_sample_with_slices(s, slices) {
 }
 
 # --- Private frame readers (zero-pad out-of-range for the interpolator edges) ---
+#
+# Every element read is bounded by the data vec's LIVE length as well as by NSample_frames.
+# frames is a snapshot taken at construction, and the oracle could rely on it because Sample's
+# data/frames/channels were pub(crate); #derive(accessors) exports NSample_set_data,
+# NSample_set_frames and NSample_set_channels, so a consumer can leave them disagreeing (swap in
+# a shorter take, set channels on a mono buffer). The fast paths below then read past the
+# buffer SILENTLY -- measured, a 10-element vec read at 60 returned 12345.0 from the next heap
+# allocation -- and these helpers' vec_get ended the process. Both now read 0, the same
+# zero-pad every other out-of-range tap gets. A consistent sample takes the same branches it
+# always did: idx < frames already implies every element below is in range.
 
 # read_mono_frame(idx) -> f64. Stereo folds to mono via (L+R)*0.5.
-#inline
 #must_use
 fn n_sample_read_mono_frame(s, idx) {
     if (idx < 0) { return 0; }
     if (idx >= NSample_frames(s)) { return 0; }
     var data = NSample_data(s);
+    var len = vec_len(data);
     var ch = NSample_channels(s);
-    if (ch == 1) { return vec_get(data, idx); }
-    var l = vec_get(data, idx * ch);
-    var r = vec_get(data, idx * ch + 1);
+    if (ch == 1) {
+        if (idx >= len) { return 0; }
+        return vec_get(data, idx);
+    }
+    var lo = idx * ch;
+    if (lo < 0) { return 0; }
+    if (lo + 1 >= len) { return 0; }
+    var l = vec_get(data, lo);
+    var r = vec_get(data, lo + 1);
     return f64_mul(f64_add(l, r), F64_HALF);
 }
 
 # read_stereo left/right lanes (mono duplicated to both). Zero-pad OOB.
-#inline
 #must_use
 fn n_sample_read_stereo_l(s, idx) {
     if (idx < 0) { return 0; }
     if (idx >= NSample_frames(s)) { return 0; }
     var data = NSample_data(s);
+    var len = vec_len(data);
     var ch = NSample_channels(s);
-    if (ch == 1) { return vec_get(data, idx); }
-    return vec_get(data, idx * ch);
+    if (ch == 1) {
+        if (idx >= len) { return 0; }
+        return vec_get(data, idx);
+    }
+    var lo = idx * ch;
+    if (lo < 0) { return 0; }
+    if (lo >= len) { return 0; }
+    return vec_get(data, lo);
 }
 
-#inline
 #must_use
 fn n_sample_read_stereo_r(s, idx) {
     if (idx < 0) { return 0; }
     if (idx >= NSample_frames(s)) { return 0; }
     var data = NSample_data(s);
+    var len = vec_len(data);
     var ch = NSample_channels(s);
-    if (ch == 1) { return vec_get(data, idx); }
-    return vec_get(data, idx * ch + 1);
+    if (ch == 1) {
+        if (idx >= len) { return 0; }
+        return vec_get(data, idx);
+    }
+    var lo = idx * ch;
+    if (lo < 0) { return 0; }
+    if (lo + 1 >= len) { return 0; }
+    return vec_get(data, lo + 1);
 }
 
 # --- Cubic Hermite (Catmull-Rom) interpolation -- the engine's correctness anchor ---
@@ -99,7 +127,6 @@ fn n_sample_read_stereo_r(s, idx) {
 # b =  y0     - 2.5*y1 + 2.0*y2 - 0.5*y3
 # c = -0.5*y0            + 0.5*y2
 # return ((a*t + b)*t + c)*t + y1     (Horner)
-#inline
 #must_use
 # The five coefficients are compile-time constants written as literal f64 bit patterns.
 # They used to be rebuilt on EVERY call -- two f64 divides and three negations per
@@ -120,7 +147,6 @@ fn n_cubic_hermite(y0, y1, y2, y3, t) {
 }
 
 # read_cubic(position) -> f64. floor(position) (not trunc) for negative-edge padding.
-#inline
 #must_use
 fn n_sample_read_cubic(s, position) {
     var frames = NSample_frames(s);
@@ -131,37 +157,60 @@ fn n_sample_read_cubic(s, position) {
     var frac = f64_sub(position, f64_from(idx));
 
     # Interior fast path. The four taps span idx-1 .. idx+2, so `idx-1 >= 0 && idx+2 < frames`
-    # proves every one of them in range -- for stereo too, because the highest element touched
-    # is (idx+2)*2+1, and that is <= 2*frames-1 under exactly the same condition. With that
-    # established, the per-tap helpers' two bounds tests, three accessor calls and vec_get's
-    # own bounds test are all redundant, so read the vec's buffer directly.
-    # This test must stay EXACTLY `idx - 1 >= 0 && idx + 2 < frames`: an off-by-one here is a
-    # silent out-of-bounds read, not a crash.
+    # proves every one of them in range of the FRAMES the sample claims. The third test proves
+    # them in range of the data vec it actually holds: the highest element touched is
+    # (idx+2)*ch + ch-1, i.e. `(idx+3)*ch <= len` (len read straight from the vec header,
+    # lib/vec.cyr {data, len, cap}). For a consistent sample it always holds; see the frame
+    # readers above for the desync it closes. Measured cost, in-process best of 7: 0.3 ns of
+    # 35 per mono read, 0.1 ns of 59 per stereo read.
+    # With all three established, the per-tap helpers' bounds tests, accessor calls and vec_get's
+    # own bounds test are redundant, so read the vec's buffer directly. These tests must stay
+    # EXACTLY as written: an off-by-one here is a silent out-of-bounds read, not a crash.
+    #
+    # The mono Hermite is written out in place, the same expression tree as n_cubic_hermite and
+    # therefore bit-identical (tests/sample.tcyr compares them bit for bit). A 5-argument call
+    # is never inlined by cyrius, and this is the interpolation_cubic hot path: measured
+    # 36.4 -> 35.3 ns per read, length test included (in-process best of 7, 3 runs). The stereo
+    # fold-down keeps the call; nothing renders through it (the engine uses
+    # n_sample_read_stereo_interpolated).
     var ch = NSample_channels(s);
+    var data = NSample_data(s);
     if (idx - 1 >= 0) {
         if (idx + 2 < frames) {
-            var base = load64(NSample_data(s));
-            if (ch == 1) {
-                var p = base + (idx - 1) * 8;
-                return n_cubic_hermite(load64(p), load64(p + 8), load64(p + 16), load64(p + 24), frac);
-            }
-            if (ch == 2) {
-                var q = base + (idx - 1) * 16;
-                var m0 = f64_mul(f64_add(load64(q), load64(q + 8)), F64_HALF);
-                var m1 = f64_mul(f64_add(load64(q + 16), load64(q + 24)), F64_HALF);
-                var m2 = f64_mul(f64_add(load64(q + 32), load64(q + 40)), F64_HALF);
-                var m3 = f64_mul(f64_add(load64(q + 48), load64(q + 56)), F64_HALF);
-                return n_cubic_hermite(m0, m1, m2, m3, frac);
+            if ((idx + 3) * ch <= load64(data + 8)) {
+                var base = load64(data);
+                if (ch == 1) {
+                    var p = base + (idx - 1) * 8;
+                    var y0 = load64(p);
+                    var y1 = load64(p + 8);
+                    var y2 = load64(p + 16);
+                    var y3 = load64(p + 24);
+                    var a = f64_add(f64_add(f64_add(f64_mul(0xBFE0000000000000, y0), f64_mul(0x3FF8000000000000, y1)),
+                        f64_mul(0xBFF8000000000000, y2)), f64_mul(F64_HALF, y3));
+                    var b = f64_add(f64_add(f64_add(y0, f64_mul(0xC004000000000000, y1)),
+                        f64_mul(F64_TWO, y2)), f64_mul(0xBFE0000000000000, y3));
+                    var c = f64_add(f64_mul(0xBFE0000000000000, y0), f64_mul(F64_HALF, y2));
+                    var mono = f64_add(f64_mul(f64_add(f64_mul(f64_add(f64_mul(a, frac), b), frac), c), frac), y1);
+                    return mono;
+                }
+                if (ch == 2) {
+                    var q = base + (idx - 1) * 16;
+                    var m0 = f64_mul(f64_add(load64(q), load64(q + 8)), F64_HALF);
+                    var m1 = f64_mul(f64_add(load64(q + 16), load64(q + 24)), F64_HALF);
+                    var m2 = f64_mul(f64_add(load64(q + 32), load64(q + 40)), F64_HALF);
+                    var m3 = f64_mul(f64_add(load64(q + 48), load64(q + 56)), F64_HALF);
+                    return n_cubic_hermite(m0, m1, m2, m3, frac);
+                }
             }
         }
     }
 
     # Edge path: keeps the zero-padding semantics for out-of-range taps.
-    var y0 = n_sample_read_mono_frame(s, idx - 1);
-    var y1 = n_sample_read_mono_frame(s, idx);
-    var y2 = n_sample_read_mono_frame(s, idx + 1);
-    var y3 = n_sample_read_mono_frame(s, idx + 2);
-    return n_cubic_hermite(y0, y1, y2, y3, frac);
+    var e0 = n_sample_read_mono_frame(s, idx - 1);
+    var e1 = n_sample_read_mono_frame(s, idx);
+    var e2 = n_sample_read_mono_frame(s, idx + 1);
+    var e3 = n_sample_read_mono_frame(s, idx + 2);
+    return n_cubic_hermite(e0, e1, e2, e3, frac);
 }
 
 #inline
@@ -171,7 +220,6 @@ fn n_sample_read_interpolated(s, position) {
 }
 
 # read_stereo_interpolated(position, out) -> writes out[0]=L, out[1]=R (f64 bits).
-#inline
 fn n_sample_read_stereo_interpolated(s, position, out) {
     if (NSample_frames(s) == 0) {
         store64(out, 0);
@@ -190,35 +238,70 @@ fn n_sample_read_stereo_interpolated(s, position, out) {
     var idx = f64_to(f64_floor(position));
     var frac = f64_sub(position, f64_from(idx));
 
-    # Interior fast path -- see the note in n_sample_read_cubic. Eight per-tap helper calls,
-    # each with two bounds tests and three accessor calls, collapse to eight raw loads.
+    # Interior fast path -- see the note in n_sample_read_cubic, including the live-length
+    # test. Eight per-tap helper calls, each with two bounds tests and three accessor calls,
+    # collapse to eight raw loads, and both Hermite evaluations are written out in place (same
+    # expression tree as n_cubic_hermite, bit-identical). This is the engine's render path:
+    # measured 62.3 -> 58.8 ns per stereo read, 38.5 -> 37.6 for a mono sample, length test
+    # included (in-process best of 7, 3 runs).
     var frames2 = NSample_frames(s);
     var ch = NSample_channels(s);
+    var sdata = NSample_data(s);
     if (idx - 1 >= 0) {
         if (idx + 2 < frames2) {
-            var base = load64(NSample_data(s));
-            if (ch == 1) {
-                var p = base + (idx - 1) * 8;
-                var mv = n_cubic_hermite(load64(p), load64(p + 8), load64(p + 16), load64(p + 24), frac);
-                store64(out, mv);
-                store64(out + 8, mv);
-                return 0;
-            }
-            if (ch == 2) {
-                var q = base + (idx - 1) * 16;
-                store64(out, n_cubic_hermite(load64(q), load64(q + 16), load64(q + 32), load64(q + 48), frac));
-                store64(out + 8, n_cubic_hermite(load64(q + 8), load64(q + 24), load64(q + 40), load64(q + 56), frac));
-                return 0;
+            if ((idx + 3) * ch <= load64(sdata + 8)) {
+                var base = load64(sdata);
+                if (ch == 1) {
+                    var p = base + (idx - 1) * 8;
+                    var y0 = load64(p);
+                    var y1 = load64(p + 8);
+                    var y2 = load64(p + 16);
+                    var y3 = load64(p + 24);
+                    var a = f64_add(f64_add(f64_add(f64_mul(0xBFE0000000000000, y0), f64_mul(0x3FF8000000000000, y1)),
+                        f64_mul(0xBFF8000000000000, y2)), f64_mul(F64_HALF, y3));
+                    var b = f64_add(f64_add(f64_add(y0, f64_mul(0xC004000000000000, y1)),
+                        f64_mul(F64_TWO, y2)), f64_mul(0xBFE0000000000000, y3));
+                    var c = f64_add(f64_mul(0xBFE0000000000000, y0), f64_mul(F64_HALF, y2));
+                    var mv = f64_add(f64_mul(f64_add(f64_mul(f64_add(f64_mul(a, frac), b), frac), c), frac), y1);
+                    store64(out, mv);
+                    store64(out + 8, mv);
+                    return 0;
+                }
+                if (ch == 2) {
+                    var q = base + (idx - 1) * 16;
+                    var l0 = load64(q);
+                    var l1 = load64(q + 16);
+                    var l2 = load64(q + 32);
+                    var l3 = load64(q + 48);
+                    var a = f64_add(f64_add(f64_add(f64_mul(0xBFE0000000000000, l0), f64_mul(0x3FF8000000000000, l1)),
+                        f64_mul(0xBFF8000000000000, l2)), f64_mul(F64_HALF, l3));
+                    var b = f64_add(f64_add(f64_add(l0, f64_mul(0xC004000000000000, l1)),
+                        f64_mul(F64_TWO, l2)), f64_mul(0xBFE0000000000000, l3));
+                    var c = f64_add(f64_mul(0xBFE0000000000000, l0), f64_mul(F64_HALF, l2));
+                    var lv = f64_add(f64_mul(f64_add(f64_mul(f64_add(f64_mul(a, frac), b), frac), c), frac), l1);
+                    store64(out, lv);
+                    var r0 = load64(q + 8);
+                    var r1 = load64(q + 24);
+                    var r2 = load64(q + 40);
+                    var r3 = load64(q + 56);
+                    a = f64_add(f64_add(f64_add(f64_mul(0xBFE0000000000000, r0), f64_mul(0x3FF8000000000000, r1)),
+                        f64_mul(0xBFF8000000000000, r2)), f64_mul(F64_HALF, r3));
+                    b = f64_add(f64_add(f64_add(r0, f64_mul(0xC004000000000000, r1)),
+                        f64_mul(F64_TWO, r2)), f64_mul(0xBFE0000000000000, r3));
+                    c = f64_add(f64_mul(0xBFE0000000000000, r0), f64_mul(F64_HALF, r2));
+                    store64(out + 8, f64_add(f64_mul(f64_add(f64_mul(f64_add(f64_mul(a, frac), b), frac), c), frac), r1));
+                    return 0;
+                }
             }
         }
     }
 
     var left = n_cubic_hermite(
-        n_sample_read_stereo_l(s, idx - 1), n_sample_read_stereo_l(s, idx),
-        n_sample_read_stereo_l(s, idx + 1), n_sample_read_stereo_l(s, idx + 2), frac);
+      n_sample_read_stereo_l(s, idx - 1), n_sample_read_stereo_l(s, idx),
+      n_sample_read_stereo_l(s, idx + 1), n_sample_read_stereo_l(s, idx + 2), frac);
     var right = n_cubic_hermite(
-        n_sample_read_stereo_r(s, idx - 1), n_sample_read_stereo_r(s, idx),
-        n_sample_read_stereo_r(s, idx + 1), n_sample_read_stereo_r(s, idx + 2), frac);
+      n_sample_read_stereo_r(s, idx - 1), n_sample_read_stereo_r(s, idx),
+      n_sample_read_stereo_r(s, idx + 1), n_sample_read_stereo_r(s, idx + 2), frac);
     store64(out, left);
     store64(out + 8, right);
     return 0;

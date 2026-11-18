@@ -104,7 +104,6 @@ fn nvf_new(cutoff, resonance, mode, vel_track, velocity, sample_rate) {
     return vf;
 }
 
-#inline
 fn nvf_pick(svfout, mode) {
     if (mode == FILTER_HIGHPASS) { return SvfOutput_high_pass(svfout); }
     if (mode == FILTER_BANDPASS) { return SvfOutput_band_pass(svfout); }
@@ -212,8 +211,10 @@ fn n_voice_lfo_new(sample_rate) {
     return lfo;
 }
 
+#must_use
 fn n_voice_new(sample_rate) {
     var v = alloc(sizeof(NSamplerVoice));
+    if (v == 0) { return 0; }
     NSamplerVoice_set_active(v, 0);
     NSamplerVoice_set_zone_index(v, 0);
     NSamplerVoice_set_position(v, 0);
@@ -269,15 +270,25 @@ struct NSamplerEngine {
 fn n_engine_new(max_voices, sample_rate) {
     var e = alloc(sizeof(NSamplerEngine));
     if (e == 0) { return 0; }
-    # naad's VoiceManager clamps to [1,128]; nidhi did not, so n_engine_new(0, sr) built
-    # 0 nidhi voices and 1 naad voice. The first note_on then did vec_get(voices, 0) on an
-    # empty vec -> exit(1). Clamp the LOW end only: an upper clamp would silently change
-    # voice-count reporting and choke extents for no safety gain.
+    # naad's VoiceManager clamps to [1,128], and nidhi now clamps to the same range. It used to
+    # clamp the low end only (n_engine_new(0, sr) built 0 nidhi voices and 1 naad voice, and the
+    # first note_on did vec_get on an empty vec -> exit(1)). Above 128 the extra voices could
+    # never sound, because naad never hands out an index past 127, but render still scanned
+    # them every frame: one note in a 4096-voice engine took 13.7 ms per 512-frame block, over
+    # the 11.6 ms real-time budget. At 20,000,000 the unchecked n_voice_new allocations ran the
+    # heap out and segfaulted. Nothing observable changes: voice counts and choke groups only
+    # ever touch active voices.
     var mv = max_voices;
     if (mv < 1) { mv = 1; }
+    if (mv > 128) { mv = 128; }
     var voices = vec_new();
     var i = 0;
-    while (i < mv) { vec_push(voices, n_voice_new(sample_rate)); i = i + 1; }
+    while (i < mv) {
+        var nvoice = n_voice_new(sample_rate);
+        if (nvoice == 0) { return 0; }
+        vec_push(voices, nvoice);
+        i = i + 1;
+    }
     NSamplerEngine_set_voices(e, voices);
     NSamplerEngine_set_instrument(e, 0);
     NSamplerEngine_set_bank(e, n_sample_bank_new());
@@ -320,29 +331,36 @@ fn n_engine_set_instrument(e, inst) {
     NSamplerEngine_set_instrument(e, inst);
     return 0;
 }
-fn n_engine_set_bank(e, bank) { NSamplerEngine_set_bank(e, bank); return 0; }
-#must_use
-fn n_engine_bank(e) { return NSamplerEngine_bank(e); }
-# COPIES the config -- same aliasing class as n_zone_with_adsr and the set_release_ms fix in
-# 2.0.2. Rust's set_adsr took AdsrConfig by value.
-fn n_engine_set_adsr(e, cfg) {
-    if (cfg <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
-    NSamplerEngine_set_default_adsr(e, n_adsr_config_new(
-        NAdsrConfig_attack_samples(cfg), NAdsrConfig_decay_samples(cfg),
-        NAdsrConfig_sustain_level(cfg), NAdsrConfig_release_samples(cfg)));
+# `<= 0` as set_instrument: a 0 or an error code here was dereferenced by the first render.
+fn n_engine_set_bank(e, bank) {
+    if (bank <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    NSamplerEngine_set_bank(e, bank);
     return 0;
 }
-# Builds a NEW config rather than mutating the current one. rust-old's set_adsr takes the
-# config BY VALUE, so the in-place rewrite was port-introduced aliasing: it edited the
-# caller's own object and every zone that had been handed the same pointer via
-# n_zone_with_adsr. The cap is the same f64_to saturation as n_engine_new above.
+#must_use
+fn n_engine_bank(e) { return NSamplerEngine_bank(e); }
+# COPIES the config's values -- same aliasing class as n_zone_with_adsr and the set_release_ms
+# fix in 2.0.2. Rust's set_adsr took AdsrConfig by value.
+#
+# Both setters write the engine's OWN config in place. 2.0.2 to 2.2.1 allocated a new 32-byte
+# config per call, never reclaimed (the allocator's free is a no-op), so release automation at
+# 1 kHz grew the heap 115 MB an hour. In-place is safe since 2.0.2 made the config engine-owned:
+# n_engine_new builds it, set_adsr copies into it, n_zone_with_adsr copies out of anything it is
+# given, and note_on only reads it. The 2.0.2 aliasing came from storing the CALLER's pointer.
+fn n_engine_set_adsr(e, cfg) {
+    if (cfg <= 0) { return NIDHI_ERR_INVALID_PARAMETER; }
+    var own = NSamplerEngine_default_adsr(e);
+    NAdsrConfig_set_attack_samples(own, NAdsrConfig_attack_samples(cfg));
+    NAdsrConfig_set_decay_samples(own, NAdsrConfig_decay_samples(cfg));
+    NAdsrConfig_set_sustain_level(own, NAdsrConfig_sustain_level(cfg));
+    NAdsrConfig_set_release_samples(own, NAdsrConfig_release_samples(cfg));
+    return 0;
+}
+# The cap is the same f64_to saturation as n_engine_new above.
 fn n_engine_set_release_ms(e, ms) {
-    var cfg = NSamplerEngine_default_adsr(e);
     var rcap = f64_from(4294967295);
     var rel = f64_to(f64_min(f64_max(f64_div(f64_mul(NSamplerEngine_sample_rate(e), ms), f64_from(1000)), F64_ONE), rcap));
-    var ncfg = n_adsr_config_new(NAdsrConfig_attack_samples(cfg), NAdsrConfig_decay_samples(cfg),
-        NAdsrConfig_sustain_level(cfg), rel);
-    NSamplerEngine_set_default_adsr(e, ncfg);
+    NAdsrConfig_set_release_samples(NSamplerEngine_default_adsr(e), rel);
     return 0;
 }
 fn n_engine_set_pitch_bend_range(e, semitones) { NSamplerEngine_set_pitch_bend_range(e, f64_max(semitones, 0)); return 0; }
@@ -412,6 +430,55 @@ fn n_engine_has_active_note(e, note) {
     return 0;
 }
 
+# n_engine_rate_scaled(speed, sample, engine_sr) -> speed x (sample rate / engine rate).
+# Returns `speed` untouched when the sample is missing, its rate is not positive, the rates are
+# equal, or the ratio is not finite: a rate nidhi cannot use is no reason to refuse the note.
+#must_use
+fn n_engine_rate_scaled(speed, sample, engine_sr) {
+    if (sample <= 0) { return speed; }
+    var ssr = NSample_sample_rate(sample);
+    if (ssr <= 0) { return speed; }
+    var ssr_f = f64_from(ssr);
+    if (ssr_f == engine_sr) { return speed; }
+    # A rate naad refuses (NaN, +/-Inf, zero, negative) builds an engine anyway (n_engine_new
+    # does not refuse it), and +Inf would give a ratio of 0: a voice frozen on one frame.
+    if (n_is_finite(engine_sr) == 0) { return speed; }
+    if (f64_gt(engine_sr, 0) == 0) { return speed; }
+    var ratio = f64_div(ssr_f, engine_sr);
+    if (n_is_finite(ratio) == 0) { return speed; }
+    if (f64_gt(ratio, 0) == 0) { return speed; }
+    return f64_mul(speed, ratio);
+}
+
+# n_engine_sync_voice_mgr(e) -- copy nidhi's per-voice `active` into naad's VoiceManager.
+#
+# nidhi's voices are the truth, and naad's pool only picks the index. See
+# docs/adr/0006-nidhi-voice-state-decides-allocation.md. The two pools used to drift:
+#   * naad frees a slot at note_off while nidhi's voice is still in its release tail, so the
+#     next note took that slot and cut the tail, although idle voices existed.
+#   * naad's note_off frees only the FIRST slot holding the note, while nidhi releases every
+#     voice playing it. A retriggered note left a naad slot busy forever, and polyphony
+#     collapsed until all_notes_off: after three retriggered notes, a 4-voice engine played a
+#     3-note chord on 2 voices.
+#   * a choke cut and a voice ending on its own (the envelope reaching IDLE, a one-shot running
+#     off its sample) never reached naad at all.
+# Syncing just before naad allocates makes every one of those unrepresentable. It costs one pass
+# over the voices per note_on and allocates nothing.
+fn n_engine_sync_voice_mgr(e) {
+    var vm = NSamplerEngine_voice_mgr(e);
+    if (vm <= 0) { return 0; }
+    var nvv = VoiceManager_voices(vm);
+    var voices = NSamplerEngine_voices(e);
+    var n = vec_len(nvv);
+    if (vec_len(voices) < n) { n = vec_len(voices); }
+    var i = 0;
+    while (i < n) {
+        Voice_set_active(vec_get(nvv, i), NSamplerVoice_active(vec_get(voices, i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
 # note_on(note, velocity) -> voice index, or -1.
 #must_use
 fn n_engine_note_on(e, note, velocity) {
@@ -419,15 +486,23 @@ fn n_engine_note_on(e, note, velocity) {
     # `<= 0`: sf2_parse and n_load_wav return NEGATIVE codes, which an `== 0` guard lets
     # straight through into NInstrument_zones.
     if (inst <= 0) { return 0 - 1; }
-    # One pass, no allocation. This was find_zones (which allocates a vec of every match)
-    # followed by a second O(Z) pointer scan to recover the index of match 0.
-    var zone_idx = n_instrument_find_first_zone(inst, note, velocity);
+    # Round-robin selection (docs/adr/0012-round-robin-plays.md). The oracle's note_on played
+    # find_zones(..)[0], the first match, so its own find_zone_rr, SFZ `seq_position` and every
+    # zone group were parsed, stored and never heard. For an unsequenced, ungrouped zone set
+    # this is the first match, exactly as before. No allocation: find_zone_rr is two passes over
+    # the zones (a group's counter slot is sized when its zone is added).
+    var zone_idx = n_instrument_find_zone_rr(inst, note, velocity);
     if (zone_idx < 0) { return 0 - 1; }
     var zones = NInstrument_zones(inst);
     var zone = vec_get(zones, zone_idx);
 
     var sr = NSamplerEngine_sample_rate(e);
     var speed = n_zone_playback_ratio(zone, note);
+    # The sample's own rate. The oracle never read it (playback_ratio has no rate term), so a
+    # 48 kHz sample in a 44.1 kHz engine played 1.47 semitones flat and a 22,050 Hz SF2 sample
+    # an octave high. See docs/adr/0009-playback-speed-includes-sample-rate.md. Skipped when the
+    # rates match, so those voices keep their exact speed bits.
+    speed = n_engine_rate_scaled(speed, n_sample_bank_get(NSamplerEngine_bank(e), NZone_sample_id(zone)), sr);
     # Per-zone volume, applied at note-on. See docs/adr/0004-apply-zone-volume-db.md.
     #
     # NZone_volume_db was parsed from SFZ `volume=`, inherited through <group>/<global>, and
@@ -438,14 +513,17 @@ fn n_engine_note_on(e, note, velocity) {
     # Folded in here rather than per sample: the zone's volume cannot change for the life of
     # a voice, so this costs one f64_pow per note-on and nothing per frame.
     var amp = n_velocity_curve_apply(NZone_vel_curve(zone), velocity);
-    var vol_db = NZone_volume_db(zone);
+    # Clamped here, where it is applied, so the stored field keeps the oracle's raw value.
+    var vol_db = n_volume_db_clamp(NZone_volume_db(zone));
     if (vol_db != 0) { amp = f64_mul(amp, naad_db_to_amplitude(vol_db)); }
     var f_cutoff = NZone_filter_cutoff(zone);
     var f_res = NZone_filter_resonance(zone);
     var f_type = NZone_filter_type(zone);
     var f_vel = NZone_filter_vel_track(zone);
+    # `<= 0`, not `== 0`: a negative code written through NZone_set_adsr is no config either,
+    # and n_amp_envelope_rearm would read it as a pointer.
     var adsr_config = NZone_adsr(zone);
-    if (adsr_config == 0) { adsr_config = NSamplerEngine_default_adsr(e); }
+    if (adsr_config <= 0) { adsr_config = NSamplerEngine_default_adsr(e); }
     var choke = NZone_choke_group(zone);
     var sample_offset = NZone_sample_offset(zone);
     var fileg_config = NZone_fileg(zone);
@@ -469,6 +547,7 @@ fn n_engine_note_on(e, note, velocity) {
         }
     }
 
+    n_engine_sync_voice_mgr(e);
     var vidx = voice_manager_note_on(NSamplerEngine_voice_mgr(e), note, f64_div(f64_from(velocity), f64_from(127)));
     if (vidx < 0) { return 0 - 1; }
     # naad's voice count and nidhi's vec can disagree; never index on naad's word alone.
@@ -490,7 +569,19 @@ fn n_engine_note_on(e, note, velocity) {
     # the factor is voice-invariant, and the render path was paying an f64_pow (an x87 ln+exp
     # pair) for it on every sample of every voice. Multiplication order is unchanged:
     # (base * keytrack) * env * lfo, exactly as before, so output is bit-identical.
+    #
+    # Velocity tracking is folded in here too, for the same reason, and because render would
+    # otherwise discard it. nvf_reinit applies `1 - vel_track * (1 - velocity/127)` to the SVF's
+    # initial cutoff, but the first rendered frame recomputed the cutoff from base_cutoff,
+    # which the oracle set to the raw zone cutoff: velocity 16 and velocity 127 were both at
+    # 6000 Hz after one frame, so `fil_veltrack` had no audible effect. See
+    # docs/adr/0007-filter-velocity-tracking-lasts-the-note.md. With vel_track 0 (the default)
+    # the factor is exactly 1.0, so those voices are bit-identical.
     var base_cut = f_cutoff;
+    if (f64_gt(f_vel, 0) == 1) {
+        var vt_norm = f64_div(f64_from(velocity), f64_from(127));
+        base_cut = f64_mul(base_cut, f64_sub(F64_ONE, f64_mul(f_vel, f64_sub(F64_ONE, vt_norm))));
+    }
     if (f64_gt(keytrack, 0) == 1) {
         var kt_semis = f64_from(note - 60);
         var kt_c = f64_mul(f64_mul(kt_semis, f64_from(100)), keytrack);
@@ -501,9 +592,14 @@ fn n_engine_note_on(e, note, velocity) {
     # so without this a reused voice glides over ~5 ms from the PREVIOUS note's cutoff into the
     # new one -- an audible filter sweep at the start of every note on a busy voice. Exactly the
     # defect filter_svf_reset fixes for the integrator state, one field over.
+    #
+    # Snapped to base_cut x 0.75, not base_cut: render multiplies the cutoff by
+    # (0.5 + brightness * 0.5) before the smoother, and brightness is reset to 0.5 just below.
+    # 2.1.1 to 2.2.1 snapped to base_cut, so every filtered note opened with a ~25 ms sweep from
+    # base_cut down to 0.75 of it. 0.75 = 0x3FE8000000000000, exactly what render computes.
     var csm = NSamplerVoice_cutoff_smoother(voice);
     if (csm > 0) {
-        smoothing_set_target(csm, base_cut);
+        smoothing_set_target(csm, f64_mul(base_cut, 0x3FE8000000000000));
         smoothing_snap(csm);
     }
     NSamplerVoice_set_pitch_bend(voice, 0);
@@ -511,7 +607,7 @@ fn n_engine_note_on(e, note, velocity) {
     NSamplerVoice_set_brightness(voice, F64_HALF);
     NSamplerVoice_set_choke_group(voice, choke);
 
-    if (fileg_config != 0) {
+    if (fileg_config > 0) {
         var fenv = NSamplerVoice_filter_env(voice);
         n_ignore(n_amp_envelope_rearm(fenv, fileg_config, sr));
         n_amp_envelope_trigger(fenv);
@@ -662,14 +758,28 @@ fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscr
     if (NZone_sample_end(zone) > 0) { if (NZone_sample_end(zone) < eff_frames) { eff_frames = NZone_sample_end(zone); } }
 
     # pitch modulation
+    #
+    # Both LFOs are gated on DEPTH, as the oracle gated their construction (rate > 0 and depth
+    # != 0). Since 2.1.1 every voice owns persistent LFOs, so gating on the pointer evaluated a
+    # sine per LFO per voice per frame at depth 0. A skipped tick is unobservable: a depth fixed
+    # at 0 for the voice's life multiplies the value away, and note_on resets the phase. Output
+    # is bit-identical; plain voices render 23-29 % faster and low-pass filtered ones 34 %.
     var pitch_mod_cents = f64_mul(NSamplerVoice_pitch_bend(voice), f64_from(100));
     var plfo = NSamplerVoice_pitch_lfo(voice);
-    if (plfo != 0) {
-        pitch_mod_cents = f64_add(pitch_mod_cents, f64_mul(modulation_lfo_next_value(plfo), NSamplerVoice_pitch_lfo_depth(voice)));
+    var pdep = NSamplerVoice_pitch_lfo_depth(voice);
+    if (pdep != 0) {
+        if (plfo != 0) {
+            pitch_mod_cents = f64_add(pitch_mod_cents, f64_mul(modulation_lfo_next_value(plfo), pdep));
+        }
     }
     var eff_speed = NSamplerVoice_speed(voice);
     if (pitch_mod_cents != 0) {
         eff_speed = f64_mul(NSamplerVoice_speed(voice), f64_pow(f64_from(2), f64_div(pitch_mod_cents, f64_from(1200))));
+        # A NaN bend (apply_pitch_bend takes it unclamped), an SFZ pitchlfo_depth=nan, or a
+        # finite bend large enough to overflow the power made the position NaN for good: the
+        # voice stayed active and silent until note-off, even after the bend returned to 0.
+        # Fall back to the unbent speed for this frame.
+        if (n_is_finite(eff_speed) == 0) { eff_speed = NSamplerVoice_speed(voice); }
     }
 
     # read interpolated source
@@ -710,7 +820,12 @@ fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscr
         var lm0 = NZone_loop_mode(zone);
         var do_xf = 0;
         if (lm0 == LOOP_FORWARD) { do_xf = 1; }
-        if (lm0 == LOOP_SUSTAIN) { do_xf = 1; }
+        # A released LoopSustain voice plays straight through loop_end into the sample's tail,
+        # so there is no wrap to hide, and fading loop_start material in there MADE a seam: a
+        # 100x jump on a ramp. See docs/adr/0008-released-sustain-loop-skips-the-crossfade.md.
+        if (lm0 == LOOP_SUSTAIN) {
+            if (n_amp_envelope_is_releasing(NSamplerVoice_amp_env(voice)) == 0) { do_xf = 1; }
+        }
         if (do_xf == 1) {
             var ls_i = NZone_loop_start(zone);
             var le_i = eff_frames;
@@ -751,8 +866,10 @@ fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscr
             cutoff = f64_mul(cutoff, f64_pow(f64_from(2), f64_div(mod_cents, f64_from(1200))));
         }
         var flfo = NSamplerVoice_filter_lfo(voice);
+        var fdep = NSamplerVoice_filter_lfo_depth(voice);
+        if (fdep == 0) { flfo = 0; }
         if (flfo != 0) {
-            var lfo_cents = f64_mul(modulation_lfo_next_value(flfo), NSamplerVoice_filter_lfo_depth(voice));
+            var lfo_cents = f64_mul(modulation_lfo_next_value(flfo), fdep);
             cutoff = f64_mul(cutoff, f64_pow(f64_from(2), f64_div(lfo_cents, f64_from(1200))));
         }
         cutoff = f64_mul(cutoff, f64_add(F64_HALF, f64_mul(NSamplerVoice_brightness(voice), F64_HALF)));
@@ -775,7 +892,8 @@ fn n_engine_render_voice(voice, zones, bank, sr, accum2, scratch, xscratch, fscr
     }
 
     # pressure, gain, pan
-    var pressure_mod = f64_add(F64_ONE, f64_mul(f64_sub(NSamplerVoice_pressure(voice), F64_HALF), f64_div(f64_from(4), f64_from(10))));
+    # 0.4 = 0x3FD999999999999A, the value f64_div(4, 10) computed on every frame.
+    var pressure_mod = f64_add(F64_ONE, f64_mul(f64_sub(NSamplerVoice_pressure(voice), F64_HALF), 0x3FD999999999999A));
     var amp = f64_mul(f64_mul(NSamplerVoice_amplitude(voice), env), pressure_mod);
     var pan = NZone_pan(zone);
     var pan_l = f64_mul(f64_sub(F64_ONE, pan), F64_HALF);

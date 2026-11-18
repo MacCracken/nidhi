@@ -20,7 +20,49 @@ Cyrius batches N iterations between one `clock_gettime` pair and reports the per
 average (`bench_batch_start` → tight loop → `bench_batch_stop(N)` → `bench_report`). Criterion
 reports a statistical estimate per call. Compare the **per-operation** figures.
 
-## Cyrius current (toolchain 6.7.18, x86_64 Linux, 2026-11-07, nidhi 2.2.1)
+## Cyrius current (toolchain 6.7.18, x86_64 Linux, 2026-11-18, nidhi 2.2.2)
+
+naad 2.3.5 · shravan 2.12.4 · hisab 3.5.0. Three trees, ten rounds each, run in a rotating order in
+one session. The machine was not quiet: another session's `fuzz_decode` held one core at 100 %
+throughout, and the rotation spreads that load evenly over the three trees. The middle column is
+2.2.1's `src/` built against 2.2.2's dependency bundles, which separates the dependency bump from
+the sweep. Minimum of ten rounds per tree.
+
+| Benchmark | 2.2.1 | 2.2.1 src, new deps | 2.2.2 | deps | src | net | 2.2.2 faster in |
+|---|---|---|---|---|---|---|---|
+| `voice_count_scaling/1` | 556 ns | 547 ns | 514 ns | -1.6 % | -6.0 % | -7.6 % | 10 of 10 |
+| `voice_count_scaling/4` | 1.02 µs | 1.00 µs | 877 ns | -2.2 % | -12.3 % | -14.2 % | 10 of 10 |
+| `voice_count_scaling/8` | 1.67 µs | 1.63 µs | 1.38 µs | -2.4 % | -15.5 % | -17.6 % | 10 of 10 |
+| `voice_count_scaling/16` | 2.99 µs | 2.87 µs | 2.33 µs | -4.0 % | -18.7 % | -22.0 % | 10 of 10 |
+| `voice_count_scaling/32` | 5.57 µs | 5.33 µs | 4.33 µs | -4.3 % | -18.8 % | -22.2 % | 10 of 10 |
+| `voice_count_scaling/64` | 10.73 µs | 10.29 µs | 8.20 µs | -4.1 % | -20.3 % | -23.6 % | 10 of 10 |
+| `fill_buffer_stereo/1` | 297.40 µs | 294.20 µs | 261.38 µs | -1.1 % | -11.2 % | -12.1 % | 10 of 10 |
+| `fill_buffer_stereo/8` | 944.40 µs | 919.28 µs | 705.83 µs | -2.7 % | -23.2 % | -25.3 % | 10 of 10 |
+| `fill_buffer_stereo/16` | 1.684 ms | 1.637 ms | 1.205 ms | -2.8 % | -26.4 % | -28.4 % | 10 of 10 |
+| `fill_buffer_per_sample/1` | 296.48 µs | 288.36 µs | 266.27 µs | -2.7 % | -7.7 % | -10.2 % | 10 of 10 |
+| `fill_buffer_per_sample/8` | 941.83 µs | 914.50 µs | 703.67 µs | -2.9 % | -23.1 % | -25.3 % | 10 of 10 |
+| `fill_buffer_per_sample/16` | 1.674 ms | 1.630 ms | 1.208 ms | -2.6 % | -25.9 % | -27.8 % | 10 of 10 |
+| `interpolation_cubic` | 35 ns | 34 ns | 34 ns | -2.9 % | +0.0 % | -2.9 % | 6 of 10 |
+| `interpolation_stereo` | 58 ns | 57 ns | 54 ns | -1.7 % | -5.3 % | -6.9 % | 10 of 10 |
+| `fill_buffer_stereo_filtered_8v` | 1.430 ms | 1.349 ms | 887.62 µs | -5.7 % | -34.2 % | -37.9 % | 10 of 10 |
+| `fill_buffer_stereo_filtered_hp_8v` | 1.525 ms | 1.478 ms | 1.010 ms | -3.1 % | -31.7 % | -33.8 % | 10 of 10 |
+| `wsola_1sec_2x` | 229.571 ms | 229.861 ms | 227.816 ms | +0.1 % | -0.9 % | -0.8 % | 8 of 10 |
+
+**Every render path is faster, in all ten rounds.** Most of it is one change: the pitch and filter
+LFOs are now gated on their depth rather than on the LFO pointer. Since 2.1.1 every voice owns
+persistent LFOs, so the render loop evaluated a sine per LFO per voice per frame at depth 0, plus an
+`f64_pow` per frame on filtered voices. The oracle built an LFO only when its rate and depth were
+non-zero, so skipping the tick restores its cost model, and the output is bit-identical. That is
+the −12 % to −38 % on the `voice_count_scaling`, `fill_buffer*` and filtered rows. The
+hand-inlined cubic Hermite gives `interpolation_stereo` −5.3 %, and `interpolation_cubic` is flat
+within the timer's resolution. `wsola_1sec_2x` is flat: the stretch repairs size their buffers once,
+which saves 2.8 MB per call but no measurable time. The dependency bump alone runs −1 % to −6 % on
+render paths, with no `src/` change behind it, so that column is layout and naad's constructor
+changes, not a result to bank on. The release differential shows unfiltered render output
+byte-identical to 2.2.1, so those rows compare like for like. The two filtered rows also carry
+2.2.2's deliberate filter changes (the smoother snap and velocity tracking; see the CHANGELOG).
+
+## Cyrius 2.2.1 (toolchain 6.7.18, x86_64 Linux, 2026-11-07)
 
 naad 2.3.3 · shravan 2.9.3 · hisab 3.4.1. Three trees, minimum of eight rounds each, run in a
 rotating order in one session on a quiet machine. The middle column is 2.2.1's source and

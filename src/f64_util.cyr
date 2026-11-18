@@ -1,5 +1,5 @@
 # f64_util.cyr -- nidhi f64 helpers (self-contained, no naad dependency)
-# Requires: math (f64_abs, f64_lt)
+# Requires: math (f64_abs, f64_lt), alloc + vec (n_vec_with_cap)
 #
 # f64 values are IEEE-754 bit patterns in i64 slots. nidhi's Rust is written in
 # f32 but Cyrius has only f64 (ADR-002: everything is i64) -- every f32 becomes an
@@ -17,7 +17,6 @@ var N_F32_EPSILON = 0x3E80000000000000;
 
 # n_is_finite(x) -- 1 if the f64 bit pattern x is finite (not +/-Inf, not NaN), else 0.
 # Non-finite <=> the 11 exponent bits are all set (0x7FF).
-#inline
 #must_use
 fn n_is_finite(x) {
     if ((x & 0x7FF0000000000000) == 0x7FF0000000000000) { return 0; }
@@ -28,7 +27,6 @@ fn n_is_finite(x) {
 # f64_to + idx +/- 2 without wrapping. NaN and +/-Inf answer 0 too: with the sign masked off,
 # IEEE-754 magnitudes order as integers, and both sit above every finite value. Same cost as
 # n_is_finite, one mask and one compare.
-#inline
 fn n_pos_in_range(x) {
     if ((x & 0x7FFFFFFFFFFFFFFF) >= 0x4340000000000000) { return 0; }
     return 1;
@@ -38,7 +36,6 @@ fn n_pos_in_range(x) {
 # x86 slowdown on denormals. Mirrors Rust `flush_denormal`:
 #   if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x }
 # (+0.0 has bit pattern 0, so `return 0` is the correct f64 zero.)
-#inline
 #must_use
 fn n_flush_denormal(x) {
     if (f64_lt(f64_abs(x), N_F32_MIN_POS) == 1) { return 0; }
@@ -65,4 +62,28 @@ fn n_round_half_away(x) {
     var f = f64_floor(x);
     if (f64_ge(f64_sub(x, f), F64_HALF) == 1) { return f64_add(f, F64_ONE); }
     return f;
+}
+
+# n_vec_with_cap(n) -> an empty vec with room for exactly n elements, or 0 when it cannot be
+# allocated (n past VEC_CAP_MAX included). For a sample buffer whose final length is known before
+# the first push: vec_push from vec_new() doubles 16 -> n, and since alloc never frees, every
+# outgrown buffer stays allocated -- a 1M-sample PCM vec cost 16.78 MB of heap that way against
+# 8.00 MB here. Shared by sf2.cyr and io.cyr, which cannot see each other (sf2's tests link no
+# shravan), so it lives in the one module both include.
+#
+# The {data, len, cap} header is lib/vec.cyr's own (vec_new_a writes the same three slots), so
+# vec_push/vec_get treat the result as any other vec and still grow it past n. A caller that
+# fills the buffer through load64(v) instead of vec_push stores the final length at v + 8.
+#must_use
+fn n_vec_with_cap(n) {
+    if (n <= 0) { return vec_new(); }
+    if (n > VEC_CAP_MAX) { return 0; }
+    var v = alloc(24);
+    if (v == 0) { return 0; }
+    var data = alloc(n * 8);
+    if (data == 0) { return 0; }
+    store64(v, data);
+    store64(v + 8, 0);
+    store64(v + 16, n);
+    return v;
 }

@@ -60,3 +60,19 @@ asserts both the finiteness and the specific bound, so neither can drift silentl
   implementation has, and would need the same treatment applied consistently across every
   clamped builder to avoid being more confusing than what it replaces. Revisit if a caller ever
   reports the hard-left-pan surprise.
+
+## Amendment (2.2.2, 2026-11-18): normalize leaves the data alone when its gain is not finite
+
+This ADR's rationale is that a non-finite value must not get into audio through a parameter. 2.2.2
+closes two more doors of the same kind, where clamping has no bound to clamp to, so the rule is
+"leave the data unchanged" instead:
+
+- `n_normalize_rms(s, target)` with a NaN or ±Inf `target_rms` wrote NaN or ±Inf into every sample
+  (100 of 100 in the audit probe). It now returns without touching the data when the RMS or the
+  gain is not finite.
+- `n_normalize_peak(s)` on a take holding one +Inf computed a gain of 1/Inf = 0, which is finite.
+  That erased the take, and turned the Inf into NaN (Inf × 0). It now returns without touching the
+  data when the peak is not finite.
+
+Both are oracle-faithful defects: Rust computed the same gains. A finite input normalizes exactly
+as before.

@@ -59,3 +59,16 @@ test does not depend on the source material.
 - **Apply it per sample in the render loop.** Same result, measurably worse: an `f64_pow` per
   sample per voice for a value that is constant across the voice's life. This is the same mistake
   2.0.7 removed for filter key-tracking.
+
+## Amendment (2.2.2, 2026-11-18): the value is clamped where it is applied
+
+The Context above says `volume_db` was "clamped" on its way to the zone. It was not:
+`n_zone_with_volume` stored it as parsed, as the oracle did. Before this ADR that was harmless,
+because nothing read it. Once note_on applied it, SFZ `volume=nan`, `volume=inf` or a 400-digit
+number put a non-finite value in every output sample (1000 of 1000 in the 2.2.2 audit probe), and
+a NaN reaching a filtered voice latches its SVF ([ADR 0002](0002-nan-clamps-to-the-bound.md)).
+
+note_on now clamps to [-144, +24] dB (`n_volume_db_clamp`) before converting. -144 dB is SFZ's
+floor, and +24 dB is well past SFZ's +6 dB ceiling. NaN takes the low bound, as ADR 0002 decides,
+which is silence. The stored field keeps the raw value, so `NZone_volume_db` still reads what the
+oracle stored.

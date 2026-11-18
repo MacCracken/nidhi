@@ -102,6 +102,37 @@ fn main() {
     assert(NEffectSlot_state(n_effect_chain_slot(okc, 0)) > 0, "a sane sample rate still builds the delay");
     assert_eq(NEffectSlot_state_type(rslot), FX_REVERB, "state_type unchanged by the retag");
 
+    # --- 2.2.2: the reverb and chorus slots get the parameters the oracle meant (ADR 0011) ---
+    # The reverb received the sample rate as its decay and 0.6 as its sample rate, so every comb
+    # was 1 sample long and an impulse left nothing after 10 ms. The chorus received seconds where
+    # naad takes milliseconds, so its delay line was 1 sample long and it passed input through.
+    test_group("reverb has a tail (2.2.2)");
+    var rv = n_effect_chain_new(f64_from(44100));
+    ignore(n_effect_chain_add(rv, FX_REVERB));
+    assert(NEffectSlot_state(n_effect_chain_slot(rv, 0)) > 0, "reverb builds at the real sample rate");
+    var rv_tail = 0;
+    var rvi = 0;
+    while (rvi < 22050) {
+        var rx = 0;
+        if (rvi == 0) { rx = F64_ONE; }
+        var ry = n_effect_chain_process_sample(rv, rx);
+        if (rvi >= 441) { rv_tail = f64_add(rv_tail, f64_mul(ry, ry)); }
+        rvi = rvi + 1;
+    }
+    assert(f64_gt(rv_tail, f64_div(F64_ONE, f64_from(100))) == 1, "an impulse still rings 10 ms to 0.5 s later");
+
+    test_group("chorus changes its input (2.2.2)");
+    var cho = n_effect_chain_new(f64_from(44100));
+    ignore(n_effect_chain_add(cho, FX_CHORUS));
+    var cho_diff = 0;
+    var chi = 0;
+    while (chi < 4000) {
+        var cx = f64_div(f64_from(((chi * 7919) % 2001) - 1000), f64_from(1000));
+        if (n_effect_chain_process_sample(cho, cx) != cx) { cho_diff = cho_diff + 1; }
+        chi = chi + 1;
+    }
+    assert(cho_diff > 3000, "most of 4000 samples differ from the dry input");
+
     return assert_summary();
 }
 

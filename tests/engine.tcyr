@@ -212,10 +212,19 @@ fn fn_vol_check() {
 
 
 # Bytes allocated across N note_on/note_off pairs on an already-warmed engine.
+# Warm-up first: each voice builds its two SVFs lazily on its first filtered note (nvf_reinit),
+# once for its whole life. Since 2.2.2 (ADR 0006) a note goes to a voice that is really free,
+# so with no render between on and off the 8 voices are all still releasing and every pair
+# lands on a new voice until all 8 are warm. One full pass of the loop warms them all; the
+# measured pass after it must then allocate exactly nothing.
 fn noteon_bytes(pairs) {
     var e = eng_leak_build(8, FILTER_LOWPASS);
-    ignore(n_engine_note_on(e, 60, 100));
-    n_engine_note_off(e, 60);
+    var w = 0;
+    while (w < pairs) {
+        ignore(n_engine_note_on(e, 60 + (w % 12), 100));
+        n_engine_note_off(e, 60 + (w % 12));
+        w = w + 1;
+    }
     var before = alloc_used();
     var i = 0;
     while (i < pairs) {
@@ -226,6 +235,87 @@ fn noteon_bytes(pairs) {
     return alloc_used() - before;
 }
 
+
+# ---------------------------------------------------------------------------------------------
+# 2.2.2 sweep helpers. Constant (or arithmetic) sample data, so nothing here depends on f64_sin.
+# ---------------------------------------------------------------------------------------------
+
+# 1-zone engine over all keys with `frames` frames of constant 0.5 at sample rate `ssr`.
+fn sw_engine(nv, frames, ssr, esr) {
+    var e = n_engine_new(nv, f64_from(esr));
+    var d = vec_new();
+    var i = 0;
+    while (i < frames) { vec_push(d, F64_HALF); i = i + 1; }
+    var sid = n_sample_bank_add(n_engine_bank(e), n_sample_from_mono(d, ssr));
+    var inst = n_instrument_new(str_from("sw"));
+    var z = n_zone_with_loop(n_zone_with_key_range(n_zone_new(sid), 0, 127), LOOP_FORWARD, 0, 0);
+    n_instrument_add_zone(inst, z);
+    ignore(n_engine_set_instrument(e, inst));
+    return e;
+}
+
+fn sw_energy(e, n) {
+    var s = 0;
+    var i = 0;
+    while (i < n) { s = f64_add(s, f64_abs(n_engine_next_sample(e))); i = i + 1; }
+    return s;
+}
+
+# Render `n` mono samples and count the non-finite ones.
+fn sw_nonfinite(e, n) {
+    var bad = 0;
+    var i = 0;
+    while (i < n) { if (n_is_finite(n_engine_next_sample(e)) == 0) { bad = bad + 1; } i = i + 1; }
+    return bad;
+}
+
+# Engine with one filtered zone (8 kHz, vel_track `vt`) over a 50-frame sawtooth.
+fn sw_filtered(vt) {
+    var e = n_engine_new(2, f64_from(44100));
+    var d = vec_new();
+    var i = 0;
+    while (i < 20000) { vec_push(d, f64_div(f64_from(i % 50), f64_from(50))); i = i + 1; }
+    var sid = n_sample_bank_add(n_engine_bank(e), n_sample_from_mono(d, 44100));
+    var inst = n_instrument_new(str_from("f"));
+    n_instrument_add_zone(inst, n_zone_with_filter(n_zone_with_key_range(n_zone_new(sid), 0, 127), f64_from(8000), vt));
+    ignore(n_engine_set_instrument(e, inst));
+    return e;
+}
+fn sw_cutoff(e) {
+    var v = vec_get(NSamplerEngine_voices(e), 0);
+    return f64_to(filter_svf_frequency(NVoiceFilter_filter_l(NSamplerVoice_filter(v))));
+}
+
+# Largest frame-to-frame jump (x1e6) after a LoopSustain voice on a 400-frame ramp is released
+# at frame 50 and plays straight through loop_end (loop 100..200).
+fn sw_sustain_jump(xfade) {
+    var e = n_engine_new(2, f64_from(44100));
+    n_engine_set_release_ms(e, f64_from(100000));
+    var d = vec_new();
+    var i = 0;
+    while (i < 400) { vec_push(d, f64_div(f64_from(i), f64_from(400))); i = i + 1; }
+    var sid = n_sample_bank_add(n_engine_bank(e), n_sample_from_mono(d, 44100));
+    var inst = n_instrument_new(str_from("r"));
+    var z = n_zone_with_loop(n_zone_with_key_range(n_zone_new(sid), 0, 127), LOOP_SUSTAIN, 100, 200);
+    n_instrument_add_zone(inst, n_zone_with_crossfade(z, xfade));
+    ignore(n_engine_set_instrument(e, inst));
+    ignore(n_engine_note_on(e, 60, 127));
+    var o = alloc(16);
+    var prev = 0;
+    var worst = 0;
+    var f = 0;
+    while (f < 300) {
+        if (f == 50) { n_engine_note_off(e, 60); }
+        n_engine_next_sample_stereo(e, o);
+        if (f > 150) {
+            var dl = f64_abs(f64_sub(load64(o), prev));
+            if (f64_gt(dl, worst) == 1) { worst = dl; }
+        }
+        prev = load64(o);
+        f = f + 1;
+    }
+    return f64_to(f64_mul(worst, f64_from(1000000)));
+}
 
 fn main() {
     alloc_init();
@@ -606,6 +696,202 @@ fn main() {
     var igood = make_engine_modulated(f64_from(44100));
     assert(NSamplerVoice_pitch_lfo(vec_get(NSamplerEngine_voices(igood), 0)) > 0, "a real rate still gets its LFOs");
 
+    # =========================================================================================
+    # 2.2.2 sweep. Every group below failed on 2.2.1.
+    # =========================================================================================
+
+    test_group("a re-armed envelope starts from silence (2.2.2)");
+    # A one-shot that runs off its sample while held leaves its envelope in SUSTAIN at 1.0.
+    # note_on + note_off in one MIDI block then released from that stale level.
+    var w_se_fresh = sw_engine(1, 2000, 44100, 44100);
+    NSamplerEngine_set_instrument(w_se_fresh, NSamplerEngine_instrument(w_se_fresh));
+    var w_se_r = sw_engine(1, 2000, 44100, 44100);
+    var w_se_z = vec_get(NInstrument_zones(NSamplerEngine_instrument(w_se_r)), 0);
+    NZone_set_loop_mode(w_se_z, LOOP_ONESHOT);
+    NZone_set_loop_mode(vec_get(NInstrument_zones(NSamplerEngine_instrument(w_se_fresh)), 0), LOOP_ONESHOT);
+    n_engine_set_release_ms(w_se_fresh, f64_from(500));
+    n_engine_set_release_ms(w_se_r, f64_from(500));
+    ignore(n_engine_note_on(w_se_fresh, 60, 127));
+    n_engine_note_off(w_se_fresh, 60);
+    var w_se_e0 = sw_energy(w_se_fresh, 1500);
+    ignore(n_engine_note_on(w_se_r, 60, 127));
+    ignore(sw_energy(w_se_r, 3000));
+    n_engine_note_off(w_se_r, 60);
+    ignore(n_engine_note_on(w_se_r, 60, 127));
+    n_engine_note_off(w_se_r, 60);
+    var w_se_e1 = sw_energy(w_se_r, 1500);
+    assert_eq(w_se_e1, w_se_e0, "a reused voice releases exactly like a fresh one");
+    var w_se_env = NSamplerVoice_amp_env(vec_get(NSamplerEngine_voices(w_se_r), 0));
+    ignore(n_amp_envelope_rearm(w_se_env, n_adsr_config_default(), f64_from(44100)));
+    assert_eq(Adsr_current_value(w_se_env), 0, "rearm zeroes current_value, as the constructor does");
+    assert_eq(envelope_adsr_state(w_se_env), ENV_STATE_IDLE, "rearm leaves the envelope IDLE");
+
+    test_group("set_bank refuses 0 and error codes (2.2.2)");
+    var w_sb = sw_engine(2, 100, 44100, 44100);
+    var w_sb_bank = n_engine_bank(w_sb);
+    assert_eq(n_engine_set_bank(w_sb, NIDHI_ERR_IMPORT), NIDHI_ERR_INVALID_PARAMETER, "negative code refused");
+    assert_eq(n_engine_set_bank(w_sb, 0), NIDHI_ERR_INVALID_PARAMETER, "0 refused");
+    assert_eq(n_engine_bank(w_sb), w_sb_bank, "the bank is unchanged");
+    ignore(n_engine_note_on(w_sb, 60, 100));
+    assert(f64_gt(sw_energy(w_sb, 100), 0) == 1, "and the engine still renders");
+
+    test_group("a negative envelope config is no config (2.2.2)");
+    var w_nz = n_zone_with_adsr(n_zone_new(0), NIDHI_ERR_INVALID_PARAMETER);
+    assert_eq(NZone_adsr(w_nz), 0, "zone stores 0, not the code");
+    w_nz = n_zone_with_filter_envelope(w_nz, NIDHI_ERR_INVALID_PARAMETER, f64_from(1200));
+    assert_eq(NZone_fileg(w_nz), 0, "filter envelope stores 0, not the code");
+    var w_nc = sw_engine(2, 1000, 44100, 44100);
+    var w_ncz = vec_get(NInstrument_zones(NSamplerEngine_instrument(w_nc)), 0);
+    NZone_set_adsr(w_ncz, NIDHI_ERR_IMPORT);
+    NZone_set_fileg(w_ncz, NIDHI_ERR_IMPORT);
+    assert(n_engine_note_on(w_nc, 60, 100) >= 0, "a code written straight to the zone does not crash note_on");
+    assert(f64_gt(sw_energy(w_nc, 100), 0) == 1, "and the note plays on the engine default");
+
+    test_group("non-finite volume stays out of the mix (2.2.2)");
+    var w_vn = sw_engine(2, 4000, 44100, 44100);
+    var w_vnz = vec_get(NInstrument_zones(NSamplerEngine_instrument(w_vn)), 0);
+    n_ignore(n_zone_with_volume(w_vnz, 0x7FF8000000000000));
+    assert_eq(NZone_volume_db(w_vnz), 0x7FF8000000000000, "the stored field keeps the raw value (oracle)");
+    ignore(n_engine_note_on(w_vn, 60, 100));
+    assert_eq(sw_nonfinite(w_vn, 1000), 0, "volume=NaN renders finite");
+    var w_vi = sw_engine(2, 4000, 44100, 44100);
+    n_ignore(n_zone_with_volume(vec_get(NInstrument_zones(NSamplerEngine_instrument(w_vi)), 0), 0x7FF0000000000000));
+    ignore(n_engine_note_on(w_vi, 60, 100));
+    assert_eq(sw_nonfinite(w_vi, 1000), 0, "volume=+Inf renders finite");
+    assert_eq(n_volume_db_clamp(0x7FF8000000000000), f64_from(0 - 144), "NaN takes the low bound (ADR 0002)");
+    assert_eq(n_volume_db_clamp(f64_from(-6)), f64_from(-6), "an ordinary level passes through");
+
+    test_group("a NaN pitch bend does not stick (2.2.2)");
+    var w_pb = sw_engine(2, 4000, 44100, 44100);
+    ignore(n_engine_note_on(w_pb, 60, 127));
+    ignore(sw_energy(w_pb, 100));
+    n_engine_apply_pitch_bend(w_pb, 60, 0x7FF8000000000000);
+    assert_eq(sw_nonfinite(w_pb, 10), 0, "the NaN bend renders finite");
+    n_engine_apply_pitch_bend(w_pb, 60, 0);
+    assert(f64_gt(sw_energy(w_pb, 4000), F64_ONE) == 1, "the note is audible once the bend is back at 0");
+
+    test_group("the cutoff smoother snaps to the first frame's target (2.2.2)");
+    var w_sm = sw_filtered(0);
+    ignore(n_engine_note_on(w_sm, 60, 127));
+    ignore(n_engine_next_sample(w_sm));
+    assert_eq(sw_cutoff(w_sm), 6000, "8 kHz x brightness 0.75 from the first frame, no onset sweep");
+
+    test_group("filter velocity tracking lasts the note (2.2.2, ADR 0007)");
+    var w_vh = sw_filtered(F64_ONE);
+    var w_vl = sw_filtered(F64_ONE);
+    ignore(n_engine_note_on(w_vh, 60, 127));
+    ignore(n_engine_note_on(w_vl, 60, 16));
+    ignore(sw_energy(w_vh, 2000));
+    ignore(sw_energy(w_vl, 2000));
+    assert_eq(sw_cutoff(w_vh), 6000, "velocity 127 keeps the full cutoff");
+    assert(sw_cutoff(w_vl) < sw_cutoff(w_vh) / 2, "velocity 16 stays darker after 2000 frames");
+    var w_rv0 = sw_filtered(0);
+    ignore(n_engine_note_on(w_rv0, 60, 16));
+    ignore(sw_energy(w_rv0, 2000));
+    assert_eq(sw_cutoff(w_rv0), 6000, "vel_track 0 ignores velocity, as before");
+
+    test_group("a released sustain loop does not crossfade (2.2.2, ADR 0008)");
+    var w_sj0 = sw_sustain_jump(0);
+    var w_sj20 = sw_sustain_jump(20);
+    assert(w_sj20 < w_sj0 * 2, "the pass-through after release has no crossfade click");
+
+    test_group("nidhi's voice state decides allocation (2.2.2, ADR 0006)");
+    var w_da = sw_engine(8, 20000, 44100, 44100);
+    n_engine_set_release_ms(w_da, f64_from(500));
+    ignore(n_engine_note_on(w_da, 60, 100));
+    ignore(sw_energy(w_da, 100));
+    n_engine_note_off(w_da, 60);
+    ignore(sw_energy(w_da, 100));
+    ignore(n_engine_note_on(w_da, 64, 100));
+    assert_eq(n_engine_has_active_note(w_da, 60), 1, "a release tail survives a new note while voices are free");
+    assert_eq(n_engine_active_voice_count(w_da), 2, "tail + new note");
+    var w_db = sw_engine(4, 20000, 44100, 44100);
+    n_engine_set_release_ms(w_db, f64_from(5));
+    var w_dk = 0;
+    while (w_dk < 3) {
+        ignore(n_engine_note_on(w_db, 60 + w_dk, 100));
+        ignore(n_engine_note_on(w_db, 60 + w_dk, 100));
+        n_engine_note_off(w_db, 60 + w_dk);
+        w_dk = w_dk + 1;
+    }
+    ignore(sw_energy(w_db, 44100));
+    assert_eq(n_engine_active_voice_count(w_db), 0, "every voice has finished");
+    ignore(n_engine_note_on(w_db, 70, 100));
+    ignore(n_engine_note_on(w_db, 72, 100));
+    ignore(n_engine_note_on(w_db, 76, 100));
+    assert_eq(n_engine_active_voice_count(w_db), 3, "a retriggered note no longer leaks a voice");
+
+    test_group("playback speed includes the sample rate (2.2.2, ADR 0009)");
+    var w_r48 = sw_engine(2, 1000, 48000, 44100);
+    ignore(n_engine_note_on(w_r48, 60, 100));
+    var w_r48v = vec_get(NSamplerEngine_voices(w_r48), 0);
+    assert_eq(NSamplerVoice_speed(w_r48v), f64_div(f64_from(48000), f64_from(44100)), "48 kHz in a 44.1 kHz engine: speed 48000/44100");
+    var w_r22 = sw_engine(2, 1000, 22050, 44100);
+    ignore(n_engine_note_on(w_r22, 72, 100));
+    assert_eq(NSamplerVoice_speed(vec_get(NSamplerEngine_voices(w_r22), 0)), F64_ONE, "22.05 kHz an octave up plays at 1.0");
+    var w_r44 = sw_engine(2, 1000, 44100, 44100);
+    ignore(n_engine_note_on(w_r44, 60, 100));
+    assert_eq(NSamplerVoice_speed(vec_get(NSamplerEngine_voices(w_r44), 0)), F64_ONE, "matching rates keep the exact ratio");
+    var w_r0 = sw_engine(2, 1000, 0, 44100);
+    ignore(n_engine_note_on(w_r0, 60, 100));
+    assert_eq(NSamplerVoice_speed(vec_get(NSamplerEngine_voices(w_r0), 0)), F64_ONE, "a sample without a rate is not rescaled");
+
+    test_group("the engine holds at most naad's 128 voices (2.2.2)");
+    var w_mv = n_engine_new(4096, f64_from(44100));
+    assert_eq(vec_len(NSamplerEngine_voices(w_mv)), 128, "4096 requested, 128 built");
+    assert_eq(vec_len(NSamplerEngine_voices(n_engine_new(20000000, f64_from(44100)))), 128, "20M requested does not exhaust the heap");
+
+    test_group("the ADSR setters allocate nothing (2.2.2)");
+    var w_as = n_engine_new(4, f64_from(44100));
+    var w_acfg2 = n_adsr_config_new(0, 0, F64_ONE, 100);
+    var w_as_before = alloc_used();
+    var w_ai = 0;
+    while (w_ai < 1000) {
+        n_engine_set_release_ms(w_as, f64_from(10 + w_ai % 50));
+        ignore(n_engine_set_adsr(w_as, w_acfg2));
+        w_ai = w_ai + 1;
+    }
+    assert_eq(alloc_used() - w_as_before, 0, "1000 set_release_ms + set_adsr calls: 0 bytes");
+    n_engine_set_release_ms(w_as, f64_from(10));
+    assert_eq(NAdsrConfig_release_samples(NSamplerEngine_default_adsr(w_as)), 441, "set_release_ms still sets 10 ms");
+
+
+    test_group("note_on round-robins (2.2.2, ADR 0012)");
+    # Two zones on one key in RR group 1. The oracle's note_on played the first match only.
+    var w_rre = n_engine_new(8, f64_from(44100));
+    var w_rrd = vec_new();
+    var w_rri = 0;
+    while (w_rri < 4000) { vec_push(w_rrd, F64_HALF); w_rri = w_rri + 1; }
+    var w_rrs = n_sample_bank_add(n_engine_bank(w_rre), n_sample_from_mono(w_rrd, 44100));
+    var w_rrinst = n_instrument_new(str_from("rr"));
+    n_instrument_add_zone(w_rrinst, n_zone_with_group(n_zone_with_key_range(n_zone_new(w_rrs), 60, 60), 1));
+    n_instrument_add_zone(w_rrinst, n_zone_with_group(n_zone_with_key_range(n_zone_new(w_rrs), 60, 60), 1));
+    ignore(n_engine_set_instrument(w_rre, w_rrinst));
+    var w_nv0 = n_engine_note_on(w_rre, 60, 100);
+    var w_nv1 = n_engine_note_on(w_rre, 60, 100);
+    var w_nv2 = n_engine_note_on(w_rre, 60, 100);
+    assert_eq(NSamplerVoice_zone_index(vec_get(NSamplerEngine_voices(w_rre), w_nv0)), 0, "note 1 plays zone 0");
+    assert_eq(NSamplerVoice_zone_index(vec_get(NSamplerEngine_voices(w_rre), w_nv1)), 1, "note 2 plays zone 1");
+    assert_eq(NSamplerVoice_zone_index(vec_get(NSamplerEngine_voices(w_rre), w_nv2)), 0, "note 3 plays zone 0 again");
+    # An SFZ-style sequence through note_on.
+    var w_sqe = n_engine_new(8, f64_from(44100));
+    var w_sqs = n_sample_bank_add(n_engine_bank(w_sqe), n_sample_from_mono(w_rrd, 44100));
+    var w_sqinst = n_instrument_new(str_from("sq"));
+    n_instrument_add_zone(w_sqinst, n_zone_with_seq(n_zone_with_key_range(n_zone_new(w_sqs), 60, 60), 2, 1));
+    n_instrument_add_zone(w_sqinst, n_zone_with_seq(n_zone_with_key_range(n_zone_new(w_sqs), 60, 60), 2, 2));
+    ignore(n_engine_set_instrument(w_sqe, w_sqinst));
+    var w_q0 = n_engine_note_on(w_sqe, 60, 100);
+    var w_q1 = n_engine_note_on(w_sqe, 60, 100);
+    assert_eq(NSamplerVoice_zone_index(vec_get(NSamplerEngine_voices(w_sqe), w_q0)), 0, "seq step 1 plays position 1");
+    assert_eq(NSamplerVoice_zone_index(vec_get(NSamplerEngine_voices(w_sqe), w_q1)), 1, "seq step 2 plays position 2");
+    var w_rrb = alloc_used();
+    var w_rk = 0;
+    while (w_rk < 100) {
+        ignore(n_engine_note_on(w_rre, 60, 100));
+        ignore(n_engine_note_on(w_sqe, 60, 100));
+        w_rk = w_rk + 1;
+    }
+    assert_eq(alloc_used() - w_rrb, 0, "round-robin and sequenced note_ons allocate nothing");
     return assert_summary();
 }
 
